@@ -16,8 +16,8 @@
 #                浮现未解决记忆 或 按关键词检索
 #       hold   — Store a single memory
 #                存储单条记忆
-#       grow   — Diary digest, auto-split into multiple buckets
-#                日记归档，自动拆分多桶
+#       grow   — Long-note memory digest, auto-split selected content into buckets
+#                长内容摘记，筛选后拆分多桶
 #       trace  — Modify metadata / resolved / delete
 #                修改元数据 / resolved 标记 / 删除
 #       pulse  — System status + bucket listing
@@ -1130,7 +1130,7 @@ async def hold(
 # =============================================================
 @mcp.tool()
 async def grow(content: str) -> str:
-    """日记归档,自动拆分为多桶。短内容(<30字)走快速路径。"""
+    """长内容摘记,将筛选后的长期记忆内容拆分为多桶。短内容(<30字)走快速路径。"""
     await decay_engine.ensure_started()
 
     if not content or not content.strip():
@@ -1168,8 +1168,8 @@ async def grow(content: str) -> str:
     try:
         items = await dehydrator.digest(content)
     except Exception as e:
-        logger.error(f"Diary digest failed / 日记整理失败: {e}")
-        return f"日记整理失败: {e}"
+        logger.error(f"Memory digest failed / 长内容摘记失败: {e}")
+        return f"长内容摘记失败: {e}"
 
     if not items:
         return "内容为空或整理失败。"

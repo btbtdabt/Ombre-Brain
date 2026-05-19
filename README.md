@@ -951,7 +951,7 @@ breath(query="今天很累")
 | `breath` | 浮现或检索记忆。无参数=推送未解决记忆；有参数=关键词+向量语义双通道检索。支持 `include_related / related_per_memory / edge_min_confidence` 沿显式关系边带出一跳关联记忆；支持 `include_core / core_limit` 控制 pinned/protected 核心记忆数量 / Surface or search memories. Can include one-hop related memories from explicit edges and limit core pinned/protected memories |
 | `read_bucket` | 按 `bucket_id` 精确读取完整正文和元数据，不触碰 `last_active`，用于“我知道是哪一条，直接读这一条”的场景 / Exact full bucket read by id without refreshing activation |
 | `hold` | 存储单条记忆，自动打标+合并相似桶+生成 embedding。`feel=True` 写模型自己的感受 / Store a single memory with auto-tagging, merging, and embedding. `feel=True` for model's own reflections |
-| `grow` | 日记归档，自动拆分长内容为多个记忆桶，每个桶自动生成 embedding / Diary digest, auto-split into multiple buckets with embeddings |
+| `grow` | 长内容摘记：仅在明确需要整理长期记忆时，把筛选后的长内容拆成多个记忆桶并生成 embedding；不要默认拆整篇日记 / Long-note memory digest for selected durable content, not automatic whole-diary import |
 | `trace` | 修改元数据、标记已解决、删除；`anchor=1` 标为长期锚点，默认最多 24 条且需放置一段时间后再标 / Modify metadata, mark resolved, anchor, or delete |
 | `pulse` | 系统状态 + 所有记忆桶列表 / System status + bucket listing |
 | `dream` | 对话开头自省消化——读最近记忆，有沉淀写 feel，能放下就 resolve / Self-reflection at conversation start |
