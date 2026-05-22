@@ -1200,6 +1200,7 @@ const PATH_PREFIX = location.pathname.replace(/\/dashboard\/?$/, '');
 const BASE = location.origin + PATH_PREFIX;
 let allBuckets = [];
 let currentFilter = 'all';
+let dashboardCommentAuthor = 'Rain';
 
 function authUrl(path) {
   return path.startsWith('http') ? path : BASE + path;
@@ -1232,6 +1233,9 @@ async function checkAuth() {
   try {
     const response = await fetch(authUrl('/auth/status'));
     const data = await response.json();
+    if (data.identity && data.identity.user_name) {
+      dashboardCommentAuthor = data.identity.user_name;
+    }
     if (data.authenticated) {
       document.getElementById('auth-overlay').style.display = 'none';
       return true;
@@ -1428,7 +1432,7 @@ async function showDetail(id) {
     var comments = Array.isArray(meta.comments) ? meta.comments : [];
     var commentsHtml = comments.length
       ? '<div class="detail-comments"><h3>年轮</h3>' + comments.map(function(c) {
-          var canDelete = c && c.id && c.author === 'Rain' && c.source === 'dashboard';
+          var canDelete = c && c.id && c.author === dashboardCommentAuthor && c.source === 'dashboard';
           var commentTime = c.original_feel_created || c.created || '';
           return '<div class="comment-item">' +
             (canDelete ? '<button type="button" class="comment-delete-button" title="删除" aria-label="删除" onclick="deleteBucketComment(\'' + id + '\', \'' + esc(c.id) + '\')">×</button>' : '') +

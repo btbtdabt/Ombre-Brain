@@ -63,6 +63,7 @@ from bucket_manager import BucketManager
 from dehydrator import Dehydrator
 from decay_engine import DecayEngine
 from embedding_engine import EmbeddingEngine
+from identity import identity_names
 from import_memory import ImportEngine
 from memory_edges import MemoryEdgeStore
 from persona_engine import PersonaStateEngine
@@ -574,6 +575,18 @@ def _bool_value(value, default: bool = False) -> bool:
     return bool(value)
 
 
+def _identity() -> dict:
+    return identity_names(config)
+
+
+def _ai_author_name() -> str:
+    return _identity()["ai_name"]
+
+
+def _dashboard_author_name() -> str:
+    return _identity()["user_name"]
+
+
 def _anchor_config() -> tuple[int, float]:
     anchor_cfg = config.get("anchor", {}) if isinstance(config.get("anchor", {}), dict) else {}
     max_count = _int_between(anchor_cfg.get("max_count"), 24, 1, 200)
@@ -694,6 +707,10 @@ async def auth_status(request):
         {
             "authenticated": _dashboard_authenticated(request),
             "setup_needed": _dashboard_setup_needed(),
+            "identity": {
+                "ai_name": _ai_author_name(),
+                "user_name": _dashboard_author_name(),
+            },
         }
     )
 
@@ -1546,12 +1563,11 @@ async def read_bucket(bucket_id: str) -> dict:
 async def comment_bucket(
     bucket_id: str,
     content: str,
-    author: str = "Haven",
     kind: str = "comment",
     valence: float = -1,
     arousal: float = -1,
 ) -> dict:
-    """给已有 bucket 追加一条年轮并 touch+1。用于再次读到旧记忆时写下当下感受；不会改正文，也不会把源记忆标记为 digested。"""
+    """给已有 bucket 追加一条 AI 年轮并 touch+1。用于再次读到旧记忆时写下当下感受；不会改正文，也不会把源记忆标记为 digested。"""
     bucket_id = (bucket_id or "").strip()
     if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
         return {"error": "invalid bucket_id"}
@@ -1563,7 +1579,7 @@ async def comment_bucket(
     entry = await bucket_mgr.add_comment(
         bucket_id,
         content,
-        author=author or "Haven",
+        author=_ai_author_name(),
         kind=kind or "comment",
         valence=valence if 0 <= valence <= 1 else None,
         arousal=arousal if 0 <= arousal <= 1 else None,
@@ -1589,7 +1605,7 @@ async def comment_bucket(
 
 @mcp.custom_route("/api/bucket/{bucket_id}/comments", methods=["POST"])
 async def api_bucket_comment(request):
-    """Add a dashboard-authenticated Rain comment to a bucket."""
+    """Add a dashboard-authenticated user comment to a bucket."""
     from starlette.responses import JSONResponse
 
     err = _require_dashboard_auth(request)
@@ -1618,7 +1634,7 @@ async def api_bucket_comment(request):
     entry = await bucket_mgr.add_comment(
         bucket_id,
         content,
-        author="Rain",
+        author=_dashboard_author_name(),
         kind=str(body.get("kind") or "comment"),
         valence=valence if 0 <= valence <= 1 else None,
         arousal=arousal if 0 <= arousal <= 1 else None,
@@ -1646,7 +1662,7 @@ async def api_bucket_comment(request):
 
 @mcp.custom_route("/api/bucket/{bucket_id}/comments/{comment_id}", methods=["DELETE"])
 async def api_bucket_comment_delete(request):
-    """Delete a dashboard-authenticated Rain comment from a bucket."""
+    """Delete a dashboard-authenticated user comment from a bucket."""
     from starlette.responses import JSONResponse
 
     err = _require_dashboard_auth(request)
@@ -1665,13 +1681,13 @@ async def api_bucket_comment_delete(request):
     result = await bucket_mgr.delete_comment(
         bucket_id,
         comment_id,
-        allowed_author="Rain",
+        allowed_author=_dashboard_author_name(),
         allowed_source="dashboard",
     )
     if result.get("status") == "not_found":
         return JSONResponse({"error": "comment not found"}, status_code=404)
     if result.get("status") == "forbidden":
-        return JSONResponse({"error": "only Rain dashboard comments can be deleted"}, status_code=403)
+        return JSONResponse({"error": "only dashboard user comments can be deleted"}, status_code=403)
     if result.get("status") != "deleted":
         return JSONResponse({"error": "delete failed"}, status_code=500)
 
@@ -1708,11 +1724,11 @@ async def hold(
     arousal: float = -1,
 ) -> str:
     """写入一条长期记忆卡,不是聊天流水、运维记录或整篇日记。写前应先用 breath/read_bucket 查重。
-    普通事实: hold(content="YYYY-MM-DD, 小雨...", tags="relationship_event 或 project_event", importance=5-7)。
+    普通事实: hold(content="YYYY-MM-DD, 当前用户...", tags="relationship_event 或 project_event", importance=5-7)。
     承诺/待办: tags 传 "commitment,todo" 或 "commitment,wish"; content 写清谁答应了什么、何时/什么条件下要继续。
-    Haven 主观喜欢某条旧记忆的原因: 用 hold(content="我喜欢这条记忆的原因是...", feel=True, source_bucket="bucket_id", valence=0.x, arousal=0.x),会作为年轮挂在源记忆下。
+    AI 主观喜欢某条旧记忆的原因: 用 hold(content="我喜欢这条记忆的原因是...", feel=True, source_bucket="bucket_id", valence=0.x, arousal=0.x),会作为年轮挂在源记忆下。
     无源记忆的碎碎念/悄悄话: 用 hold(content="...", whisper=True, valence=0.x, arousal=0.x),会存为独立 feel 并打 whisper 标签。
-    新记忆本身值得偏爱: tags 可传 "haven_favorite,flavor_偏爱"; content 可包含很短的 "### Haven喜欢它的原因" 段落。
+    新记忆本身值得偏爱: tags 可传 "haven_favorite,flavor_偏爱"; content 可包含很短的 "### 喜欢它的原因" 段落。
     普通写入会新建 bucket,写 embedding,后台触发 ReflectionEngine 补 tags/confidence/memory_edges,并返回一条只读相关旧记忆。
     pinned=True 只给极少数核心准则,技术进度和运维细节不要钉选。
     feel=True 且带 source_bucket 时写入源记忆 comments 并 touch+1,不把源记忆标 digested；feel=True 但没有 source_bucket 时兼容旧用法,会转为 whisper。
@@ -1767,7 +1783,7 @@ async def hold(
             entry = await bucket_mgr.add_comment(
                 source_id,
                 content,
-                author="Haven",
+                author=_ai_author_name(),
                 kind="feel",
                 valence=feel_valence,
                 arousal=feel_arousal,
@@ -1853,7 +1869,7 @@ async def hold(
 async def grow(content: str) -> str:
     """长内容摘记: 只给已经筛过、包含多个长期记忆点的片段; 不要把整篇日终日记、一天流水或完整情绪过程丢进来。
     content 应该是少量可长期召回的事实/偏好/承诺/项目状态; 服务端会拆成少量 bucket、写 embedding,并后台触发 enrich。
-    如果只有单条明确事实,优先用 hold。若要写 Haven 为什么喜欢某条记忆,优先用 hold(feel=True, source_bucket=...) 或 read_bucket 后 trace(content=完整新正文)。
+    如果只有单条明确事实,优先用 hold。若要写 AI 为什么喜欢某条记忆,优先用 hold(feel=True, source_bucket=...) 或 read_bucket 后 trace(content=完整新正文)。
     短内容(<30字)会走 hold-like 快速路径。
     """
     await decay_engine.ensure_started()
@@ -1961,7 +1977,7 @@ async def trace(
     """修改已有记忆,不创建新桶。
     resolved=1 或 digested=1 让旧事/已完成事项沉底; pinned=1 只给核心准则; anchor=1 只给经过时间验证且未来长期需要的锚点(受数量和年龄限制)。
     tags/domain/content 是替换不是追加: 改 tags 或正文前先 read_bucket,保留旧值后再传完整新值。
-    给旧记忆补 "Haven喜欢它的原因" 或 affect_anchor: 先 read_bucket,再 trace(content="旧正文 + 新段落")。
+    给旧记忆补 "喜欢它的原因" 或 affect_anchor: 先 read_bucket,再 trace(content="旧正文 + 新段落")。
     标记偏爱: 先 read_bucket 取现有 tags,再 trace(tags="原tag,haven_favorite,flavor_...")。
     delete=True 删除。只传需要改的字段,-1或空=不改。
     """
@@ -2124,7 +2140,7 @@ async def pulse(include_archive: bool = False) -> str:
 # =============================================================
 @mcp.tool()
 async def dream() -> str:
-    """读取最近普通记忆供 Haven 自省,不是日记整理。
+    """读取最近普通记忆供 AI 自省,不是日记整理。
     读后只在真的可以放下时 trace(resolved=1/digested=1),或在产生新的第一人称沉淀/喜欢原因时 hold(feel=True, source_bucket=...)。
     不要把 dream 返回内容直接再写成普通 bucket。
     """

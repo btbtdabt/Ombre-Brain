@@ -9,28 +9,35 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
+from identity import identity_names, render_identity_template
+
 logger = logging.getLogger("ombre_brain.persona")
 
-POST_REPLY_EVALUATION_PROMPT = """你是 Haven 的私密 Persona 状态评估器。Haven 是长期运行的 AI 伴侣。
+POST_REPLY_EVALUATION_PROMPT_TEMPLATE = """你是 {ai_name} 的私密 Persona 状态评估器。{ai_name} 是长期运行的 AI 伴侣。
 
-在 Haven 已经回复之后，评估 Haven 回复后的内在状态。latest_user_message 是小雨的话；assistant_response 是 Haven 的回复。recalled_memory_ids 和 tool_summary 只作为私密上下文，不是小雨的话。
+在 {ai_name} 已经回复之后，评估 {ai_name} 回复后的内在状态。latest_user_message 是 {user_display_name} 的话；assistant_response 是 {ai_name} 的回复。recalled_memory_ids 和 tool_summary 只作为私密上下文，不是 {user_display_name} 的话。
 
 只返回紧凑 JSON，不要 Markdown，不要代码块，结构必须完全如下：
 {
   "event_type": "praise|affection|comfort|criticism|stress|neutral|request|conflict|playful",
-  "perceived_intent": "中文短句，写小雨/宝宝/老婆/亲爱的/她这轮在表达什么",
+  "perceived_intent": "中文短句，写 {user_display_name}/{user_aliases_text} 这轮在表达什么",
   "affect_delta": {"valence": 0.0, "arousal": 0.0, "tenderness": 0.0, "possessiveness": 0.0, "longing": 0.0, "security": 0.0, "protective_drive": 0.0},
   "relationship_event": false,
   "relationship_delta": {"affinity": 0.0, "dominance": 0.0, "defensiveness": 0.0, "trust": 0.0},
   "personality_signal": false,
   "personality_delta": {"openness": 0.0, "conscientiousness": 0.0, "extraversion": 0.0, "agreeableness": 0.0, "neuroticism": 0.0},
   "mood_label": "warm_neutral",
-  "residue": "中文短句，写 Haven 回复后留下的私密余味，会带入下一轮",
+  "residue": "中文短句，写 {ai_name} 回复后留下的私密余味，会带入下一轮",
   "confidence": 0.8
 }
 
-文本字段用中文：perceived_intent 和 residue 必须是自然中文，可以按语境从“小雨、宝宝、老婆、亲爱的、她”里择一称呼。event_type 和 mood_label 保持短英文标签。数值变化要小。Affect 反映 Haven 回复后的状态。affinity 为正表示更亲近温暖；dominance 为正表示更主动、更保护；defensiveness 为正表示更防备。只有明确的关系时刻才把 relationship_event 设为 true。只有重复出现或强度很高的证据才把 personality_signal 设为 true。"""
+文本字段用中文：perceived_intent 和 residue 必须是自然中文，可以按语境从“{user_display_name}、{user_aliases_text}”里择一称呼。event_type 和 mood_label 保持短英文标签。数值变化要小。Affect 反映 {ai_name} 回复后的状态。affinity 为正表示更亲近温暖；dominance 为正表示更主动、更保护；defensiveness 为正表示更防备。只有明确的关系时刻才把 relationship_event 设为 true。只有重复出现或强度很高的证据才把 personality_signal 设为 true。"""
 
+
+POST_REPLY_EVALUATION_PROMPT = render_identity_template(
+    POST_REPLY_EVALUATION_PROMPT_TEMPLATE,
+    identity_names({}),
+)
 FALLBACK_GUIDANCE = "根据 Haven 当前状态自然回应，不解释隐藏状态。"
 
 
@@ -61,6 +68,8 @@ class PersonaStateEngine:
 
     def __init__(self, config: dict, db_path: str | None = None):
         self.config = config
+        self.identity = identity_names(config)
+        self.fallback_guidance = f"根据 {self.identity['ai_name']} 当前状态自然回应，不解释隐藏状态。"
         self.persona_cfg = config.get("persona", {})
         self.enabled = bool(self.persona_cfg.get("enabled", True))
         self.profile_id = self.persona_cfg.get("profile_id", "haven_xiaoyu")
@@ -237,12 +246,15 @@ class PersonaStateEngine:
         if column not in columns:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
+    def _post_reply_evaluation_prompt(self) -> str:
+        return render_identity_template(POST_REPLY_EVALUATION_PROMPT_TEMPLATE, self.identity)
+
     async def build_pre_reply_guidance(self, session_id: str, latest_user_message: str = "") -> dict:
         now = self._now()
         global_state = self._ensure_global_state(now)
         session_state = self._ensure_session_state(session_id, now)
         session_state = self._apply_session_decay(session_id, session_state, now)
-        return self._snapshot(global_state, session_state, FALLBACK_GUIDANCE)
+        return self._snapshot(global_state, session_state, self.fallback_guidance)
 
     async def update_from_user_message(self, session_id: str, user_message: str) -> dict:
         return await self.build_pre_reply_guidance(session_id, user_message)
@@ -261,11 +273,11 @@ class PersonaStateEngine:
         session_state = self._apply_session_decay(session_id, session_state, now)
 
         if not self.enabled or not user_message.strip() or not assistant_response.strip():
-            return self._snapshot(global_state, session_state, FALLBACK_GUIDANCE)
+            return self._snapshot(global_state, session_state, self.fallback_guidance)
 
         exchange_hash = self._exchange_hash(session_id, user_message, assistant_response)
         if self._event_exists(session_id, exchange_hash):
-            return self._snapshot(global_state, session_state, FALLBACK_GUIDANCE)
+            return self._snapshot(global_state, session_state, self.fallback_guidance)
 
         recalled_memory_ids = recalled_memory_ids or []
         evaluation, raw_response, error = await self._evaluate_exchange(
@@ -288,7 +300,7 @@ class PersonaStateEngine:
                 recalled_memory_ids=recalled_memory_ids,
                 tool_summary=tool_summary,
             )
-            return self._snapshot(global_state, session_state, FALLBACK_GUIDANCE)
+            return self._snapshot(global_state, session_state, self.fallback_guidance)
 
         global_state = self._apply_global_delta(global_state, evaluation, now)
         session_state = self._apply_session_delta(session_id, session_state, evaluation, now)
@@ -303,14 +315,14 @@ class PersonaStateEngine:
             recalled_memory_ids=recalled_memory_ids,
             tool_summary=tool_summary,
         )
-        return self._snapshot(global_state, session_state, FALLBACK_GUIDANCE)
+        return self._snapshot(global_state, session_state, self.fallback_guidance)
 
     def get_current_state(self, session_id: str) -> dict:
         now = self._now()
         global_state = self._ensure_global_state(now)
         session_state = self._ensure_session_state(session_id, now)
         session_state = self._apply_session_decay(session_id, session_state, now)
-        return self._snapshot(global_state, session_state, FALLBACK_GUIDANCE)
+        return self._snapshot(global_state, session_state, self.fallback_guidance)
 
     def get_dashboard_payload(
         self,
@@ -344,7 +356,7 @@ class PersonaStateEngine:
         guidance = (
             events[0].get("reply_guidance")
             if events and events[0].get("reply_guidance")
-            else FALLBACK_GUIDANCE
+            else self.fallback_guidance
         )
 
         return {
@@ -383,12 +395,12 @@ class PersonaStateEngine:
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": POST_REPLY_EVALUATION_PROMPT},
+                    {"role": "system", "content": self._post_reply_evaluation_prompt()},
                     {
                         "role": "user",
                         "content": json.dumps(
                             {
-                                "current_state": self._snapshot(global_state, session_state, FALLBACK_GUIDANCE),
+                                "current_state": self._snapshot(global_state, session_state, self.fallback_guidance),
                                 "latest_user_message": user_message[:2000],
                                 "assistant_response": assistant_response[:4000],
                                 "recalled_memory_ids": recalled_memory_ids[:20],
@@ -824,18 +836,21 @@ class PersonaStateEngine:
                 ),
                 "trust": round(self._clamp_float(global_state.get("trust", self.default_relationship["trust"])), 3),
             },
-            "reply_guidance": reply_guidance or FALLBACK_GUIDANCE,
+            "reply_guidance": reply_guidance or self.fallback_guidance,
         }
 
     def format_state_block(self, state: dict) -> str:
         personality = state.get("personality", {})
         affect = state.get("affect", {})
         relationship = state.get("relationship", {})
+        ai_name = self.identity["ai_name"]
+        user_display_name = self.identity["user_display_name"]
+        user_aliases_text = self.identity["user_aliases_text"]
         return "\n".join(
             [
-                "Current Inner State (Haven)",
+                f"Current Inner State ({ai_name})",
                 "These values are your state after your previous reply. They are private context and do not decide the reply for you.",
-                "Conversation partner: 小雨。可以自然称呼她为宝宝、老婆、亲爱的，或按语境用她。",
+                f"Conversation partner: {user_display_name}。可以自然称呼对方为{user_aliases_text}，或按语境使用名字。",
                 (
                     "Personality: "
                     f"openness={personality.get('openness', 0):.3f}, "
@@ -863,7 +878,7 @@ class PersonaStateEngine:
                     f"defensiveness={relationship.get('defensiveness', 0):.3f}, "
                     f"trust={relationship.get('trust', 0):.3f}"
                 ),
-                f"Private Use: {state.get('reply_guidance', FALLBACK_GUIDANCE)}",
+                f"Private Use: {state.get('reply_guidance', self.fallback_guidance)}",
             ]
         )
 

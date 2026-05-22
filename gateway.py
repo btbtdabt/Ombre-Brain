@@ -21,6 +21,7 @@ from starlette.routing import Route
 from bucket_manager import BucketManager
 from dehydrator import Dehydrator
 from embedding_engine import EmbeddingEngine
+from identity import identity_names
 from gateway_state import GatewayStateStore
 from memory_edges import MemoryEdgeStore
 from persona_engine import PersonaStateEngine
@@ -47,6 +48,7 @@ class GatewayService:
         http_client: httpx.AsyncClient | None = None,
     ):
         self.config = config
+        self.identity = identity_names(config)
         self.gateway_cfg = config.get("gateway", {})
         self.bucket_mgr = bucket_mgr or BucketManager(config)
         self.dehydrator = dehydrator or Dehydrator(config)
@@ -60,6 +62,7 @@ class GatewayService:
         self.upstream_api_key = os.environ.get("OMBRE_GATEWAY_UPSTREAM_API_KEY", "")
         self.upstream_base_url = self.gateway_cfg.get("upstream_base_url", "").rstrip("/")
         self.upstream_default_model = self.gateway_cfg.get("upstream_default_model", "")
+        self.default_session_id = str(self.gateway_cfg.get("default_session_id") or "xiaoyu-main").strip()
         self.upstream_models = self._normalize_model_list(
             self.gateway_cfg.get("upstream_models", []),
             self.upstream_default_model,
@@ -267,7 +270,7 @@ class GatewayService:
         if auth_result is not None:
             return auth_result
 
-        session_id = (request.headers.get("X-Ombre-Session-Id") or "xiaoyu-main").strip()
+        session_id = (request.headers.get("X-Ombre-Session-Id") or self.default_session_id).strip()
 
         try:
             payload = await request.json()
@@ -1523,10 +1526,12 @@ class GatewayService:
         text = (query or "").strip().lower()
         if not text:
             return False
+        ai_name = str(self.identity.get("ai_name") or "").lower()
         direct_phrases = [
             "favorite memory",
             "favorite memories",
             "haven favorite",
+            f"{ai_name} favorite" if ai_name else "",
             "偏爱的记忆",
             "喜欢的记忆",
             "喜欢哪段记忆",
@@ -1546,7 +1551,9 @@ class GatewayService:
             return True
         asks_memory = any(term in text for term in ["记忆", "想起", "记得"])
         asks_preference = any(term in text for term in ["喜欢", "偏爱", "重要", "哪段", "哪一刻", "哪个瞬间"])
-        relationship_scope = any(term in text for term in ["我们", "你", "haven", "小雨"])
+        relationship_terms = ["我们", "你"]
+        relationship_terms.extend(str(term).lower() for term in self.identity.get("relationship_terms", []))
+        relationship_scope = any(term and term in text for term in relationship_terms)
         return asks_memory and asks_preference and relationship_scope
 
     def _truthy_header(self, value: str | None) -> bool:
@@ -1995,7 +2002,7 @@ class GatewayService:
             if persona_block.strip():
                 dynamic_sections.extend(["", persona_block])
             add_section("Relationship Weather", relationship_weather)
-            add_section("Haven Favorite Memory", favorite_memory)
+            add_section(f"{self.identity['ai_name']} Favorite Memory", favorite_memory)
 
         stable_context = "\n".join(stable_sections).strip()
         dynamic_context = "\n".join(dynamic_sections).strip()

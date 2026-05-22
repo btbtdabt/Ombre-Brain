@@ -7,7 +7,7 @@
 ## 先读这个
 
 - 这是一个个性化 fork，不是原版 Ombre-Brain 的无改动镜像。
-- 默认人设、提示词和前端评论作者使用了 `Haven`、`Rain`、`小雨/xiaoyu` 这些名字。
+- 默认人设、提示词和年轮作者使用 `config.yaml` 里的 `identity` 名字；示例默认是 `Haven`、`Rain`、`小雨/xiaoyu`。
 - 生产部署建议使用源码构建，并同时运行 `ombre-brain` 和 `ombre-gateway` 两个服务。
 - bucket 数据和运行状态必须放在持久化目录里；`state` 不建议放进 Obsidian / Syncthing 同步目录。
 - `X-Ombre-Session-Id` 是本 fork 的 Gateway 会话头，不是 OpenAI 标准字段。它像 Persona 的“房间号”：同一个值会共用同一份 persona_state 和召回冷却记录。可以自己起，比如 `my-main`、`chat-main`，不要照抄旧文档里的 `xiaoyu-main`。
@@ -33,7 +33,7 @@
 | --- | --- | --- |
 | OpenAI / Anthropic-compatible Gateway | 提供 `/v1/chat/completions`、`/v1/messages`、`/v1/models`，聊天客户端可直接接入 | `gateway.py` |
 | 自动记忆注入 | 请求转发前按策略注入 Recent Context、Recalled Memory、Related Memory；Current Inner State / Relationship Weather 按间隔出现 | `gateway.py` |
-| Persona State Engine | 保存 Haven 回复后的全局人格、关系状态、每个 session 的短期心情 | `persona_engine.py` |
+| Persona State Engine | 保存 AI 回复后的全局人格、关系状态、每个 session 的短期心情 | `persona_engine.py` |
 | 召回冷却 | 按 `X-Ombre-Session-Id` 记录轮次和最近注入，避免同一条记忆反复贴脸 | `gateway_state.py` |
 | 多上游模型路由 | `gateway.upstreams` 可配置多个 OpenAI-compatible provider，按请求里的 `model` 路由 | `gateway.py`、`config.example.yaml` |
 | 工具调用和流式兼容 | 透传 `tools / tool_choice / tool_calls`，支持 SSE 流式响应，兼容部分 reasoning_content 场景 | `gateway.py` |
@@ -41,8 +41,8 @@
 | Relationship Weather | 日印象保存为 `type=feel`，Gateway 按间隔单独注入；周印象默认关闭 | `reflection_engine.py` |
 | 年轮 comments | 将再次阅读某条记忆时的感受挂到源 bucket 的 `metadata.comments` 下；旧 feel 可迁移成源记忆年轮 | `bucket_manager.py`、`server.py`、`dashboard.html` |
 | whisper | 无源碎碎念/悄悄话独立保存为 `type=feel + whisper` 标签，可用 `breath(domain="whisper")` 单独读取 | `server.py` |
-| Dashboard 编辑 | 支持正文编辑、Rain 年轮写入/删除、Persona 面板、网络图、手动 reflect | `dashboard.html`、`server.py` |
-| Haven-diary 摘记 | 完整日记留在 Haven-diary，Ombre 只提取少量长期有用记忆 | `reflection_engine.py` |
+| Dashboard 编辑 | 支持正文编辑、前端用户年轮写入/删除、Persona 面板、网络图、手动 reflect | `dashboard.html`、`server.py` |
+| 可选 Haven-diary/RiJi 摘记 | 完整日记留在 [Yinglianchun/RiJi](https://github.com/Yinglianchun/RiJi) 这类外部日记系统，Ombre 只提取少量长期有用记忆；不用可关闭 | `reflection_engine.py` |
 | Supabase 同步 | 本地 bucket 与 Supabase memories 表同步，支持 tombstone 删除墓碑 | `scripts/sync_to_supabase.py` |
 | ChatGPT Connector OAuth | 为 `/ombre/mcp` 提供 OAuth authorize/token 元数据 | `server.py` |
 
@@ -77,7 +77,7 @@ bucket 是 Markdown 文件，正文保存记忆内容，frontmatter 保存元数
 | --- | --- |
 | `dynamic` | 普通事件、项目状态、关系片段 |
 | `permanent` | pinned / protected 长期准则 |
-| `feel` | Haven 主观感受、日印象、whisper |
+| `feel` | AI 主观感受、日印象、whisper |
 | `archive` | 已归档旧记忆 |
 | `metadata.comments` | 年轮：源记忆下的多次补充感受，不是独立 bucket |
 
@@ -101,7 +101,7 @@ memory_edges.jsonl  # 显式记忆关系边
 | --- | --- |
 | 原版 Docker Hub 镜像 | 不包含本 fork 的 Gateway、Persona、Relationship Weather、年轮、whisper 和 Supabase 脚本 |
 | 原版 quick start | 只启动 MCP server，不会启动 Gateway，也不会分离 state 目录 |
-| `Haven / 小雨` 等亲密称呼、`Rain / xiaoyu` | 这些名字在 prompt、测试、Dashboard 作者、示例内容里都有使用 |
+| `identity` 名字配置 | `identity.ai_name / user_name / user_display_name / user_aliases` 会影响 prompt、MCP 年轮作者、Dashboard 年轮作者 |
 | `persona.profile_id` | 默认是 `haven_xiaoyu`，通用部署应改成自己的稳定 id |
 | `X-Ombre-Session-Id` | 这是本 fork 自定义的 Gateway session，不是 OpenAI 标准头 |
 | 数据目录 | `buckets` 与 `state` 都要持久化；`state` 不要和 Obsidian 双向同步 |
@@ -110,12 +110,13 @@ memory_edges.jsonl  # 显式记忆关系边
 至少检查这些位置：
 
 ```text
-persona_engine.py       # Persona prompt、Current Inner State 文案、称呼
-reflection_engine.py    # 日印象、日记摘记、user/AI -> 小雨/Haven 规则
+identity.py             # prompt 和年轮作者的名字来源
+persona_engine.py       # Persona prompt、Current Inner State 文案
+reflection_engine.py    # 日印象、日记摘记、user/AI 改写规则
 dehydrator.py           # 长内容摘记命名规则
-server.py               # MCP 工具说明、Dashboard 年轮 author=Rain
-dashboard.html          # Rain 年轮删除显示逻辑
-config.example.yaml     # persona.profile_id、gateway、reflection
+server.py               # MCP / Dashboard 年轮作者
+dashboard.html          # 前端年轮删除显示逻辑
+config.example.yaml     # identity、persona.profile_id、gateway、reflection
 README.md               # 示例文本
 ```
 
@@ -150,10 +151,12 @@ cp config.example.yaml /srv/ombre-brain/config.yaml
 编辑 `/srv/ombre-brain/config.yaml`：
 
 - `gateway.upstreams`：配置上游 OpenAI-compatible provider。
+- `gateway.default_session_id`：少数兼容路由没传 `X-Ombre-Session-Id` 时的默认房间名。
+- `identity.*`：改 AI 名、前端用户作者名、prompt 里的用户称呼和亲密称呼。
 - `persona.profile_id`：改成自己的稳定 id。
 - `persona.*`：改成自己的 Persona 模型和关系默认值。
 - `reflection.timezone`：默认 `Asia/Shanghai`。
-- `reflection.diary_mcp_url` / `diary_mcp_token_env`：只有接 Haven-diary 时再启用。
+- `reflection.diary_mcp_url` / `diary_mcp_token_env`：只有接 Haven-diary/RiJi 时再启用；不使用日记系统就留空，并关闭 `reflection.diary_memory_extract_enabled`。
 
 ### 准备 `.env`
 
@@ -177,6 +180,8 @@ OMBRE_CHATGPT_OAUTH_ACCESS_TOKEN=
 OMBRE_CHATGPT_OAUTH_REFRESH_TOKEN=
 OMBRE_CHATGPT_OAUTH_PUBLIC_BASE_URL=
 ```
+
+`MCP_BEARER_TOKEN` 只在接 RiJi/Haven-diary 摘记时需要；不接外部日记系统就不要配置 diary URL/token。
 
 ### Compose
 
@@ -287,7 +292,7 @@ Header: X-Ombre-Include-Favorite-Memory: 1
 
 默认不自动注入：
 6. Core Memory
-7. Haven Favorite Memory
+7. `<identity.ai_name> Favorite Memory`
 ```
 
 工具调用续接轮不重新做动态召回，也不写 recalled ids 冷却，避免一次工具链路中途换记忆。
@@ -321,7 +326,7 @@ Scopes: 留空
 | `read_bucket` | 精确读取完整 bucket，不刷新 last_active |
 | `hold` | 写单条长期记忆；`whisper=True` 写无源悄悄话；`feel=True` 是旧兼容入口 |
 | `grow` | 长内容摘记；不要把整篇日记默认拆进 Ombre |
-| `comment_bucket` | 年轮主入口：给旧记忆追加 Haven 年轮 |
+| `comment_bucket` | 年轮主入口：给旧记忆追加 AI 年轮，作者固定取 `identity.ai_name` |
 | `trace` | 改 metadata、正文、resolved、delete 等 |
 | `pulse` | 系统状态和桶列表 |
 | `dream` | 自省入口，不替代日记 |
@@ -398,7 +403,6 @@ bucket_id: str
 ```text
 bucket_id: str
 content: str
-author: str = "Haven"
 kind: str = "comment"
 valence: float = -1
 arousal: float = -1
@@ -410,13 +414,13 @@ arousal: float = -1
 {
   "status": "commented",
   "id": "源 bucket id",
-  "comment": {"id": "comment id", "author": "Haven", "content": "..."},
+  "comment": {"id": "comment id", "author": "<identity.ai_name>", "content": "..."},
   "embedding_refreshed": true,
   "metadata": {}
 }
 ```
 
-用途：给已有 bucket 追加 Haven 年轮。它会 `touch+1` 源 bucket，刷新源 bucket embedding，不改正文，不把源 bucket 标为 `digested`。
+用途：给已有 bucket 追加 AI 年轮。MCP 调用不需要传作者，作者固定取 `identity.ai_name`。它会 `touch+1` 源 bucket，刷新源 bucket embedding，不改正文，不把源 bucket 标为 `digested`。
 
 这是现在推荐的年轮入口。旧写法 `hold(feel=True, source_bucket=...)` 仍可用，但只作为兼容保留，不建议写在教程主路径里。
 
@@ -502,7 +506,7 @@ include_archive: bool = False
 
 输入：无。
 
-返回：纯文本 `=== Dreaming ===`，列出最近普通记忆，供 Haven 自省。
+返回：纯文本 `=== Dreaming ===`，列出最近普通记忆，供 AI 自省。
 读后如果真的有沉淀，再用 `trace(resolved=1/digested=1)` 或 `comment_bucket(...)` 写年轮；不要把 dream 输出原样写回。
 
 #### `reflect(period="daily", force=False) -> dict`
@@ -538,7 +542,7 @@ force: bool = False             # True 时重写同周期结果
 - whisper：无源碎碎念/悄悄话，不适合挂到某条源记忆时，用 `hold(whisper=True)` 独立保存；用 `breath(domain="whisper")` 单独读取。
 - 日印象：`type=feel`，tags 包含 `relationship_weather` / `daily_impression`。
 - 周印象：自动总结默认关闭；不再默认把多天日印象压缩成周记。需要周视角时，优先考虑只读聚合视图。
-- 日记原文留在 Haven-diary，Ombre 只在有长期价值时提取少量普通记忆。
+- 日记原文留在外部日记系统，例如 [Yinglianchun/RiJi](https://github.com/Yinglianchun/RiJi)；不用日记系统时可以关闭 diary 摘记，Ombre 只在有长期价值时提取少量普通记忆。
 - 日印象和重要高温记忆可带 `affect_anchor`。
 - `affect_anchor` 当前写在正文里，Dashboard 还没有专门解析 UI。
 
@@ -603,7 +607,7 @@ C:\Python313\python.exe -m pytest tests\test_gateway.py tests\test_memory_api.py
 - Favorite Memory 自动轮次注入策略。
 - 本地 Obsidian 双向同步方案重做。
 - `affect_anchor` 独立解析、筛选、可视化和检索。
-- 通用化部署时清理 Haven/Rain/xiaoyu 的硬编码命名。
+- 通用化部署时补一条迁移脚本，用于批量替换旧 prompt 示例或测试 fixture 里的默认名字；运行时 prompt 已优先读 `identity`。
 
 ## License
 

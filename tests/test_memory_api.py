@@ -170,6 +170,33 @@ async def test_comment_bucket_adds_ring_and_touches_source(monkeypatch, bucket_m
 
 
 @pytest.mark.asyncio
+async def test_comment_bucket_uses_configured_ai_author(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    bucket_id = await bucket_mgr.create(content="一条旧记忆。", name="旧记忆")
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
+    monkeypatch.setattr(
+        server,
+        "config",
+        {
+            **server.config,
+            "identity": {
+                "ai_name": "Echo",
+                "user_name": "Mira",
+                "user_display_name": "米拉",
+            },
+        },
+    )
+
+    await server.comment_bucket(bucket_id=bucket_id, content="再次看到它。")
+    bucket = await bucket_mgr.get(bucket_id)
+
+    assert bucket["metadata"]["comments"][0]["author"] == "Echo"
+
+
+@pytest.mark.asyncio
 async def test_dashboard_comment_api_writes_rain_author(monkeypatch, bucket_mgr, decay_eng):
     import server
 
@@ -200,6 +227,42 @@ async def test_dashboard_comment_api_writes_rain_author(monkeypatch, bucket_mgr,
     assert comment["source"] == "dashboard"
     assert comment["content"] == "这句是小雨从前端补的。"
     assert embedding_engine.calls[0][0] == bucket_id
+
+
+@pytest.mark.asyncio
+async def test_dashboard_comment_api_uses_configured_user_author(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    bucket_id = await bucket_mgr.create(content="前端评论换名。", name="前端评论换名")
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+    monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
+    monkeypatch.setattr(
+        server,
+        "config",
+        {
+            **server.config,
+            "identity": {
+                "ai_name": "Echo",
+                "user_name": "Mira",
+                "user_display_name": "米拉",
+            },
+        },
+    )
+
+    response = await server.api_bucket_comment(
+        DummyRequest({"content": "这是前端用户写的。"}, path_params={"bucket_id": bucket_id})
+    )
+    bucket = await bucket_mgr.get(bucket_id)
+    comment = bucket["metadata"]["comments"][0]
+    deleted = await server.api_bucket_comment_delete(
+        DummyRequest(path_params={"bucket_id": bucket_id, "comment_id": comment["id"]})
+    )
+
+    assert response.status_code == 200
+    assert comment["author"] == "Mira"
+    assert deleted.status_code == 200
 
 
 @pytest.mark.asyncio

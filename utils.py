@@ -38,6 +38,12 @@ def load_config(config_path: str = None) -> dict:
         "buckets_dir": os.path.join(os.path.dirname(os.path.abspath(__file__)), "buckets"),
         "state_dir": "",
         "merge_threshold": 75,
+        "identity": {
+            "ai_name": "Haven",
+            "user_name": "Rain",
+            "user_display_name": "小雨",
+            "user_aliases": ["宝宝", "老婆", "亲爱的", "她"],
+        },
         "dehydration": {
             "model": "deepseek-chat",
             "base_url": "https://api.deepseek.com/v1",
@@ -72,6 +78,7 @@ def load_config(config_path: str = None) -> dict:
         "gateway": {
             "host": "0.0.0.0",
             "port": 8010,
+            "default_session_id": "xiaoyu-main",
             "upstream_base_url": "",
             "upstream_default_model": "",
             "upstream_models": [],

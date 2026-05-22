@@ -90,6 +90,25 @@ def test_persona_evaluator_prompt_asks_for_chinese_persona_text():
     assert "event_type 和 mood_label 保持短英文标签" in POST_REPLY_EVALUATION_PROMPT
 
 
+def test_persona_identity_config_updates_prompt_and_state_block(test_config):
+    cfg = _persona_config(test_config)
+    cfg["identity"] = {
+        "ai_name": "Echo",
+        "user_name": "Mira",
+        "user_display_name": "米拉",
+        "user_aliases": ["亲爱的", "她"],
+    }
+    engine = PersonaStateEngine(cfg)
+    state = engine.get_current_state("session-identity")
+    block = engine.format_state_block(state)
+    prompt = engine._post_reply_evaluation_prompt()
+
+    assert "Current Inner State (Echo)" in block
+    assert "Conversation partner: 米拉" in block
+    assert "米拉、亲爱的、她" in prompt
+    assert "Echo 回复后的状态" in prompt
+
+
 @pytest.mark.asyncio
 async def test_persona_pre_reply_guidance_is_read_only(test_config):
     engine = PersonaStateEngine(_persona_config(test_config))
