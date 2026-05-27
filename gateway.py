@@ -2106,10 +2106,15 @@ class GatewayService:
         if not query or self.inject_max_cards <= 0:
             return [], []
 
+        body_chain_query = self._query_wants_body_chain(query)
         eligible_ids = {
             bucket["id"]
             for bucket in all_buckets
-            if bucket.get("id") and self._is_dynamic_candidate(bucket)
+            if bucket.get("id")
+            and (
+                self._is_dynamic_candidate(bucket)
+                or (body_chain_query and self._is_body_chain_candidate_bucket(bucket))
+            )
         }
         if not eligible_ids:
             return [], []
@@ -2172,13 +2177,17 @@ class GatewayService:
             return ""
         remaining = budget
         parts = []
+        compact = len(moments) > 1
         for moment in moments:
-            block = self._format_direct_moment(moment, grouped_moments)
+            block = self._format_direct_moment(
+                moment,
+                grouped_moments,
+                body_max_chars=130 if compact else 260,
+                context_max_chars=60 if compact else 120,
+            )
             tokens = count_tokens_approx(block)
             if tokens <= 0:
                 continue
-            if tokens > remaining and parts:
-                break
             if tokens > remaining:
                 block = self._trim_text(block, remaining)
                 tokens = count_tokens_approx(block)
@@ -2190,8 +2199,15 @@ class GatewayService:
                 break
         return "\n".join(parts)
 
-    def _format_direct_moment(self, moment: dict, grouped_moments: dict[str, list[dict]]) -> str:
-        line = self._format_moment_line(moment, max_chars=260, note="")
+    def _format_direct_moment(
+        self,
+        moment: dict,
+        grouped_moments: dict[str, list[dict]],
+        *,
+        body_max_chars: int = 260,
+        context_max_chars: int = 120,
+    ) -> str:
+        line = self._format_moment_line(moment, max_chars=body_max_chars, note="")
         contexts = [
             item for item in self._context_moments_for_seed(moment, grouped_moments)
             if item.get("section") in MOMENT_TEMPERATURE_SECTIONS
@@ -2199,7 +2215,7 @@ class GatewayService:
         if not contexts:
             return line
         context_lines = [
-            self._format_moment_line(context, max_chars=120, note="")
+            self._format_moment_line(context, max_chars=context_max_chars, note="")
             for context in contexts
         ]
         return line + "\n  context: " + " | ".join(context_lines)
@@ -3131,6 +3147,23 @@ class GatewayService:
         if tool_calls:
             assistant_message["tool_calls"] = tool_calls
         return assistant_message
+
+    def _is_body_chain_candidate_bucket(self, bucket: dict) -> bool:
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        if meta.get("type") == "archived" or meta.get("resolved"):
+            return False
+        fields = " ".join(
+            [
+                str(bucket.get("content") or ""),
+                str(meta.get("name") or ""),
+                " ".join(str(item) for item in meta.get("tags", []) or []),
+                " ".join(str(item) for item in meta.get("domain", []) or []),
+            ]
+        ).lower()
+        terms = set(BODY_CHAIN_QUERY_TERMS) | INTIMATE_BODY_TERMS
+        for _, priority_terms in BODY_CHAIN_PRIORITIES:
+            terms.update(priority_terms)
+        return any(str(term).lower() in fields for term in terms)
 
     def _is_dynamic_candidate(self, bucket: dict) -> bool:
         meta = bucket.get("metadata", {})

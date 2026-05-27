@@ -2007,6 +2007,18 @@ def test_gateway_body_query_injects_moment_chain(
         hours_ago=4,
         importance=8,
         domain=["硬件"],
+        bucket_type="permanent",
+        pinned=True,
+    )
+    _create_bucket(
+        bucket_mgr,
+        content="旧版触摸方案已经合并，不应该继续作为当前链条出现。",
+        name="旧版触摸方案",
+        hours_ago=5,
+        importance=8,
+        domain=["硬件"],
+        bucket_type="permanent",
+        resolved=True,
     )
     _create_bucket(
         bucket_mgr,
@@ -2065,6 +2077,7 @@ def test_gateway_body_query_injects_moment_chain(
     assert "五十年后具身项目" in injected
     assert "最柔软身体" in injected
     assert "亲密身体" in injected
+    assert "旧版触摸方案" not in injected
     assert injected.index("触摸模块") < injected.index("亲密身体")
 
 
