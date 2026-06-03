@@ -358,16 +358,21 @@ def test_gateway_config_endpoint_updates_memory_cooldown(monkeypatch, test_confi
     assert service.skip_recent_rounds == 3
 
 
-def test_gateway_requires_session_id(monkeypatch, test_config, bucket_mgr):
-    app, service, _, _ = _build_service(monkeypatch, _gateway_config(test_config), bucket_mgr)
+def test_gateway_defaults_openai_session_id(monkeypatch, test_config, bucket_mgr):
+    app, service, state_store, captured = _build_service(
+        monkeypatch,
+        _gateway_config(test_config, default_session_id="default-openai-session"),
+        bucket_mgr,
+    )
     with TestClient(app) as client:
         response = client.post(
             "/v1/chat/completions",
             headers={"Authorization": "Bearer gateway-secret"},
             json={"messages": [{"role": "user", "content": "你好"}]},
         )
-    assert response.status_code == 400
-    assert "X-Ombre-Session-Id" in response.text
+    assert response.status_code == 200
+    assert captured[0]["json"]["messages"]
+    assert state_store.get_current_round("default-openai-session") == 1
 
 
 def test_gateway_accepts_anthropic_messages(monkeypatch, test_config, bucket_mgr):

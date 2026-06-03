@@ -330,12 +330,7 @@ class GatewayService:
         if auth_result is not None:
             return auth_result
 
-        session_id = (request.headers.get("X-Ombre-Session-Id") or "").strip()
-        if not session_id:
-            return JSONResponse(
-                {"error": {"message": "X-Ombre-Session-Id is required", "type": "invalid_request_error"}},
-                status_code=400,
-            )
+        session_id = (request.headers.get("X-Ombre-Session-Id") or self.default_session_id).strip()
 
         try:
             payload = await request.json()
