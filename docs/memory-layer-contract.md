@@ -114,7 +114,10 @@ The runtime answers "which layer is this?" with `memory_layers.py`, then applies
 
 This separation is important. A moment can be searchable context without being allowed to prove the current topic.
 
-Debug surfaces should expose the same runtime decision. `inspect_moments`, `inspect_diffusion`, `/api/breath-debug`, and Gateway injection debug include `layer_debug`, which shows the inferred layer, writer hint, and whether the item can direct-seed, appear as related memory, or enter recent context.
+Debug surfaces should expose the same runtime decision. `inspect_moments`, `inspect_diffusion`, `/api/breath-debug`, and Gateway injection debug include:
+
+- `layer_debug`: the inferred layer, writer hint, and static layer policy.
+- `runtime_gate`: the per-query decision for direct seed, related injection, recent context, topic evidence, and the reason an item would or would not appear.
 
 ## Injection Order
 
