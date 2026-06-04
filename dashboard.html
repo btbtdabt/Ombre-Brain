@@ -151,6 +151,54 @@
     box-shadow: inset 3px 3px 6px rgba(0,0,0,0.2), inset -2px -2px 4px rgba(255,255,255,0.05);
   }
 
+  .bucket-tools {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: -10px 0 18px;
+    flex-wrap: wrap;
+  }
+  .bucket-tools button {
+    min-height: 34px;
+    padding: 7px 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+  }
+  .bucket-tools button:hover {
+    border-color: var(--border-strong);
+    color: var(--accent);
+  }
+  .bucket-tools button:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+  }
+  .bucket-tools .danger {
+    color: var(--negative);
+    border-color: rgba(139, 74, 74, 0.36);
+  }
+  .bucket-tools .danger:hover {
+    color: #6F3333;
+    border-color: rgba(139, 74, 74, 0.58);
+  }
+  .bucket-tools .bulk-hidden { display: none; }
+  .bucket-bulk-status {
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .bucket-bulk-message {
+    min-height: 20px;
+    margin: -10px 0 14px;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .bucket-bulk-message.error { color: var(--negative); }
+  .bucket-bulk-message.ok { color: var(--positive); }
+
   .bucket-list { display: flex; flex-direction: column; gap: 8px; }
   .bucket-row {
     display: grid;
@@ -165,6 +213,27 @@
     background: var(--surface);
     border: 1px solid transparent;
     box-shadow: 4px 4px 10px var(--shadow-dark-subtle), -4px -4px 10px var(--shadow-light);
+  }
+  .bucket-row.bulk {
+    grid-template-columns: 28px 32px 200px 100px 80px 60px 100px 1fr;
+  }
+  .bucket-row.selected {
+    border-color: rgba(47, 79, 79, 0.45);
+    background: rgba(47, 79, 79, 0.08);
+  }
+  .bucket-select {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 20px;
+  }
+  .bucket-select input {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--accent);
+  }
+  .bucket-select input:disabled {
+    cursor: not-allowed;
   }
   .bucket-row:hover {
     border-color: var(--border);
@@ -1265,6 +1334,12 @@
       gap: 8px;
       padding: 12px 16px;
     }
+    .bucket-row.bulk {
+      grid-template-columns: 24px 28px 1fr 60px;
+    }
+    .bucket-tools button {
+      flex: 1 1 auto;
+    }
     .bucket-row .domain,
     .bucket-row .emotion,
     .bucket-row .time,
@@ -1311,6 +1386,14 @@
 
 <div class="content" id="list-view">
   <div class="filters" id="filters"></div>
+  <div class="bucket-tools" id="bucket-bulk-toolbar">
+    <button type="button" id="bucket-bulk-toggle" onclick="toggleBucketBulkMode()">批量选择</button>
+    <button type="button" class="bulk-hidden" data-bulk-action="select-current" onclick="selectCurrentBuckets()">全选当前筛选</button>
+    <button type="button" class="bulk-hidden" data-bulk-action="clear" onclick="clearBucketSelection()">清空</button>
+    <button type="button" class="bulk-hidden danger" data-bulk-action="delete" onclick="deleteSelectedBuckets()">删除选中</button>
+    <span class="bucket-bulk-status bulk-hidden" id="bucket-bulk-status">未选择</span>
+  </div>
+  <div class="bucket-bulk-message" id="bucket-bulk-message"></div>
   <div class="bucket-list" id="bucket-list">
     <div class="loading">加载中…</div>
   </div>
@@ -1642,7 +1725,10 @@
 const PATH_PREFIX = location.pathname.replace(/\/dashboard\/?$/, '');
 const BASE = location.origin + PATH_PREFIX;
 let allBuckets = [];
+let renderedBuckets = [];
 let currentFilter = 'all';
+let bucketBulkMode = false;
+let selectedBucketIds = new Set();
 let dashboardCommentAuthor = 'Rain';
 let dashboardAiAuthor = 'Haven';
 let reflectionSelectedDate = formatLocalDate(new Date());
@@ -1775,7 +1861,7 @@ document.getElementById('search-input').addEventListener('input', (e) => {
   const q = e.target.value.trim();
   searchTimer = setTimeout(() => {
     if (q) searchBuckets(q);
-    else renderBuckets(allBuckets);
+    else renderBuckets(filterBuckets(allBuckets));
   }, 300);
 });
 
@@ -1786,7 +1872,12 @@ async function loadBuckets() {
     allBuckets = await res.json();
     updateStats();
     buildFilters();
-    renderBuckets(allBuckets);
+    selectedBucketIds.forEach(function(id) {
+      if (!allBuckets.some(function(bucket) { return String(bucket.id || '') === id; })) {
+        selectedBucketIds.delete(id);
+      }
+    });
+    renderBuckets(filterBuckets(allBuckets));
     if (getActiveTab() === 'reflection') renderReflectionReview();
     if (getActiveTab() === 'dreams') loadDreams();
   } catch (e) {
@@ -2056,18 +2147,166 @@ function filterBuckets(buckets) {
   return buckets;
 }
 
+function bucketBulkDeleteBlockReason(bucket) {
+  if (bucket.protected) return 'protected';
+  if (bucket.pinned) return 'pinned';
+  if (bucket.anchor) return 'anchor';
+  if (bucket.type === 'permanent') return 'permanent';
+  return '';
+}
+
+function bucketBulkReasonText(reason) {
+  if (reason === 'protected') return '受保护记忆不能批量删除';
+  if (reason === 'pinned') return '钉选记忆不能批量删除';
+  if (reason === 'anchor') return '长期锚点不能批量删除';
+  if (reason === 'permanent') return '永久记忆不能批量删除';
+  return '';
+}
+
+function bucketById(id) {
+  id = String(id || '');
+  return allBuckets.find(function(bucket) { return String(bucket.id || '') === id; });
+}
+
+function setBucketBulkMessage(message, tone) {
+  var el = document.getElementById('bucket-bulk-message');
+  if (!el) return;
+  el.textContent = message || '';
+  el.classList.remove('ok', 'error');
+  if (tone) el.classList.add(tone);
+}
+
+function updateBucketBulkToolbar() {
+  var toggle = document.getElementById('bucket-bulk-toggle');
+  var status = document.getElementById('bucket-bulk-status');
+  var toolbar = document.getElementById('bucket-bulk-toolbar');
+  if (!toggle || !status || !toolbar) return;
+  toggle.textContent = bucketBulkMode ? '退出批量' : '批量选择';
+  toolbar.querySelectorAll('.bulk-hidden').forEach(function(el) {
+    el.style.display = bucketBulkMode ? (el.tagName === 'SPAN' ? 'inline' : 'inline-flex') : 'none';
+  });
+  var selected = selectedBucketIds.size;
+  var selectable = renderedBuckets.filter(function(bucket) {
+    return !bucketBulkDeleteBlockReason(bucket);
+  }).length;
+  status.textContent = selected ? '已选 ' + selected + ' 个' : '未选择';
+  var selectBtn = toolbar.querySelector('[data-bulk-action="select-current"]');
+  var clearBtn = toolbar.querySelector('[data-bulk-action="clear"]');
+  var deleteBtn = toolbar.querySelector('[data-bulk-action="delete"]');
+  if (selectBtn) selectBtn.disabled = !selectable;
+  if (clearBtn) clearBtn.disabled = !selected;
+  if (deleteBtn) deleteBtn.disabled = !selected;
+}
+
+function toggleBucketBulkMode() {
+  bucketBulkMode = !bucketBulkMode;
+  if (!bucketBulkMode) {
+    selectedBucketIds.clear();
+    setBucketBulkMessage('');
+  }
+  renderBuckets(renderedBuckets.length ? renderedBuckets : filterBuckets(allBuckets));
+}
+
+function toggleBucketSelection(id) {
+  id = String(id || '');
+  var bucket = bucketById(id);
+  if (!bucket) return;
+  var reason = bucketBulkDeleteBlockReason(bucket);
+  if (reason) {
+    setBucketBulkMessage(bucketBulkReasonText(reason), 'error');
+    return;
+  }
+  if (selectedBucketIds.has(id)) selectedBucketIds.delete(id);
+  else selectedBucketIds.add(id);
+  setBucketBulkMessage('');
+  renderBuckets(renderedBuckets);
+}
+
+function setBucketSelection(id, checked) {
+  id = String(id || '');
+  var bucket = bucketById(id);
+  if (!bucket || bucketBulkDeleteBlockReason(bucket)) return;
+  if (checked) selectedBucketIds.add(id);
+  else selectedBucketIds.delete(id);
+  setBucketBulkMessage('');
+  renderBuckets(renderedBuckets);
+}
+
+function selectCurrentBuckets() {
+  var added = 0;
+  renderedBuckets.forEach(function(bucket) {
+    var id = String(bucket.id || '');
+    if (id && !bucketBulkDeleteBlockReason(bucket) && !selectedBucketIds.has(id)) {
+      selectedBucketIds.add(id);
+      added += 1;
+    }
+  });
+  setBucketBulkMessage(added ? '已选择当前筛选里的普通记忆桶。' : '当前筛选没有可批量删除的记忆桶。', added ? 'ok' : '');
+  renderBuckets(renderedBuckets);
+}
+
+function clearBucketSelection() {
+  selectedBucketIds.clear();
+  setBucketBulkMessage('');
+  renderBuckets(renderedBuckets);
+}
+
+async function deleteSelectedBuckets() {
+  var ids = Array.from(selectedBucketIds);
+  if (!ids.length) return;
+  var selectedBuckets = ids.map(bucketById).filter(Boolean);
+  var names = selectedBuckets.slice(0, 5).map(function(bucket) {
+    return '· ' + (bucket.name || bucket.id);
+  }).join('\n');
+  var extra = ids.length > 5 ? '\n...' : '';
+  if (!confirm('准备删除 ' + ids.length + ' 个普通记忆桶：\n' + names + extra + '\n\n会写 tombstone 并清理索引。')) return;
+  var token = prompt('输入 DELETE 确认删除 ' + ids.length + ' 个记忆桶');
+  if (token !== 'DELETE') {
+    setBucketBulkMessage('已取消删除。', '');
+    return;
+  }
+  try {
+    var res = await authFetch(BASE + '/api/buckets/delete', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ bucket_ids: ids, confirm: 'DELETE' })
+    });
+    if (!res) return;
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.error || '删除失败');
+    selectedBucketIds.clear();
+    await loadBuckets();
+    setBucketBulkMessage('已删除 ' + data.deleted + ' 个，跳过 ' + data.skipped + ' 个，未找到 ' + data.not_found + ' 个。', data.deleted ? 'ok' : '');
+  } catch (e) {
+    setBucketBulkMessage('删除失败: ' + e.message, 'error');
+  }
+}
+
 function renderBuckets(buckets) {
   var list = document.getElementById('bucket-list');
+  renderedBuckets = (buckets || []).slice();
+  updateBucketBulkToolbar();
   if (!buckets.length) {
     list.innerHTML = '<div class="loading">没有记忆桶</div>';
     return;
   }
   list.innerHTML = buckets.map(function(b) {
+    var id = String(b.id || '');
     var icon = b.anchor ? '⚓' : b.pinned ? '📌' : b.type === 'feel' ? '🫧' : b.digested ? '🌿' : b.resolved ? '💤' : '💭';
     var vPos = Math.round(b.valence * 100);
     var modelV = b.model_valence != null ? ' → V' + b.model_valence.toFixed(1) : '';
     var timeAgo = formatTimeAgo(b.last_active || b.created);
-    return '<div class="bucket-row" onclick="showDetail(\'' + jsString(b.id) + '\')">' +
+    var blockReason = bucketBulkDeleteBlockReason(b);
+    var checked = selectedBucketIds.has(id);
+    var rowClass = 'bucket-row' + (bucketBulkMode ? ' bulk' : '') + (checked ? ' selected' : '');
+    var rowClick = bucketBulkMode ? 'toggleBucketSelection(\'' + jsString(id) + '\')' : 'showDetail(\'' + jsString(id) + '\')';
+    var selectHtml = bucketBulkMode
+      ? '<label class="bucket-select" title="' + escAttr(blockReason ? bucketBulkReasonText(blockReason) : '选择') + '" onclick="event.stopPropagation()">' +
+          '<input type="checkbox" ' + (checked ? 'checked ' : '') + (blockReason ? 'disabled ' : '') + 'onchange="setBucketSelection(\'' + jsString(id) + '\', this.checked)" />' +
+        '</label>'
+      : '';
+    return '<div class="' + rowClass + '" onclick="' + rowClick + '">' +
+      selectHtml +
       '<span class="icon">' + icon + '</span>' +
       '<span class="name" title="' + esc(b.name) + '">' + esc(b.name) + '</span>' +
       '<span class="domain">' + esc((b.domain || []).join(', ')) + '</span>' +

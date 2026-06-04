@@ -660,10 +660,12 @@ async def test_import_review_delete_writes_tombstone_and_clears_embedding(
     monkeypatch, bucket_mgr, test_config
 ):
     import server
+    from memory_edges import MemoryEdgeStore
 
     bucket_id = await bucket_mgr.create(content="导入后复核删除。", name="复核删除")
     monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
     monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+    monkeypatch.setattr(server, "memory_edge_store", MemoryEdgeStore(test_config))
     embedding_engine = CapturingEmbeddingEngine()
     monkeypatch.setattr(server, "embedding_engine", embedding_engine)
 
@@ -681,11 +683,64 @@ async def test_import_review_delete_writes_tombstone_and_clears_embedding(
 
 
 @pytest.mark.asyncio
+async def test_dashboard_bulk_delete_skips_protected_and_cleans_indexes(
+    monkeypatch, bucket_mgr, test_config
+):
+    import server
+    from memory_edges import MemoryEdgeStore
+
+    regular_id = await bucket_mgr.create(
+        content="这条普通记忆准备用来批量删除。",
+        name="普通删除目标",
+    )
+    pinned_id = await bucket_mgr.create(
+        content="这条钉选记忆不能被批量删除。",
+        name="钉选保留目标",
+        pinned=True,
+        bucket_type="permanent",
+    )
+
+    edge_store = MemoryEdgeStore(test_config)
+    edge_store.add_edge(regular_id, pinned_id, "context_of", 0.9, "test edge")
+
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+    monkeypatch.setattr(server, "memory_edge_store", edge_store)
+    embedding_engine = CapturingEmbeddingEngine()
+    monkeypatch.setattr(server, "embedding_engine", embedding_engine)
+
+    response = await server.api_buckets_delete(
+        DummyRequest({
+            "bucket_ids": [regular_id, pinned_id, "missing_bucket"],
+            "confirm": "DELETE",
+        })
+    )
+    payload = json.loads(response.body)
+    tombstone_path = os.path.join(test_config["buckets_dir"], ".tombstones", f"{regular_id}.json")
+
+    assert response.status_code == 200
+    assert payload["deleted"] == 1
+    assert payload["skipped"] == 1
+    assert payload["not_found"] == 1
+    assert payload["results"][1]["status"] == "skipped"
+    assert payload["results"][1]["reason"] == "pinned"
+    assert await bucket_mgr.get(regular_id) is None
+    assert await bucket_mgr.get(pinned_id) is not None
+    assert os.path.exists(tombstone_path)
+    assert embedding_engine.deleted == [regular_id]
+    assert not [
+        edge for edge in edge_store.list_edges()
+        if edge["source"] == regular_id or edge["target"] == regular_id
+    ]
+
+
+@pytest.mark.asyncio
 async def test_breath_summary_includes_bucket_comments(monkeypatch, bucket_mgr, decay_eng):
     import server
 
+    user_display_name = server._identity()["user_display_name"]
     bucket_id = await bucket_mgr.create(
-        content="小雨把这段旧事留下。",
+        content=f"{user_display_name}把这段旧事留下。",
         name="带年轮浮现",
         domain=["恋爱"],
     )
@@ -703,7 +758,7 @@ async def test_breath_summary_includes_bucket_comments(monkeypatch, bucket_mgr, 
     result = await server.breath(max_results=1, include_core=False, include_related=False)
 
     assert f"[bucket_id:{bucket_id}]" in result
-    assert "小雨把这段旧事留下" in result
+    assert f"{user_display_name}把这段旧事留下" in result
     assert "后来再看，这里多了一圈新的年轮" in result
 
 

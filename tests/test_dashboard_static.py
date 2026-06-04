@@ -25,7 +25,18 @@ def test_dashboard_comment_enter_submit_has_no_visible_send_key():
     assert "comment-send-button" not in html
     assert 'aria-label="发送"' not in form_block
 
+def test_dashboard_bucket_list_has_bulk_delete_controls():
+    html = Path("dashboard.html").read_text(encoding="utf-8")
+    list_view = html.split('id="list-view"', 1)[1].split('id="breath-view"', 1)[0]
 
+    assert 'id="bucket-bulk-toolbar"' in list_view
+    assert "toggleBucketBulkMode()" in list_view
+    assert "selectCurrentBuckets()" in list_view
+    assert "deleteSelectedBuckets()" in list_view
+    assert "BASE + '/api/buckets/delete'" in html
+    assert "confirm: 'DELETE'" in html
+    assert "bucketBulkDeleteBlockReason" in html
+    assert "受保护记忆不能批量删除" in html
 def test_dashboard_exposes_gateway_memory_cooldown_settings():
     html = Path("dashboard.html").read_text(encoding="utf-8")
 

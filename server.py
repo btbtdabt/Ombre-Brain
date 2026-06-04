@@ -1062,6 +1062,61 @@ async def _refresh_bucket_embedding(bucket_id: str) -> bool:
     return await embedding_engine.generate_and_store(bucket_id, bucket_text_for_embedding(bucket))
 
 
+def _bucket_delete_skip_reason(bucket: dict) -> str:
+    meta = bucket.get("metadata", {}) if isinstance(bucket, dict) else {}
+    if meta.get("protected"):
+        return "protected"
+    if meta.get("pinned"):
+        return "pinned"
+    if meta.get("anchor"):
+        return "anchor"
+    if meta.get("type") == "permanent":
+        return "permanent"
+    return ""
+
+
+def _delete_bucket_indexes(bucket_id: str) -> tuple[dict, list[str]]:
+    cleanup: dict = {}
+    errors: list[str] = []
+
+    try:
+        embedding_engine.delete_embedding(bucket_id)
+        cleanup["embedding"] = True
+    except Exception as e:
+        logger.warning("Failed to delete embedding for bucket / 删除桶向量失败: %s: %s", bucket_id, e)
+        errors.append("embedding")
+
+    try:
+        cleanup["edges"] = memory_edge_store.delete_for_bucket(bucket_id)
+    except Exception as e:
+        logger.warning("Failed to delete memory edges for bucket / 删除桶关系边失败: %s: %s", bucket_id, e)
+        errors.append("edges")
+
+    return cleanup, errors
+
+
+async def _delete_bucket_and_indexes(bucket_id: str) -> dict:
+    bucket_id = str(bucket_id or "").strip()
+    if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
+        return {"id": bucket_id, "status": "invalid", "reason": "invalid_bucket_id"}
+
+    bucket = await bucket_mgr.get(bucket_id)
+    if not bucket:
+        return {"id": bucket_id, "status": "not_found", "reason": "not_found"}
+
+    success = await bucket_mgr.delete(bucket_id)
+    if not success:
+        return {"id": bucket_id, "status": "failed", "reason": "delete_failed"}
+
+    cleanup, errors = _delete_bucket_indexes(bucket_id)
+    return {
+        "id": bucket_id,
+        "status": "deleted",
+        "cleanup": cleanup,
+        "cleanup_errors": errors,
+    }
+
+
 def _write_semantic_search_timeout_seconds() -> float:
     write_cfg = config.get("write_path", {}) if isinstance(config.get("write_path", {}), dict) else {}
     try:
@@ -2257,10 +2312,12 @@ async def trace(
 
     # --- Delete mode / 删除模式 ---
     if delete:
-        success = await bucket_mgr.delete(bucket_id)
-        if success:
-            embedding_engine.delete_embedding(bucket_id)
-        return f"已遗忘记忆桶: {bucket_id}" if success else f"未找到记忆桶: {bucket_id}"
+        result = await _delete_bucket_and_indexes(bucket_id)
+        return (
+            f"已遗忘记忆桶: {bucket_id}"
+            if result.get("status") == "deleted"
+            else f"未找到记忆桶: {bucket_id}"
+        )
 
     bucket = await bucket_mgr.get(bucket_id)
     if not bucket:
@@ -2696,6 +2753,7 @@ async def api_buckets(request):
                 "confidence": meta.get("confidence", 0.5),
                 "resolved": meta.get("resolved", False),
                 "pinned": meta.get("pinned", False),
+                "protected": meta.get("protected", False),
                 "anchor": meta.get("anchor", False),
                 "digested": meta.get("digested", False),
                 "period": meta.get("period"),
@@ -2711,6 +2769,69 @@ async def api_buckets(request):
         return JSONResponse(result)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/buckets/delete", methods=["POST"])
+async def api_buckets_delete(request):
+    """Bulk-delete ordinary dashboard buckets and clean their indexes."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+    if body.get("confirm") != "DELETE":
+        return JSONResponse({"error": "confirmation required"}, status_code=400)
+
+    raw_ids = body.get("bucket_ids", [])
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return JSONResponse({"error": "bucket_ids must be a non-empty list"}, status_code=400)
+    if len(raw_ids) > 200:
+        return JSONResponse({"error": "too many bucket_ids"}, status_code=400)
+
+    seen: set[str] = set()
+    bucket_ids: list[str] = []
+    for raw_id in raw_ids:
+        bucket_id = str(raw_id or "").strip()
+        if bucket_id in seen:
+            continue
+        seen.add(bucket_id)
+        bucket_ids.append(bucket_id)
+
+    summary = {"deleted": 0, "skipped": 0, "not_found": 0, "invalid": 0, "failed": 0}
+    results = []
+    for bucket_id in bucket_ids:
+        if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
+            summary["invalid"] += 1
+            results.append({"id": bucket_id, "status": "invalid", "reason": "invalid_bucket_id"})
+            continue
+
+        bucket = await bucket_mgr.get(bucket_id)
+        if not bucket:
+            summary["not_found"] += 1
+            results.append({"id": bucket_id, "status": "not_found", "reason": "not_found"})
+            continue
+
+        reason = _bucket_delete_skip_reason(bucket)
+        if reason:
+            summary["skipped"] += 1
+            results.append({"id": bucket_id, "status": "skipped", "reason": reason})
+            continue
+
+        result = await _delete_bucket_and_indexes(bucket_id)
+        status = str(result.get("status") or "failed")
+        if status in summary:
+            summary[status] += 1
+        else:
+            summary["failed"] += 1
+        results.append(result)
+
+    return JSONResponse({**summary, "results": results})
 
 
 @mcp.custom_route("/api/bucket/{bucket_id}", methods=["GET"])
@@ -3572,10 +3693,9 @@ async def api_import_review(request):
             elif action == "noise":
                 await bucket_mgr.update(bid, resolved=True, importance=1)
             elif action == "delete":
-                deleted = await bucket_mgr.delete(bid)
-                if not deleted:
-                    raise ValueError("bucket not found")
-                embedding_engine.delete_embedding(bid)
+                result = await _delete_bucket_and_indexes(bid)
+                if result.get("status") != "deleted":
+                    raise ValueError(result.get("reason") or "bucket not found")
             applied += 1
         except Exception as e:
             logger.warning(f"Review action failed for {bid}: {e}")
