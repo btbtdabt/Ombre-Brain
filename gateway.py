@@ -217,6 +217,14 @@ class GatewayService:
             "current_inner_state_interval_rounds": self.current_inner_state_interval_rounds,
         }
 
+    def _persona_config_payload(self) -> dict[str, Any]:
+        return {
+            "enabled": bool(getattr(self.persona_engine, "enabled", False)),
+            "model": getattr(self.persona_engine, "model", ""),
+            "base_url": getattr(self.persona_engine, "base_url", ""),
+            "api_ready": bool(getattr(self.persona_engine, "api_key", "")),
+        }
+
     def _apply_gateway_memory_config(self, payload: dict[str, Any]) -> list[str]:
         updated: list[str] = []
         if "cooldown_hours" in payload:
@@ -237,13 +245,40 @@ class GatewayService:
             updated.append("gateway.current_inner_state_interval_rounds")
         return updated
 
+    def _apply_persona_config(self, payload: dict[str, Any]) -> list[str]:
+        if not isinstance(payload, dict):
+            return []
+        persona_cfg = self.config.setdefault("persona", {})
+        updated: list[str] = []
+        if "enabled" in payload:
+            persona_cfg["enabled"] = bool(payload["enabled"])
+            updated.append("persona.enabled")
+        for key in ("model", "base_url"):
+            if key in payload:
+                persona_cfg[key] = str(payload[key] or "").strip()
+                updated.append(f"persona.{key}")
+        if "api_key" in payload and payload["api_key"]:
+            persona_cfg["api_key"] = str(payload["api_key"])
+            os.environ["OMBRE_PERSONA_API_KEY"] = persona_cfg["api_key"]
+            updated.append("persona.api_key")
+        if "base_url" in payload and persona_cfg.get("base_url"):
+            os.environ["OMBRE_PERSONA_BASE_URL"] = persona_cfg["base_url"]
+        if "model" in payload and persona_cfg.get("model"):
+            os.environ["OMBRE_PERSONA_MODEL"] = persona_cfg["model"]
+        if updated:
+            self.persona_engine = PersonaStateEngine(self.config)
+        return updated
+
     async def handle_config(self, request: Request) -> JSONResponse:
         auth_result = self._authorize(request.headers.get("Authorization", ""))
         if auth_result is not None:
             return auth_result
 
         if request.method == "GET":
-            return JSONResponse({"gateway": self._gateway_memory_config_payload()})
+            return JSONResponse({
+                "gateway": self._gateway_memory_config_payload(),
+                "persona": self._persona_config_payload(),
+            })
 
         try:
             body = await request.json()
@@ -252,14 +287,25 @@ class GatewayService:
         if not isinstance(body, dict):
             return JSONResponse({"error": "invalid config"}, status_code=400)
 
-        payload = body.get("gateway", body)
-        if not isinstance(payload, dict):
+        gateway_payload = body.get("gateway")
+        persona_payload = body.get("persona")
+        if gateway_payload is None and persona_payload is None:
+            gateway_payload = body
+        if gateway_payload is not None and not isinstance(gateway_payload, dict):
             return JSONResponse({"error": "invalid gateway config"}, status_code=400)
-        updated = self._apply_gateway_memory_config(payload)
+        if persona_payload is not None and not isinstance(persona_payload, dict):
+            return JSONResponse({"error": "invalid persona config"}, status_code=400)
+
+        updated = []
+        if gateway_payload is not None:
+            updated.extend(self._apply_gateway_memory_config(gateway_payload))
+        if persona_payload is not None:
+            updated.extend(self._apply_persona_config(persona_payload))
         return JSONResponse({
             "ok": True,
             "updated": updated,
             "gateway": self._gateway_memory_config_payload(),
+            "persona": self._persona_config_payload(),
         })
 
     async def handle_health(self, request: Request) -> JSONResponse:
@@ -476,7 +522,10 @@ class GatewayService:
         injected_ids: list[str] | None = None
 
         if is_new_user_turn:
-            if self._should_inject_interval(session_id, self.current_inner_state_interval_rounds):
+            if self.persona_engine.enabled and self._should_inject_interval(
+                session_id,
+                self.current_inner_state_interval_rounds,
+            ):
                 persona_state = await self.persona_engine.build_pre_reply_guidance(
                     session_id, current_user_query
                 )
@@ -842,6 +891,12 @@ class GatewayService:
         assistant_message: dict[str, Any] | None,
         recalled_ids: list[str],
     ) -> None:
+        if not self.persona_engine.enabled:
+            logger.info(
+                "Persona post-reply update skipped | session=%s reason=disabled",
+                session_id,
+            )
+            return
         if not user_message.strip():
             logger.info(
                 "Persona post-reply update skipped | session=%s reason=missing_user_message",
