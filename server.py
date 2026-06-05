@@ -7167,9 +7167,9 @@ async def api_config_get(request):
                 gateway_cfg.get("portrait_memory_include_anchors"),
                 True,
             ),
-            "query_planner_enabled": _bool_value(gateway_cfg.get("query_planner_enabled"), False),
+            "query_planner_enabled": _bool_value(gateway_cfg.get("query_planner_enabled"), True),
             "query_planner_model": gateway_cfg.get("query_planner_model", ""),
-            "query_planner_min_chars": gateway_cfg.get("query_planner_min_chars", 40),
+            "query_planner_min_chars": gateway_cfg.get("query_planner_min_chars", 16),
             "query_planner_max_queries": gateway_cfg.get("query_planner_max_queries", 3),
             "query_planner_max_tokens": gateway_cfg.get("query_planner_max_tokens", 360),
             "memory_detail_recall_enabled": _bool_value(gateway_cfg.get("memory_detail_recall_enabled"), False),
@@ -7453,7 +7453,7 @@ async def api_config_update(request):
             ]
             updated.append("gateway.portrait_memory_include_anchors")
         if "query_planner_enabled" in g:
-            gateway_cfg["query_planner_enabled"] = _bool_value(g["query_planner_enabled"], False)
+            gateway_cfg["query_planner_enabled"] = _bool_value(g["query_planner_enabled"], True)
             gateway_hot_update_body["query_planner_enabled"] = gateway_cfg["query_planner_enabled"]
             updated.append("gateway.query_planner_enabled")
         if "query_planner_model" in g:
@@ -7461,7 +7461,7 @@ async def api_config_update(request):
             gateway_hot_update_body["query_planner_model"] = gateway_cfg["query_planner_model"]
             updated.append("gateway.query_planner_model")
         if "query_planner_min_chars" in g:
-            gateway_cfg["query_planner_min_chars"] = _int_between(g["query_planner_min_chars"], 40, 0, 1000)
+            gateway_cfg["query_planner_min_chars"] = _int_between(g["query_planner_min_chars"], 16, 0, 1000)
             gateway_hot_update_body["query_planner_min_chars"] = gateway_cfg["query_planner_min_chars"]
             updated.append("gateway.query_planner_min_chars")
         if "query_planner_max_queries" in g:
@@ -7695,14 +7695,14 @@ async def api_config_update(request):
                 if "query_planner_enabled" in body["gateway"]:
                     sc_gateway["query_planner_enabled"] = _bool_value(
                         body["gateway"]["query_planner_enabled"],
-                        False,
+                        True,
                     )
                 if "query_planner_model" in body["gateway"]:
                     sc_gateway["query_planner_model"] = str(body["gateway"]["query_planner_model"] or "").strip()
                 if "query_planner_min_chars" in body["gateway"]:
                     sc_gateway["query_planner_min_chars"] = _int_between(
                         body["gateway"]["query_planner_min_chars"],
-                        40,
+                        16,
                         0,
                         1000,
                     )

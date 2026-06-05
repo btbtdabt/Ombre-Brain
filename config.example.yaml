@@ -269,9 +269,9 @@ gateway:
   portrait_memory_budget: 360
   portrait_memory_max_sources: 8
   portrait_memory_include_anchors: true # false = profile_fact only; never includes pinned/protected by default
-  query_planner_enabled: false # extra LLM call: split long/low-confidence messages into short recall queries
+  query_planner_enabled: true  # extra LLM call: split long/low-confidence messages into short recall queries
   query_planner_model: ""      # empty = gateway upstream_default_model
-  query_planner_min_chars: 40  # only consider planner on long or multi-topic messages
+  query_planner_min_chars: 16  # also catches short emotional reason lookups like "今天为什么激动哭"
   query_planner_max_queries: 3
   query_planner_max_tokens: 360
   memory_detail_recall_enabled: false # optional internal [memory_detail ids="..."] retry for admitted bucket ids

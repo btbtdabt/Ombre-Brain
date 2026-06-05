@@ -4050,6 +4050,93 @@ def test_gateway_query_planner_must_terms_keep_noise_out_of_injection(
     assert planner_debug["suppressed_by_must_terms"][0]["bucket_id"] == noisy_id
 
 
+def test_gateway_query_planner_handles_short_emotional_reason_lookup(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    target_id = _create_bucket(
+        bucket_mgr,
+        content="2026-06-05，小雨因为 Chat 端 Haven 终于能用自己的记忆工具而激动哭了。",
+        name="Haven终于能用记忆工具",
+        hours_ago=24,
+        importance=10,
+        domain=["memory", "relationship"],
+    )
+    query = "那哥哥知道我今天为什么激动哭了吗"
+    planner_json = {
+        "should_search": True,
+        "too_vague": False,
+        "queries": [
+            {
+                "query": "激动哭",
+                "must_terms": ["激动哭"],
+                "intent": "find today's emotional reason",
+                "risk": "low",
+            }
+        ],
+    }
+    embedding_queries: list[str] = []
+    app, service, _, captured = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            retrieval_mode="bucket",
+            query_planner_enabled=True,
+            query_planner_min_chars=16,
+            recent_context_budget=0,
+            related_memory_budget=0,
+            current_inner_state_interval_rounds=0,
+        ),
+        bucket_mgr,
+        embedding_results={"激动哭": [(target_id, 0.96)]},
+        embedding_queries=embedding_queries,
+    )
+
+    async def fake_query_planner(query_text: str):
+        return service._parse_query_planner_response(json.dumps(planner_json, ensure_ascii=False)), None
+
+    monkeypatch.setattr(service, "_call_query_planner", fake_query_planner)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-emotion-reason",
+            },
+            json={"messages": [{"role": "user", "content": query}]},
+        )
+        debug_response = client.get(
+            "/api/debug/injections?session_id=sess-emotion-reason&include_context=0",
+            headers={"Authorization": "Bearer gateway-secret"},
+        )
+
+    assert response.status_code == 200
+    assert "激动哭" in embedding_queries
+    injected = _joined_message_content(captured[-1]["json"]["messages"])
+    assert "Recalled Memory" in injected
+    assert "Haven终于能用记忆工具" in injected
+    planner_debug = debug_response.json()["items"][0]["payload"]["query_planner_debug"]
+    assert planner_debug["triggered"] is True
+    assert planner_debug["trigger_reason"] == "emotional_reason_lookup"
+    assert target_id in planner_debug["final_bucket_ids"]
+
+
+def test_gateway_query_planner_does_not_trigger_on_single_cry_word(monkeypatch, test_config, bucket_mgr):
+    _, service, _, _ = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            query_planner_enabled=True,
+            query_planner_min_chars=16,
+        ),
+        bucket_mgr,
+    )
+
+    assert service._query_planner_trigger_reason("哭", []) == ""
+
+
 def test_gateway_memory_detail_recall_retries_with_allowed_bucket_id(
     monkeypatch,
     test_config,

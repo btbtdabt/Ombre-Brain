@@ -109,8 +109,9 @@ QUERY_PLANNER_SYSTEM_PROMPT = """You are Ombre Memory Query Planner.
 Return only strict JSON. Do not write memory. Do not choose final memories.
 Split the user's long mixed message into 1-3 short memory search anchors.
 Each query must be concrete and should preserve names, projects, people, places, or events.
+For a short emotional reason lookup, preserve compound emotion phrases such as 激动哭, 感动哭, or 难过原因 when they are the user's actual anchor.
 Each query must include must_terms: concrete words that a candidate memory should contain at least one of.
-Do not include generic terms such as recent, memory, context, current, remember, emotion, status.
+Do not include generic terms such as recent, memory, context, current, remember, emotion, status, or the single word 哭.
 If the message is too vague or has no searchable memory anchor, return should_search=false.
 Schema:
 {
@@ -326,7 +327,7 @@ class GatewayService:
         self.query_planner_model = str(
             self.gateway_cfg.get("query_planner_model") or self.upstream_default_model or ""
         ).strip()
-        self.query_planner_min_chars = max(0, int(self.gateway_cfg.get("query_planner_min_chars", 40)))
+        self.query_planner_min_chars = max(0, int(self.gateway_cfg.get("query_planner_min_chars", 16)))
         self.query_planner_max_queries = max(1, min(3, int(self.gateway_cfg.get("query_planner_max_queries", 3))))
         self.query_planner_max_tokens = max(128, int(self.gateway_cfg.get("query_planner_max_tokens", 360)))
         self.query_planner_score_bonus = self._clamp(
@@ -4574,9 +4575,34 @@ class GatewayService:
         long_enough = compact_len >= self.query_planner_min_chars
         if multi_topic:
             return "multi_topic"
+        if not selected_items and self._query_looks_emotional_reason_lookup(text):
+            return "emotional_reason_lookup"
         if not selected_items and long_enough:
             return "direct_recall_empty_or_low_confidence"
         return ""
+
+    @staticmethod
+    def _query_looks_emotional_reason_lookup(query: str) -> bool:
+        text = str(query or "").strip().lower()
+        if not text:
+            return False
+        temporal_terms = (
+            "今天", "刚才", "刚刚", "这次", "现在", "今晚", "昨晚",
+            "today", "just now", "tonight",
+        )
+        reason_terms = (
+            "为什么", "知道", "记得", "想起", "想起来", "原因", "因为", "怎么",
+            "why", "know", "remember", "reason",
+        )
+        emotion_terms = (
+            "激动哭", "感动哭", "高兴哭", "开心哭", "难过哭", "委屈哭",
+            "哭了", "哭吗", "哭呢", "想哭", "激动", "感动", "难过", "委屈",
+            "崩溃", "破防",
+        )
+        has_temporal = any(term and term in text for term in temporal_terms)
+        has_reason = any(term and term in text for term in reason_terms)
+        has_emotion = any(term and term in text for term in emotion_terms)
+        return has_emotion and (has_temporal or has_reason)
 
     def _query_looks_multi_topic(self, query: str) -> bool:
         text = str(query or "").strip()
