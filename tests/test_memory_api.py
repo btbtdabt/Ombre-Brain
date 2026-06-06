@@ -124,6 +124,35 @@ async def finish_blocking_embedding(embedding_engine: BlockingEmbeddingEngine):
 
 
 @pytest.mark.asyncio
+async def test_pulse_reports_feel_count_and_display_total(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    await bucket_mgr.create(content="固化记忆", name="固化", bucket_type="permanent")
+    await bucket_mgr.create(content="动态记忆", name="动态", bucket_type="dynamic")
+    feel_id = await bucket_mgr.create(content="一条 whisper", name="whisper", bucket_type="feel")
+    archived_id = await bucket_mgr.create(content="旧动态", name="旧动态", bucket_type="dynamic")
+    await bucket_mgr.archive(archived_id)
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+
+    result = await server.pulse()
+
+    assert "固化记忆桶: 1 个" in result
+    assert "动态记忆桶: 1 个" in result
+    assert "情绪/印象桶: 1 个" in result
+    assert "归档记忆桶: 1 个" in result
+    assert "当前显示桶: 3 个" in result
+    assert "全量记忆桶: 4 个" in result
+    assert f"bucket_id:{feel_id}" in result
+    assert f"bucket_id:{archived_id}" not in result
+
+    result_with_archive = await server.pulse(include_archive=True)
+
+    assert "当前显示桶: 4 个" in result_with_archive
+    assert f"bucket_id:{archived_id}" in result_with_archive
+
+
+@pytest.mark.asyncio
 async def test_create_memory_api_requires_write_token(monkeypatch, bucket_mgr):
     import server
 

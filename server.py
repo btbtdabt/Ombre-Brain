@@ -2454,11 +2454,17 @@ async def pulse(include_archive: bool = False) -> str:
     except Exception as e:
         return f"获取系统状态失败: {e}"
 
+    active_count = stats["permanent_count"] + stats["dynamic_count"] + stats["feel_count"]
+    total_count = active_count + stats["archive_count"]
+    visible_count = total_count if include_archive else active_count
     status = (
         f"=== Ombre Brain 记忆系统 ===\n"
         f"固化记忆桶: {stats['permanent_count']} 个\n"
         f"动态记忆桶: {stats['dynamic_count']} 个\n"
+        f"情绪/印象桶: {stats['feel_count']} 个\n"
         f"归档记忆桶: {stats['archive_count']} 个\n"
+        f"当前显示桶: {visible_count} 个\n"
+        f"全量记忆桶: {total_count} 个\n"
         f"总存储大小: {stats['total_size_kb']:.1f} KB\n"
         f"衰减引擎: {'运行中' if decay_engine.is_running else '已停止'}\n"
     )
