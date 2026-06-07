@@ -1133,10 +1133,11 @@ def _format_handoff_personal_recent_continuity(all_buckets: list[dict], limit: i
     lines = []
     for date_key, _updated, text in rows[: max(0, limit)]:
         label = f"[{date_key}] " if date_key else ""
-        lines.append(f"- {label}personal: {_clip_text(text, 190)}")
         trace = _handoff_persona_trace_for_date(date_key)
         if trace:
             lines.append(trace)
+        personal_limit = 135 if trace else 190
+        lines.append(f"- {label}personal: {_clip_text(text, personal_limit)}")
     return "\n".join(lines)
 
 
