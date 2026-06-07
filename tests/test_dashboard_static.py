@@ -60,6 +60,22 @@ def test_dashboard_bucket_list_has_bulk_delete_controls():
     assert "受保护记忆不能批量删除" in html
 
 
+def test_dashboard_exposes_darkroom_door_without_release_or_body_fields():
+    html = Path("dashboard.html").read_text(encoding="utf-8")
+    door_block = html.split('id="darkroom-door"', 1)[1].split('<div class="search-bar">', 1)[0]
+    render_block = html.split("function renderDarkroomDoor", 1)[1].split("async function loadDarkroomDoor", 1)[0]
+    load_block = html.split("async function loadDarkroomDoor", 1)[1].split("function monthStart", 1)[0]
+
+    assert "Darkroom Door" in door_block
+    assert "BASE + '/api/darkroom/status'" in load_block
+    assert "loadDarkroomDoor();" in html
+    assert "previous_completeness" in render_block
+    assert "last_completeness" in render_block
+    assert "darkroom_release" not in html
+    assert ".content" not in render_block
+    assert ".note" not in render_block
+
+
 def test_dashboard_breath_debug_loads_diffusion_paths():
     html = Path("dashboard.html").read_text(encoding="utf-8")
     breath_block = html.split("async function runBreathDebug()", 1)[1].split("function breathGateTrace", 1)[0]
