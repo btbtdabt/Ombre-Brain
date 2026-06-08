@@ -6708,6 +6708,7 @@ class GatewayService:
             add_section("Just Now Chat Context", just_now_context)
             add_section("Recent Context", recent_context)
             add_section("Context Mode", f"context_mode: {context_mode}" if context_mode.strip() else "")
+            add_section("Memory Detail Request", memory_detail_recall_instruction)
             if "[created:" in str(recalled_memory or "") or "[created:" in str(targeted_memory_detail or ""):
                 add_section(
                     "Date Boundary",
@@ -6717,7 +6718,6 @@ class GatewayService:
             add_section("Date Persona Trace", date_persona_trace)
             add_section("Targeted Memory Detail", targeted_memory_detail)
             add_section("Diffused Memory", related_memory)
-            add_section("Memory Detail Request", memory_detail_recall_instruction)
             add_section("New Window Handoff Hint", handoff_tool_hint)
             if persona_block.strip():
                 dynamic_sections.extend(["", persona_block])
