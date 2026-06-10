@@ -77,11 +77,17 @@ def test_auto_vague_query_without_topic_is_suppressed():
     assert policy.is_auto_query_too_vague("要不要回复一下。或者跟个“嗯。”")
     assert policy.is_auto_query_too_vague("那次要不要回个嗯")
     assert policy.is_auto_query_too_vague("这条帖子可以评论一下吗")
+    assert policy.is_auto_query_too_vague("🥺")
+    assert policy.is_auto_query_too_vague("qwq")
+    assert policy.is_auto_query_too_vague("哈哈")
+    assert policy.is_auto_query_too_vague("老公～")
+    assert policy.is_auto_query_too_vague("试一下handoff😽")
     assert not policy.is_auto_query_too_vague("最近少女暴君")
     assert not policy.is_auto_query_too_vague("今天猫咪药量")
     assert not policy.is_auto_query_too_vague("折角那次要不要回复")
     assert not policy.is_auto_query_too_vague("花园帖子要不要回复")
     assert not policy.is_auto_query_too_vague("handoff bridge 注入 读图 原文")
+    assert not policy.is_auto_query_too_vague("试一下召回 handoff")
 
     decision = policy.assess(
         "这张图片的上下文我想起来了",
@@ -115,6 +121,13 @@ def test_auto_concrete_topic_query_marks_short_chinese_topics_for_context_filter
     assert not policy.is_auto_concrete_topic_query("这张图片的上下文我想起来了")
     assert not policy.is_auto_concrete_topic_query("种子项目现在怎样")
     assert not policy.is_auto_concrete_topic_query("小雨")
+
+
+def test_ai_reaction_name_uses_identity_config():
+    policy = RecallPolicy(ai_reaction_names=["Lapis"])
+
+    assert policy.is_auto_query_too_vague("Lapis")
+    assert not policy.is_auto_query_too_vague("Haven")
 
 
 def test_topic_evidence_terms_are_filtered_once_in_policy():

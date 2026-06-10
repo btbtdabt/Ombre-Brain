@@ -392,6 +392,7 @@ class GatewayService:
             self.relevance_options,
             semantic_threshold=self.recall_admission_semantic_score,
             rerank_threshold=self.recall_admission_rerank_score,
+            ai_reaction_names=[self.identity.get("ai_name")],
         )
         self.query_planner_enabled = self._bool_config_value(
             self.gateway_cfg.get("query_planner_enabled"),
@@ -6328,6 +6329,15 @@ class GatewayService:
             required_terms=required_terms,
         )
         lexical_terms = self._planner_lexical_match_terms(required_terms)
+        if (
+            not lexical_terms
+            and self.recall_policy.is_auto_concrete_topic_query(candidate_query)
+            and not self.recall_policy.requires_topic_evidence(candidate_query)
+            and not self._query_should_skip_word_map_hint(candidate_query)
+        ):
+            lexical_terms = self._planner_lexical_match_terms(
+                self.recall_policy.specific_query_terms(candidate_query)
+            )
         lexical_ids = {
             str(bucket.get("id") or "")
             for bucket in eligible
@@ -6673,6 +6683,8 @@ class GatewayService:
     ) -> tuple[dict[str, float], dict[str, dict[str, Any]]]:
         if not self._word_map_hint_available():
             return {}, {}
+        if self._query_should_skip_word_map_hint(query):
+            return {}, {}
         terms = self.recall_policy.specific_query_terms(query)
         for term in required_terms or []:
             cleaned = str(term or "").strip()
@@ -6709,6 +6721,41 @@ class GatewayService:
             evidence = raw_evidence.get(bucket_id, {}) if isinstance(raw_evidence, dict) else {}
             debug[bucket_id] = evidence if isinstance(evidence, dict) else {}
         return scores, debug
+
+    @staticmethod
+    def _query_should_skip_word_map_hint(query: str) -> bool:
+        text = str(query or "").strip().lower()
+        if not text:
+            return False
+        probe_markers = (
+            "试一下",
+            "试试",
+            "测试一下",
+            "测试",
+            "test",
+            "try",
+        )
+        if not any(marker in text for marker in probe_markers):
+            return False
+        recall_intent_markers = (
+            "记得",
+            "记忆",
+            "想起",
+            "回忆",
+            "召回",
+            "检索",
+            "查一下",
+            "找一下",
+            "为什么",
+            "原因",
+            "remember",
+            "recall",
+            "memory",
+            "search",
+            "look up",
+            "why",
+        )
+        return not any(marker in text for marker in recall_intent_markers)
 
     def _word_map_hint_debug_from_items(self, items: list[dict]) -> dict[str, Any]:
         payload = {

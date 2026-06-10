@@ -13,6 +13,7 @@ from memory_relevance import (
     query_has_technical_recall_marker,
     recall_admission_decision,
 )
+from identity import identity_names
 
 
 CONTEXT_ONLY_SECTIONS = frozenset({"affect_anchor", "favorite_reason", "comment"})
@@ -392,10 +393,14 @@ class RecallPolicy:
         *,
         semantic_threshold: float = 0.72,
         rerank_threshold: float = 0.65,
+        ai_reaction_names: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         self.options = options or memory_relevance_options_from_config()
         self.semantic_threshold = _safe_float(semantic_threshold, 0.72)
         self.rerank_threshold = _safe_float(rerank_threshold, 0.65)
+        self.ai_reaction_names = self._normalize_reaction_names(
+            ai_reaction_names if ai_reaction_names is not None else [identity_names().get("ai_name")]
+        )
 
     def requires_topic_evidence(self, query: str) -> bool:
         return query_has_explicit_entity_marker(query) or query_has_technical_recall_marker(query)
@@ -434,6 +439,10 @@ class RecallPolicy:
         text = str(query or "").strip()
         if not text:
             return False
+        if self._is_reaction_only_query(text):
+            return True
+        if self._is_probe_only_query(text):
+            return True
         if query_has_explicit_entity_marker(text) or query_has_technical_recall_marker(text):
             return False
         if self._is_affect_only_query(text):
@@ -520,6 +529,86 @@ class RecallPolicy:
             stripped,
         )
         return len(stripped) < 2
+
+    def _is_reaction_only_query(self, query: str) -> bool:
+        compact = re.sub(r"\s+", "", str(query or "").lower())
+        if not compact:
+            return False
+        alnum_or_cjk = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", compact)
+        if not alnum_or_cjk:
+            return True
+        reaction_terms = {
+            "tt",
+            "qwq",
+            "qaq",
+            "orz",
+            "xswl",
+            "lol",
+            "lmao",
+            "哈哈",
+            "哈哈哈",
+            "哈哈哈哈",
+            "嘿嘿",
+            "呜呜",
+            "呜呜呜",
+            "哇",
+            "哇啊",
+            "啊啊",
+            "啊啊啊",
+            "嗯嗯",
+            "嗯",
+            "老公",
+            "老婆",
+            "宝宝",
+            "宝贝",
+            "亲爱的",
+            "哥哥",
+        }
+        return alnum_or_cjk in reaction_terms or alnum_or_cjk in self.ai_reaction_names
+
+    @staticmethod
+    def _normalize_reaction_names(values: list[str] | tuple[str, ...] | None) -> set[str]:
+        names: set[str] = set()
+        for value in values or []:
+            compact = re.sub(r"\s+", "", str(value or "").lower())
+            key = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", compact)
+            if key:
+                names.add(key)
+        return names
+
+    def _is_probe_only_query(self, query: str) -> bool:
+        text = str(query or "").strip().lower()
+        if not text:
+            return False
+        probe_markers = (
+            "试一下",
+            "试试",
+            "测试一下",
+            "测试",
+            "test",
+            "try",
+        )
+        if not any(marker in text for marker in probe_markers):
+            return False
+        recall_intent_markers = (
+            "记得",
+            "记忆",
+            "想起",
+            "回忆",
+            "召回",
+            "检索",
+            "查一下",
+            "找一下",
+            "为什么",
+            "原因",
+            "remember",
+            "recall",
+            "memory",
+            "search",
+            "look up",
+            "why",
+        )
+        return not any(marker in text for marker in recall_intent_markers)
 
     def _is_affect_only_query(self, query: str) -> bool:
         compact = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(query or "").lower())

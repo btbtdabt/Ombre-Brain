@@ -3829,6 +3829,7 @@ def _recall_policy() -> RecallPolicy:
         _recall_relevance_options(),
         semantic_threshold=semantic_threshold,
         rerank_threshold=rerank_threshold,
+        ai_reaction_names=[identity_names(config).get("ai_name")],
     )
 
 

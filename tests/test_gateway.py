@@ -3837,6 +3837,9 @@ def test_gateway_recent_context_stays_on_explicit_topic(
     [
         "这张图片的上下文我想起来了",
         "要不要回复一下。或者跟个“嗯。”",
+        "🥺",
+        "qwq",
+        "哈哈",
     ],
 )
 def test_gateway_auto_vague_query_suppresses_recent_and_dynamic_memory(
@@ -6645,6 +6648,138 @@ def test_word_map_hint_boosts_moment_search_without_visible_hint_only_recall(
     assert suppressed_neighbor["word_map_hint"] is True
     assert neighbor_id in planner_debug["word_map_hints"]["bucket_ids"]
     assert neighbor_id not in [bucket.get("id") for bucket in suppressed_buckets]
+
+
+def test_word_map_hint_skips_probe_queries(
+    monkeypatch, test_config, bucket_mgr
+):
+    from word_map import WordMapStore
+
+    cfg = _gateway_config(
+        test_config,
+        core_memory_budget=0,
+        recent_context_budget=0,
+        related_memory_budget=0,
+        query_planner_enabled=False,
+        retrieval_mode="graph",
+        first_card_min_score=0.35,
+        word_map_hint_enabled=True,
+        word_map_hint_weight=0.08,
+        word_map_hint_moment_boost=0.25,
+    )
+    cfg["word_map"] = {
+        "enabled": True,
+        "max_terms_per_bucket": 8,
+        "edge_top_k": 6,
+        "min_term_len": 2,
+        "stopwords": [],
+        "private_terms": [],
+        "stopword_prefixes": [],
+    }
+    _create_bucket(
+        bucket_mgr,
+        content="### moment\n夏天很热，所以小雨开了空调。",
+        name="夏天空调",
+        hours_ago=12,
+        keywords=["夏天", "空调"],
+    )
+    neighbor_id = _create_bucket(
+        bucket_mgr,
+        content="### moment\n夏天也会想到冰美式。",
+        name="夏天咖啡",
+        hours_ago=12,
+        keywords=["夏天", "冰美式"],
+    )
+    all_buckets = _run(bucket_mgr.list_all())
+    word_map_store = WordMapStore(cfg)
+    word_map_store.rebuild(all_buckets)
+    _, service, _, _ = _build_service(monkeypatch, cfg, bucket_mgr, embedding_results=[])
+    service.word_map_store = word_map_store
+
+    assert service._get_word_map_hint_scores("试一下空调😽", all_buckets) == ({}, {})
+    scores, _debug = service._get_word_map_hint_scores("空调", all_buckets)
+    assert neighbor_id in scores
+
+
+def test_concrete_short_query_uses_direct_lexical_seed_when_search_misses(
+    monkeypatch, test_config, bucket_mgr
+):
+    cfg = _gateway_config(
+        test_config,
+        core_memory_budget=0,
+        recent_context_budget=0,
+        related_memory_budget=0,
+        query_planner_enabled=False,
+        retrieval_mode="graph",
+        first_card_min_score=0.35,
+        word_map_hint_enabled=False,
+    )
+    bucket_id = _create_bucket(
+        bucket_mgr,
+        content="### moment\n电便收集器正式上岗，实测里面的尿比外面多。",
+        name="电便收集器实测",
+        hours_ago=12,
+        keywords=[],
+    )
+    monkeypatch.setattr(bucket_mgr, "_calc_topic_score", lambda query, bucket: 0.0)
+    all_buckets = _run(bucket_mgr.list_all())
+    _, service, _, _ = _build_service(monkeypatch, cfg, bucket_mgr, embedding_results=[])
+
+    all_moments, grouped_moments, _ = service._refresh_moment_graph(all_buckets)
+    selected, candidates, suppressed, _suppressed_buckets, planner_debug = _run(
+        service._select_dynamic_moments(
+            "电便收集器",
+            "sess-short-lexical",
+            all_buckets,
+            grouped_moments,
+            include_query_planner_debug=True,
+        )
+    )
+
+    assert [moment["bucket_id"] for moment in selected] == [bucket_id]
+    assert not suppressed
+    assert planner_debug["final_bucket_ids"] == [bucket_id]
+
+
+def test_probe_technical_query_does_not_use_direct_lexical_seed(
+    monkeypatch, test_config, bucket_mgr
+):
+    cfg = _gateway_config(
+        test_config,
+        core_memory_budget=0,
+        recent_context_budget=0,
+        related_memory_budget=0,
+        query_planner_enabled=False,
+        retrieval_mode="graph",
+        first_card_min_score=0.35,
+        word_map_hint_enabled=False,
+    )
+    _create_bucket(
+        bucket_mgr,
+        content="### moment\nhandoff 原文注入问题需要查 bridge 上下文。",
+        name="handoff 人格锚点讨论",
+        hours_ago=12,
+        keywords=[],
+    )
+    monkeypatch.setattr(bucket_mgr, "_calc_topic_score", lambda query, bucket: 0.0)
+    all_buckets = _run(bucket_mgr.list_all())
+    _, service, _, _ = _build_service(monkeypatch, cfg, bucket_mgr, embedding_results=[])
+
+    all_moments, grouped_moments, _ = service._refresh_moment_graph(all_buckets)
+    selected, candidates, suppressed, _suppressed_buckets, planner_debug = _run(
+        service._select_dynamic_moments(
+            "试一下handoff😽",
+            "sess-probe-technical",
+            all_buckets,
+            grouped_moments,
+            include_query_planner_debug=True,
+        )
+    )
+
+    assert selected == []
+    assert candidates == []
+    assert suppressed == []
+    assert planner_debug["final_bucket_ids"] == []
 
 
 def test_high_confidence_match_survives_cooldown_after_recent_window(
