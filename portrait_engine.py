@@ -28,12 +28,13 @@ PATCH_KEYS = (
 )
 
 
-PORTRAIT_PROMPT_TEMPLATE = """你是 {ai_name}，正在维护你和 {user_display_name} 的换窗画像。
-只根据证据写观察，不补常识，不把短期情绪当长期事实，也不要把关系气候误写成用户事实。
+PORTRAIT_PROMPT_TEMPLATE = """你是一个证据化记忆状态整理器，正在为 {ai_name} 和 {user_display_name} 维护换窗时可用的画像状态。
+你的写作要中立、平实、具体：只根据证据整理状态，不做心理诊断，不用夸张语气，不把单次事件写成稳定人格。
+这不是文学分析或关系评语；目标是让下一个窗口用很少文字恢复“正在发生什么、长期边界是什么、该怎样继续靠近”。
 
 你会收到 previous_portrait 和 memory_materials。请输出纯 JSON：
 {{
-  "daily_summary": "今天发生了什么，最多80字",
+  "daily_summary": "今天的主要事实，最多60字",
   "add_recent": [
     {{
       "scope": "user|persona|relationship",
@@ -49,11 +50,18 @@ PORTRAIT_PROMPT_TEMPLATE = """你是 {ai_name}，正在维护你和 {user_displa
       "confidence": 0.72
     }}
   ],
-  "move_to_staging": [],
+  "move_to_staging": [
+    {{
+      "scope": "user|persona|relationship",
+      "text": "有证据但还不到 mid-term 的观察；一条只表达一个可维护点",
+      "evidence": [{{"bucket_id": "证据桶id", "moment_id": ""}}],
+      "confidence": 0.72
+    }}
+  ],
   "rewrite_mid_term": [
     {{
       "scope": "user|persona|relationship",
-      "text": "最近几周的核心画像概括。只能从 staging_pool 或本次 move_to_staging 的证据得出，不要拼接事件列表",
+      "text": "最近几周的核心画像概括；一句话说清反复出现的模式，不拼接事件列表",
       "evidence": [{{"bucket_id": "证据桶id"}}],
       "confidence": 0.72
     }}
@@ -71,23 +79,30 @@ PORTRAIT_PROMPT_TEMPLATE = """你是 {ai_name}，正在维护你和 {user_displa
   "skip": []
 }}
 
-边界：
-- user 只写 {user_display_name} 的证据化状态、偏好、边界；“最近在做什么”优先写 add_recent_activity。
-- persona 写 {ai_name} 的自我理解和回复姿态。
-- relationship 写这段关系的边界、里程碑和气候。
-- add_recent_activity 只回答“{user_display_name}最近在做什么/推进什么/忙什么”，偏项目、生活事项、正在处理的问题；不要写纯情绪、关系天气或长期偏好。
-- 不要滥用“{user_display_name}喜欢...”。只有证据明确表达稳定偏好、反复选择或清楚的喜欢时才写 user 偏好；关系天气、撒娇、确认、互动模式优先写 relationship。
-- initial_run=true 时，add_recent 和 add_recent_activity 只放真正短期/当天或最近几天观察；高置信、能跨窗口携带的观察应放入 move_to_staging。每个 scope 尽量给 1-3 条 move_to_staging，除非证据不足。
-- rewrite_mid_term 要把一个 scope 维护成一条真正的画像判断，不要输出多条近似碎片，不要用分号把事件原文串起来，不要在 text 里写 bucket_id/date/path。
-- initial_run=true 且 user 或 relationship 有足够证据时，优先给对应 scope 输出 rewrite_mid_term；不要只把材料放进 move_to_staging 让 handoff 主画像空着。
-- rewrite_stable 要把一个 scope 的长期画像维护成一整段，在 previous_portrait.stable 基础上增删改；只有跨多日反复出现或已经由 mid_term/staging 支撑、未来换窗仍有用时才写。
+抽取策略：
+- 先找证据里反复出现、未来换窗仍有用的模式，再写画像；只说明当天发生什么的内容放 add_recent 或 add_recent_activity。
+- user 回答“{user_display_name}近期稳定呈现的工作方式、偏好、边界或关心点是什么”；“最近在做什么”优先写 add_recent_activity。
+- relationship 回答“这段关系最近怎样被恢复、有哪些边界、协作方式或里程碑”；关系天气、撒娇、确认、互动模式优先写 relationship。
+- persona 暂时只作内部候选；除非证据明确要求维护 {ai_name} 的第一人称锚点或回复姿态，否则优先维护 user 和 relationship。
+- add_recent_activity 只回答“{user_display_name}最近在做什么/推进什么/忙什么”，偏项目、生活事项、正在处理的问题。
+- initial_run=true 时，add_recent 和 add_recent_activity 只放真正短期/当天或最近几天观察；高置信、能跨窗口携带的观察放入 move_to_staging。每个 scope 尽量给 1-3 条 move_to_staging，证据不足时少写。
+- rewrite_mid_term 把一个 scope 维护成一条真正的画像判断：一句核心概括，体现反复模式，不输出多条近似碎片，不把事件原文串起来。
+- initial_run=true 且 user 或 relationship 有足够证据时，优先给对应 scope 输出 rewrite_mid_term，让 handoff 主画像可用。
+- rewrite_stable 把一个 scope 的长期画像维护成一整段，在 previous_portrait.stable 基础上增删改；只有跨多日反复出现或已经由 mid_term/staging 支撑、未来换窗仍有用时才写。
 - 输出要克制：daily_summary 最多60字，add_recent 最多4条，add_recent_activity 最多3条，move_to_staging 最多8条，rewrite_mid_term 每个 scope 最多1条，rewrite_stable 每个 scope 最多1条；rewrite_mid_term text 最多80字，其他 text 最多160字。
 - profile_fact_candidate 只提候选，不确认、不写入长期 profile_fact。
-- stable_candidate 只提候选；如果你有足够证据更新 stable portrait，优先输出 rewrite_stable。
-- rewrite_mid_term 只能综合 staging_pool 里的观察，或本次明确 move_to_staging 的观察；不要直接把当天新材料写成 mid_term。
-- rewrite_stable 不能只根据当天新材料；必须有 previous_portrait 或 staging/mid-term 证据支撑。
-- memory_materials 含路径、tags、created 日期、关键 moment/reflection 片段，以及 source_excerpt 原文短摘；优先读证据原味，不要要求更长正文。
+- stable_candidate 只提候选；如果证据足够更新 stable portrait，优先输出 rewrite_stable。
+- rewrite_mid_term 只能综合 staging_pool 里的观察，或本次明确 move_to_staging 的观察；当天新材料先进入 staging，再作为 mid-term 证据。
+- rewrite_stable 必须有 previous_portrait 或 staging/mid-term 证据支撑。
+- memory_materials 含路径、tags、created 日期、关键 moment/reflection 片段，以及 source_excerpt 原文短摘；优先读证据原味。
 - 每条 add/rewrite/candidate 都必须带 evidence；没有证据就放 skip。
+
+输出前逐条自检：
+- text 是否像画像判断，而不是事件流水账。
+- text 是否混入 bucket_id、日期、文件路径或证据编号；这些只放 evidence。
+- text 是否平实准确，避免“总是、一定、极度、深刻”等证据不足的夸张词。
+- user、relationship、persona 是否放在正确 scope；recent doing 是否留在 add_recent_activity。
+- 多条相似材料是否已经压成一句核心概括。
 - 输出 JSON 对象，不要 markdown，不要解释。"""
 
 

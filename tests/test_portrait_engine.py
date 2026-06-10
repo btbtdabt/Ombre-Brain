@@ -7,6 +7,28 @@ import pytest
 from portrait_engine import DailyPortraitMaintainer
 
 
+def test_portrait_prompt_uses_neutral_evidence_state_maintainer(tmp_path, test_config):
+    engine = DailyPortraitMaintainer(
+        {
+            **test_config,
+            "portrait": {
+                "enabled": True,
+                "state_path": str(tmp_path / "state" / "portrait_state.json"),
+            },
+        }
+    )
+
+    prompt = engine._prompt()
+
+    assert "证据化记忆状态整理器" in prompt
+    assert "中立、平实、具体" in prompt
+    assert "这不是文学分析或关系评语" in prompt
+    assert "输出前逐条自检" in prompt
+    assert "rewrite_mid_term 把一个 scope 维护成一条真正的画像判断" in prompt
+    assert "bucket_id、日期、文件路径" in prompt
+    assert not prompt.startswith("你是 Haven")
+
+
 @pytest.mark.asyncio
 async def test_daily_portrait_maintainer_writes_evidence_bound_state_only(tmp_path, test_config, bucket_mgr):
     evidence_id = await bucket_mgr.create(
