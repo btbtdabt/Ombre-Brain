@@ -211,6 +211,8 @@ README.md               # 示例文本
 
 当前推荐方式：先走一键脚本。它会按 `VPS / Windows / Python 直跑` 引导首次部署、更新、备份、排查、迁移和模型配置；熟悉目录挂载和 Docker Compose 后，再看下面的手动配置说明。
 
+如果目标是“远程可用、电脑不用 24/7 开机”，推荐把 Ombre 跑在 VPS/云主机上，再用 Cloudflare Tunnel 提供 HTTPS 域名。Cloudflare Tunnel 不是托管运行环境，仍需要一台持续在线的 origin 服务器。当前仓库提供了 `compose.cloudflare.yml` 和 [`docs/cloudflare-remote-deploy.md`](docs/cloudflare-remote-deploy.md)。
+
 ### 推荐入口：脚本
 
 首次部署或日常更新，优先从仓库根目录进入菜单：
@@ -330,6 +332,12 @@ OMBRE_CHATGPT_OAUTH_REDIRECT_URIS=https://claude.ai/api/mcp/auth_callback
 ```
 
 `MCP_BEARER_TOKEN` 只在接 RiJi/Haven-diary 摘记时需要；不接外部日记系统就不要配置 diary URL/token。
+
+Cloudflare Tunnel token 不放在 `.env`，避免被 `ombre-brain` / `ombre-gateway` 容器读到。使用 `compose.cloudflare.yml` 时，复制 `cloudflare.env.example` 为 `cloudflare.env`，然后只写：
+
+```text
+TUNNEL_TOKEN=
+```
 
 `OMBRE_DREAM_API_KEY` 默认按 DeepSeek 官方 OpenAI-compatible API 使用；如果换别的服务，可再加：
 
@@ -473,6 +481,15 @@ ombre-gateway
 ```
 
 新机器可以复制 `compose.hk.yml` 再按自己的路径、端口和镜像策略调整。
+
+如果通过 Cloudflare Tunnel 对外提供 HTTPS，使用 `compose.cloudflare.yml`。它和 `compose.hk.yml` 一样启动 `ombre-brain` / `ombre-gateway`，但端口只绑定到 `127.0.0.1` 用于本机健康检查，并额外启动 `cloudflared`。Cloudflare 里配置两个 hostname：
+
+```text
+brain.example.com   -> http://ombre-brain:8000
+gateway.example.com -> http://ombre-gateway:8010
+```
+
+完整步骤见 [`docs/cloudflare-remote-deploy.md`](docs/cloudflare-remote-deploy.md)。
 
 `OMBRE_GATEWAY_ADMIN_URL` 用来让 Dashboard 改“记忆浮现”里的参数后，现场通知 `ombre-gateway`。目前会热更新冷却时间/轮数、直命中展示形状、召回模式，以及 `memory_diffusion` 的扩散和链式扩散参数。不加这条也能跑；Dashboard 仍会更新 `ombre-brain` 运行时和 yaml，但 Gateway 要重启后才读到这些值。
 

@@ -1,0 +1,57 @@
+# VPS + Cloudflare Tunnel deployment.
+# Run this on an always-on server, not on a personal PC you plan to shut down.
+#
+# Cloudflare Zero Trust tunnel routes should point to the Docker service names:
+#   brain.example.com   -> http://ombre-brain:8000
+#   gateway.example.com -> http://ombre-gateway:8010
+
+services:
+  ombre-brain:
+    build: .
+    container_name: ombre-brain
+    restart: unless-stopped
+    command: ["python", "server.py"]
+    env_file:
+      - .env
+    environment:
+      OMBRE_TRANSPORT: streamable-http
+      OMBRE_BUCKETS_DIR: /data
+      OMBRE_STATE_DIR: /state
+      OMBRE_ENV_PATH: /app/.env
+      OMBRE_GATEWAY_ADMIN_URL: http://ombre-gateway:8010/api/config
+    ports:
+      - "127.0.0.1:18001:8000"
+    volumes:
+      - /srv/ombre-brain/buckets:/data
+      - /srv/ombre-brain/state:/state
+      - /srv/ombre-brain/config.yaml:/app/config.yaml:ro
+      - /opt/Ombre-Brain/.env:/app/.env
+
+  ombre-gateway:
+    build: .
+    container_name: ombre-gateway
+    restart: unless-stopped
+    command: ["python", "gateway.py"]
+    env_file:
+      - .env
+    environment:
+      OMBRE_TRANSPORT: streamable-http
+      OMBRE_BUCKETS_DIR: /data
+      OMBRE_STATE_DIR: /state
+    ports:
+      - "127.0.0.1:18002:8010"
+    volumes:
+      - /srv/ombre-brain/buckets:/data
+      - /srv/ombre-brain/state:/state
+      - /srv/ombre-brain/config.yaml:/app/config.yaml:ro
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: ombre-cloudflared
+    restart: unless-stopped
+    command: ["tunnel", "--no-autoupdate", "--loglevel", "info", "run"]
+    env_file:
+      - cloudflare.env
+    depends_on:
+      - ombre-brain
+      - ombre-gateway
