@@ -65,7 +65,7 @@ from memory_layers import (
     moment_layer_debug,
     moment_runtime_gate_debug,
 )
-from recall_policy import RecallPolicy
+from recall_policy import QueryAnchorPlan, RecallPolicy
 from memory_nodes import MemoryNodeStore
 from persona_engine import PersonaStateEngine
 from persona_event_selection import (
@@ -5430,6 +5430,7 @@ class GatewayService:
                 include_query_planner_debug=include_query_planner_debug,
                 query_planner_debug=query_planner_debug,
             )
+        anchor_plan = self._query_anchor_plan(query)
 
         relevance_query = self._query_has_relevance_facet(query)
         eligible_ids = {
@@ -5561,6 +5562,15 @@ class GatewayService:
                     query,
                     selected_reason="selected_bucket",
                 )
+            if moment:
+                rejection = self._anchor_plan_direct_rejection(moment, anchor_plan)
+                if rejection:
+                    reason, debug = rejection
+                    rejected = dict(moment)
+                    rejected["admission_reason"] = reason
+                    rejected["recall_policy_debug"] = debug
+                    suppressed_candidates.append(rejected)
+                    moment = None
             if moment and bucket_id not in seen_buckets:
                 selected.append(moment)
                 seen_buckets.add(bucket_id)
@@ -7223,12 +7233,14 @@ class GatewayService:
         return await self._build_diffused_memory_block(recalled_buckets, all_buckets)
 
     def _query_planner_debug_base(self, query: str) -> dict[str, Any]:
+        anchor_plan = self._query_anchor_plan(query)
         return {
             "enabled": bool(self.query_planner_enabled),
             "triggered": False,
             "trigger_reason": "",
             "skip_reason": "",
             "original_query": self._clip_text(query, 500),
+            "anchor_plan": self._query_anchor_plan_debug(anchor_plan),
             "queries": [],
             "supplemental": [],
             "suppressed_by_must_terms": [],
@@ -7240,6 +7252,38 @@ class GatewayService:
                 "neighbor_terms": [],
             },
             "errors": [],
+        }
+
+    def _query_anchor_plan(self, query: str) -> QueryAnchorPlan:
+        return self.recall_policy.build_query_anchor_plan(query)
+
+    @staticmethod
+    def _query_anchor_plan_debug(plan: QueryAnchorPlan) -> dict[str, Any]:
+        return {
+            "route": plan.route,
+            "focus_query": plan.focus_query,
+            "strong_terms": list(plan.strong_terms),
+            "weak_terms": list(plan.weak_terms),
+            "must_groups": [list(group) for group in plan.must_groups],
+            "allow_direct": plan.allow_direct,
+            "allow_diffusion_seed": plan.allow_diffusion_seed,
+            "debug": dict(plan.debug or {}),
+        }
+
+    def _anchor_plan_direct_rejection(
+        self,
+        node: dict,
+        plan: QueryAnchorPlan,
+    ) -> tuple[str, dict[str, Any]] | None:
+        if not plan.has_direct_constraints:
+            return None
+        if self.recall_policy.direct_candidate_satisfies_anchor_plan(node, plan):
+            return None
+        reason = "anchor_direct_disallowed" if not plan.allow_direct else "anchor_must_group_missing"
+        return reason, {
+            "query_anchor_plan": self._query_anchor_plan_debug(plan),
+            "must_groups_matched": False,
+            "auto": True,
         }
 
     def _query_planner_trigger_reason(self, query: str, selected_items: list[dict]) -> str:
@@ -7898,6 +7942,12 @@ class GatewayService:
             return False
         if is_self_anchor_bucket(bucket):
             return False
+        rejection = self._anchor_plan_direct_rejection(bucket, self._query_anchor_plan(query))
+        if rejection:
+            reason, debug = rejection
+            item["admission_reason"] = reason
+            item["recall_policy_debug"] = debug
+            return False
         decision = self.recall_policy.assess(
             query,
             self._bucket_relevance_node(bucket),
@@ -7921,6 +7971,12 @@ class GatewayService:
         if is_self_anchor_metadata(moment.get("metadata", {})):
             return False
         bucket_id = str(moment.get("bucket_id") or "")
+        rejection = self._anchor_plan_direct_rejection(moment, self._query_anchor_plan(query))
+        if rejection:
+            reason, debug = rejection
+            moment["admission_reason"] = reason
+            moment["recall_policy_debug"] = debug
+            return False
         if admitted_bucket_ids and bucket_id in admitted_bucket_ids:
             moment["admission_reason"] = "admitted_bucket"
             return True

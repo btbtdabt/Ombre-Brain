@@ -67,6 +67,53 @@ def test_recall_query_plan_centralizes_runtime_query_gates():
     assert repair.allow_caution_diffusion
 
 
+def test_query_anchor_plan_blocks_mismatched_emotional_direct_candidate():
+    policy = RecallPolicy()
+
+    plan = policy.build_query_anchor_plan("今天为什么焦虑哭了吗")
+
+    assert plan.route == "emotional_reason"
+    assert plan.must_groups == (("焦虑", "哭"),)
+    assert not policy.direct_candidate_satisfies_anchor_plan(
+        {"text": "那天小雨因为记忆工具跑通而激动到哭。"},
+        plan,
+    )
+    assert policy.direct_candidate_satisfies_anchor_plan(
+        {"text": "那天小雨因为简历没有回音，焦虑得哭出来。"},
+        plan,
+    )
+
+
+def test_query_anchor_plan_disallows_bare_cry_direct():
+    policy = RecallPolicy()
+
+    plan = policy.build_query_anchor_plan("哭")
+
+    assert plan.route == "affect_only"
+    assert not plan.allow_direct
+    assert not policy.direct_candidate_satisfies_anchor_plan(
+        {"text": "今天她哭了，但单字哭不能作为可靠召回锚点。"},
+        plan,
+    )
+
+
+def test_query_anchor_plan_requires_event_and_emotion_for_grievance():
+    policy = RecallPolicy()
+
+    plan = policy.build_query_anchor_plan("哥哥知道我那次为什么被妈妈说得委屈吗")
+
+    assert plan.route == "emotional_reason"
+    assert ("妈妈", "委屈") in plan.must_groups
+    assert policy.direct_candidate_satisfies_anchor_plan(
+        {"text": "妈妈说了那件事，小雨很委屈。"},
+        plan,
+    )
+    assert not policy.direct_candidate_satisfies_anchor_plan(
+        {"text": "妈妈电话后，小雨心里乱了一下。"},
+        plan,
+    )
+
+
 def test_auto_vague_query_without_topic_is_suppressed():
     policy = RecallPolicy()
 

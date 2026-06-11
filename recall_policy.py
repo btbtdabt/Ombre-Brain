@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from itertools import product
 from typing import Any
 
 from memory_relevance import (
+    EMOTIONAL_RECALL_STATE_TERMS,
     MemoryRelevanceOptions,
     content_terms_for_query,
+    emotional_recall_plan,
     memory_relevance_options_from_config,
     query_has_facet,
     query_has_explicit_entity_marker,
@@ -492,6 +495,223 @@ class RecallQueryPlan:
         return not self.wants_body_chain
 
 
+@dataclass(frozen=True)
+class QueryAnchorPlan:
+    route: str
+    focus_query: str
+    strong_terms: tuple[str, ...] = ()
+    weak_terms: tuple[str, ...] = ()
+    must_groups: tuple[tuple[str, ...], ...] = ()
+    allow_direct: bool = True
+    allow_diffusion_seed: bool = True
+    debug: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def has_direct_constraints(self) -> bool:
+        return bool(self.must_groups) or not self.allow_direct
+
+
+ANCHOR_MUST_GROUP_MAX_SPAN = 24
+
+
+def build_query_anchor_plan(
+    query: str,
+    options: MemoryRelevanceOptions | None = None,
+) -> QueryAnchorPlan:
+    options = options or memory_relevance_options_from_config()
+    text = str(query or "").strip()
+    if not text:
+        return QueryAnchorPlan(
+            route="empty",
+            focus_query="",
+            allow_direct=False,
+            allow_diffusion_seed=False,
+            debug={"reason": "empty_query"},
+        )
+
+    if _is_affect_only_query_text(text):
+        return QueryAnchorPlan(
+            route="affect_only",
+            focus_query=text,
+            weak_terms=(_affect_only_residue(text),),
+            allow_direct=False,
+            allow_diffusion_seed=False,
+            debug={"reason": "affect_only"},
+        )
+
+    emotional_plan = emotional_recall_plan(text, options)
+    if emotional_plan.triggered:
+        must_groups = _emotional_must_groups(emotional_plan)
+        focus_terms = list(dict.fromkeys([*emotional_plan.strong_terms, *emotional_plan.event_terms, *emotional_plan.weak_terms]))
+        return QueryAnchorPlan(
+            route="emotional_reason",
+            focus_query=" ".join(focus_terms) or text,
+            strong_terms=tuple(emotional_plan.strong_terms),
+            weak_terms=tuple(emotional_plan.weak_terms),
+            must_groups=must_groups,
+            allow_direct=bool(must_groups),
+            allow_diffusion_seed=bool(must_groups),
+            debug={
+                "reason": "emotional_recall_plan",
+                "event_terms": list(emotional_plan.event_terms),
+                "max_group_span": ANCHOR_MUST_GROUP_MAX_SPAN,
+            },
+        )
+
+    return QueryAnchorPlan(
+        route="topic_search",
+        focus_query=text,
+        debug={"reason": "default"},
+    )
+
+
+def direct_candidate_satisfies_anchor_plan(node: dict, plan: QueryAnchorPlan) -> bool:
+    if not plan.allow_direct:
+        return False
+    if not plan.must_groups:
+        return True
+    text = _candidate_anchor_text(node)
+    return any(_anchor_group_matches(text, group) for group in plan.must_groups)
+
+
+def _emotional_must_groups(emotional_plan: Any) -> tuple[tuple[str, ...], ...]:
+    groups: list[tuple[str, ...]] = []
+    weak_terms = tuple(str(term or "").strip() for term in emotional_plan.weak_terms if str(term or "").strip())
+    event_terms = tuple(str(term or "").strip() for term in emotional_plan.event_terms if str(term or "").strip())
+    state_terms = tuple(
+        str(term or "").strip()
+        for term in sorted(EMOTIONAL_RECALL_STATE_TERMS, key=len, reverse=True)
+        if str(term or "").strip()
+    )
+
+    for strong in emotional_plan.strong_terms:
+        strong_text = str(strong or "").strip()
+        if not strong_text:
+            continue
+        strong_key = _compact_anchor_term(strong_text)
+        pieces: list[str] = []
+        for term in weak_terms:
+            if _compact_anchor_term(term) in strong_key:
+                pieces.append(term)
+        for term in state_terms:
+            term_key = _compact_anchor_term(term)
+            if term_key and term_key in strong_key:
+                pieces.append(_canonical_anchor_state(term))
+        groups.append(_dedupe_group(pieces or [strong_text]))
+
+    if event_terms and weak_terms:
+        groups.append(_dedupe_group([*event_terms, weak_terms[0]]))
+    elif not groups and weak_terms:
+        groups.append(_dedupe_group([weak_terms[0]]))
+
+    return tuple(dict.fromkeys(group for group in groups if group))
+
+
+def _candidate_anchor_text(node: dict) -> str:
+    if not isinstance(node, dict):
+        return ""
+    meta = node.get("metadata", {}) if isinstance(node.get("metadata"), dict) else {}
+    if "bucket_id" in node or node.get("moment_id"):
+        return " ".join(
+            [
+                str(node.get("text") or ""),
+                str(node.get("content") or ""),
+                str(meta.get("annotation_summary") or ""),
+                _evidence_spans_text(meta.get("evidence_spans")),
+                str(meta.get("bucket_name") or ""),
+                _join_terms(meta.get("bucket_tags")),
+                _join_terms(meta.get("bucket_domain")),
+            ]
+        )
+    return " ".join(
+        [
+            _content_without_context_only_sections(str(node.get("content") or "")),
+            str(node.get("text") or ""),
+            str(node.get("name") or ""),
+            str(meta.get("name") or ""),
+            str(meta.get("annotation_summary") or meta.get("summary") or ""),
+            _evidence_spans_text(meta.get("evidence_spans")),
+            _join_terms(meta.get("tags")),
+            _join_terms(meta.get("domain")),
+        ]
+    )
+
+
+def _anchor_group_matches(text: str, group: tuple[str, ...]) -> bool:
+    compact_text = _compact_anchor_term(text)
+    if not compact_text:
+        return False
+    positions_by_term = []
+    for term in group:
+        key = _compact_anchor_term(term)
+        if not key:
+            continue
+        positions = _anchor_term_positions(compact_text, key)
+        if not positions:
+            return False
+        positions_by_term.append(positions)
+    if len(positions_by_term) <= 1:
+        return bool(positions_by_term)
+    for spans in product(*positions_by_term):
+        start = min(span[0] for span in spans)
+        end = max(span[1] for span in spans)
+        if end - start <= ANCHOR_MUST_GROUP_MAX_SPAN:
+            return True
+    return False
+
+
+def _anchor_term_positions(text: str, term: str) -> list[tuple[int, int]]:
+    positions: list[tuple[int, int]] = []
+    start = 0
+    while True:
+        index = text.find(term, start)
+        if index < 0:
+            break
+        positions.append((index, index + len(term)))
+        start = index + max(1, len(term))
+    return positions
+
+
+def _compact_anchor_term(value: object) -> str:
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff_.:-]+", "", str(value or "").strip().lower())
+
+
+def _canonical_anchor_state(term: str) -> str:
+    return "哭" if term in {"哭", "哭了"} else term
+
+
+def _dedupe_group(terms: list[str]) -> tuple[str, ...]:
+    output: list[str] = []
+    seen = set()
+    for term in terms:
+        cleaned = str(term or "").strip()
+        key = _compact_anchor_term(cleaned)
+        if not cleaned or not key or key in seen:
+            continue
+        seen.add(key)
+        output.append(cleaned)
+    return tuple(output)
+
+
+def _join_terms(value: Any) -> str:
+    if isinstance(value, (list, tuple, set)):
+        return " ".join(str(item) for item in value if str(item).strip())
+    return str(value or "")
+
+
+def _affect_only_residue(query: str) -> str:
+    compact = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(query or "").lower())
+    stripped = compact
+    for term in sorted(AFFECT_ONLY_QUERY_FILLERS, key=len, reverse=True):
+        stripped = stripped.replace(term, "")
+    return stripped
+
+
+def _is_affect_only_query_text(query: str) -> bool:
+    residue = _affect_only_residue(query)
+    return bool(residue and residue in AFFECT_ONLY_QUERY_TERMS)
+
+
 class RecallPolicy:
     def __init__(
         self,
@@ -535,6 +755,12 @@ class RecallPolicy:
             allow_caution_diffusion=allow_caution_diffusion,
             specific_terms=tuple(self.specific_query_terms(text)),
         )
+
+    def build_query_anchor_plan(self, query: str) -> QueryAnchorPlan:
+        return build_query_anchor_plan(query, self.options)
+
+    def direct_candidate_satisfies_anchor_plan(self, node: dict, plan: QueryAnchorPlan) -> bool:
+        return direct_candidate_satisfies_anchor_plan(node, plan)
 
     def _query_explicitly_requests_old_memory(self, query: str) -> bool:
         if not str(query or "").strip():

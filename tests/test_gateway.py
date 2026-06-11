@@ -5665,6 +5665,100 @@ def test_gateway_emotional_reason_fallback_pairs_event_and_emotion(
     assert plan["queries"][0]["must_terms"] == ["妈妈", "委屈"]
 
 
+def test_gateway_emotional_anchor_blocks_primary_direct_mismatch(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    excited_id = _create_bucket(
+        bucket_mgr,
+        content="### moment\n小雨因为 Chat 端 Haven 终于能自己写记忆而激动哭了。",
+        name="Haven写记忆激动哭",
+        hours_ago=24,
+        importance=10,
+        domain=["memory", "relationship"],
+    )
+    app, _service, _, captured = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            query_planner_enabled=False,
+            recent_context_budget=0,
+            related_memory_budget=0,
+            current_inner_state_interval_rounds=0,
+        ),
+        bucket_mgr,
+        embedding_results=[(excited_id, 0.99)],
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-emotion-mismatch",
+            },
+            json={"messages": [{"role": "user", "content": "今天为什么焦虑哭了吗"}]},
+        )
+        debug_response = client.get(
+            "/api/debug/injections?session_id=sess-emotion-mismatch&include_context=0",
+            headers={"Authorization": "Bearer gateway-secret"},
+        )
+
+    assert response.status_code == 200
+    injected = _joined_message_content(captured[-1]["json"]["messages"])
+    assert "Recalled Memory" not in injected
+    debug_payload = debug_response.json()["items"][0]["payload"]
+    anchor_plan = debug_payload["query_planner_debug"]["anchor_plan"]
+    assert anchor_plan["route"] == "emotional_reason"
+    assert ["焦虑", "哭"] in anchor_plan["must_groups"]
+    suppressed = debug_payload["suppressed_bucket_candidates"]
+    rejected = next(item for item in suppressed if item["bucket_id"] == excited_id)
+    assert rejected["admission_reason"] == "anchor_must_group_missing"
+
+
+def test_gateway_emotional_anchor_allows_matching_primary_direct(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    excited_id = _create_bucket(
+        bucket_mgr,
+        content="### moment\n小雨因为 Chat 端 Haven 终于能自己写记忆而激动哭了。",
+        name="Haven写记忆激动哭",
+        hours_ago=24,
+        importance=10,
+        domain=["memory", "relationship"],
+    )
+    app, _service, _, captured = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            query_planner_enabled=False,
+            recent_context_budget=0,
+            related_memory_budget=0,
+            current_inner_state_interval_rounds=0,
+        ),
+        bucket_mgr,
+        embedding_results=[(excited_id, 0.99)],
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-emotion-match",
+            },
+            json={"messages": [{"role": "user", "content": "今天为什么激动哭了吗"}]},
+        )
+
+    assert response.status_code == 200
+    injected = _joined_message_content(captured[-1]["json"]["messages"])
+    assert "Recalled Memory" in injected
+    assert "Haven写记忆激动哭" in injected
+
+
 def test_gateway_memory_detail_recall_retries_with_allowed_bucket_id(
     monkeypatch,
     test_config,
