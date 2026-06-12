@@ -4644,7 +4644,9 @@ def test_gateway_just_now_context_uses_conversation_turns_and_skips_memory_recal
         session_id="window-one",
         round_id=1,
         user_text=(
-            "哥哥，我们刚刚的暗号是星河折纸。\n\n"
+            "[TIME_ANCHOR] 2026/6/12 16:15\n"
+            "[sent 1h ago] 哥哥，我们刚刚的暗号是星河折纸。\n"
+            "[NOW · this is what the user is saying to you at this moment] 现在问你\n\n"
             "[MCP Tool Results — auto-fetched by the system, use as factual basis for your reply]\n\n"
             '— Ombre-Brain.breath({"query":"暗号"}):\n'
             "旧工具结果不该回放。"
@@ -4671,6 +4673,9 @@ def test_gateway_just_now_context_uses_conversation_turns_and_skips_memory_recal
     assert "星河折纸" in injected
     assert "MCP Tool Results" not in injected
     assert "旧工具结果不该回放" not in injected
+    assert "TIME_ANCHOR" not in injected
+    assert "NOW ·" not in injected
+    assert "sent 1h ago" not in injected
     assert "旧窗口折角" not in injected
     assert "Recalled Memory" not in injected
     assert "Recent Context" not in injected
@@ -4917,7 +4922,10 @@ def test_gateway_records_successful_chat_turn_for_just_now_context(
                     {
                         "role": "user",
                         "content": (
-                            "哥哥，暗号是星河折纸\n\n"
+                            "[TIME_ANCHOR] 2026/6/12 17:34\n"
+                            "[sent 2min ago] 哥哥，暗号是星河折纸\n"
+                            "[NOW · this is what the user is saying to you at this moment] "
+                            "还有晚饭提醒\n\n"
                             "[MCP Tool Results — auto-fetched by the system, use as factual basis for your reply]\n\n"
                             '— Ombre-Brain.breath({"query":"暗号"}):\n'
                             "旧工具结果不该存进短期聊天。"
@@ -4935,8 +4943,9 @@ def test_gateway_records_successful_chat_turn_for_just_now_context(
     )
     assert len(turns) == 1
     assert turns[0]["session_id"] == "window-one"
-    assert turns[0]["user_text"] == "哥哥，暗号是星河折纸"
+    assert turns[0]["user_text"] == "哥哥，暗号是星河折纸 还有晚饭提醒"
     assert turns[0]["assistant_text"] == "记住了，暗号是星河折纸。"
+    assert turns[0]["created_at"]
     assert turns[0]["model"] == cfg["gateway"]["upstream_default_model"]
     assert turns[0]["client"] == "unit-client"
 

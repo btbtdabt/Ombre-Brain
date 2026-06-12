@@ -226,6 +226,21 @@ CLIENT_MCP_TOOL_RESULTS_RE = re.compile(
     r"\n*\[MCP Tool Results\b[\s\S]*$",
     re.IGNORECASE,
 )
+CLIENT_TIME_ANCHOR_RE = re.compile(
+    r"\[TIME_ANCHOR\]\s*"
+    r"\d{4}(?:[/-]\d{1,2}[/-]\d{1,2}|年\d{1,2}月\d{1,2}日)"
+    r"\s+\d{1,2}:\d{2}"
+    r"(?:\s*\([^\)]*\))?\s*",
+    re.IGNORECASE,
+)
+CLIENT_NOW_MARKER_RE = re.compile(
+    r"\[NOW\b[^\]]*\]\s*",
+    re.IGNORECASE,
+)
+CLIENT_RELATIVE_TIME_MARKER_RE = re.compile(
+    r"\[(?:sent\s+[^\]]+?ago|\d+\s*(?:s|sec|secs|second|seconds|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)\s+after previous msg)\]\s*",
+    re.IGNORECASE,
+)
 LEADING_PROXY_SENDER_RE = re.compile(
     r"^\s*<proxy_sender\b[^>]*/>\s*",
     re.IGNORECASE,
@@ -4007,11 +4022,19 @@ class GatewayService:
         cleaned = EXTERNAL_CONTEXT_ATTACHMENT_RE.sub("", cleaned)
         cleaned = SELF_CLOSING_ATTACHMENT_RE.sub("", cleaned)
         cleaned = self._strip_client_mcp_tool_results(cleaned)
+        cleaned = self._strip_client_turn_markers(cleaned)
         cleaned = self._strip_leading_auto_context_markers(cleaned)
         return self._strip_external_context_blocks(cleaned)
 
     def _strip_client_mcp_tool_results(self, text: Any) -> str:
         return CLIENT_MCP_TOOL_RESULTS_RE.sub("", str(text or "")).strip()
+
+    def _strip_client_turn_markers(self, text: Any) -> str:
+        cleaned = str(text or "")
+        cleaned = CLIENT_TIME_ANCHOR_RE.sub("", cleaned)
+        cleaned = CLIENT_RELATIVE_TIME_MARKER_RE.sub("", cleaned)
+        cleaned = CLIENT_NOW_MARKER_RE.sub("", cleaned)
+        return cleaned.strip()
 
     def _strip_leading_auto_context_markers(self, text: str) -> str:
         cleaned = str(text or "")
@@ -5003,6 +5026,7 @@ class GatewayService:
 
     def _clean_conversation_turn_text(self, text: Any) -> str:
         cleaned = self._strip_client_mcp_tool_results(text)
+        cleaned = self._strip_client_turn_markers(cleaned)
         cleaner = getattr(self.persona_engine, "_clean_client_status_lines", None)
         if callable(cleaner):
             try:
