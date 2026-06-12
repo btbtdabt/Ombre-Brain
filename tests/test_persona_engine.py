@@ -395,6 +395,57 @@ async def test_persona_malformed_json_keeps_state_and_records_raw_response(test_
 
 
 @pytest.mark.asyncio
+async def test_persona_malformed_json_exchange_can_retry_successfully(test_config):
+    engine = PersonaStateEngine(_persona_config(test_config))
+    engine.client = FakePersonaClient(["```json\nnot-json\n```", _event_payload()])
+
+    first = await engine.update_from_exchange("session-retry-json", "今天怪怪的", "我在。")
+    second = await engine.update_from_exchange("session-retry-json", "今天怪怪的", "我在。")
+
+    assert len(engine.client.calls) == 2
+    assert first["affect"]["mood_label"] == "warm_neutral"
+    assert second["affect"]["mood_label"] == "warm_touched"
+
+    conn = sqlite3.connect(engine.db_path)
+    rows = conn.execute(
+        "SELECT error, mood_label FROM persona_events WHERE session_id = ?",
+        ("session-retry-json",),
+    ).fetchall()
+    log_count = conn.execute(
+        "SELECT COUNT(*) FROM persona_exchange_log WHERE session_id = ?",
+        ("session-retry-json",),
+    ).fetchone()[0]
+    conn.close()
+    assert rows == [(None, "warm_touched")]
+    assert log_count == 1
+
+
+@pytest.mark.asyncio
+async def test_persona_retry_success_removes_failure_when_event_not_recorded(test_config):
+    engine = PersonaStateEngine(_persona_config(test_config, event_batch_size=2))
+    engine.client = FakePersonaClient(["```json\nnot-json\n```", _ordinary_event_payload()])
+
+    await engine.update_from_exchange("session-retry-ordinary", "今天怪怪的", "我在。")
+    second = await engine.update_from_exchange("session-retry-ordinary", "今天怪怪的", "我在。")
+
+    assert len(engine.client.calls) == 2
+    assert second["affect"]["mood_label"] == "warm_concern"
+
+    conn = sqlite3.connect(engine.db_path)
+    event_count = conn.execute(
+        "SELECT COUNT(*) FROM persona_events WHERE session_id = ?",
+        ("session-retry-ordinary",),
+    ).fetchone()[0]
+    log_count = conn.execute(
+        "SELECT COUNT(*) FROM persona_exchange_log WHERE session_id = ?",
+        ("session-retry-ordinary",),
+    ).fetchone()[0]
+    conn.close()
+    assert event_count == 0
+    assert log_count == 1
+
+
+@pytest.mark.asyncio
 async def test_persona_missing_key_uses_existing_state_fallback(test_config):
     engine = PersonaStateEngine(_persona_config(test_config))
 

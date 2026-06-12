@@ -497,6 +497,55 @@ def test_gateway_state_store_cooldown_curve(tmp_path):
     assert sess_a_usage[0]["route"] == "/v1/messages"
 
 
+def test_gateway_state_store_date_range_filters_before_limit(tmp_path):
+    store = GatewayStateStore(str(tmp_path / "gateway_state.db"))
+    origin = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+
+    for index in range(650):
+        store.record_conversation_turn(
+            profile_id="haven_xiaoyu",
+            session_id="sess-old",
+            round_id=index,
+            user_text=f"older turn {index}",
+            assistant_text="ok",
+            created_at=origin + timedelta(minutes=index),
+            max_entries=1000,
+        )
+
+    turns = store.list_conversation_turns_between(
+        profile_id="haven_xiaoyu",
+        start_at=origin + timedelta(minutes=40),
+        end_at=origin + timedelta(minutes=45),
+        limit=10,
+    )
+
+    assert [turn["round_id"] for turn in turns] == [44, 43, 42, 41, 40]
+
+
+def test_gateway_state_store_date_range_preserves_naive_rows_with_aware_bounds(tmp_path):
+    store = GatewayStateStore(str(tmp_path / "gateway_state.db"))
+    local_tz = timezone(timedelta(hours=8))
+
+    store.record_conversation_turn(
+        profile_id="haven_xiaoyu",
+        session_id="sess-naive",
+        round_id=1,
+        user_text="naive local row",
+        assistant_text="ok",
+        created_at=datetime(2026, 6, 11, 21, 30, 0),
+        max_entries=1000,
+    )
+
+    turns = store.list_conversation_turns_between(
+        profile_id="haven_xiaoyu",
+        start_at=datetime(2026, 6, 11, 0, 0, 0, tzinfo=local_tz),
+        end_at=datetime(2026, 6, 12, 0, 0, 0, tzinfo=local_tz),
+        limit=10,
+    )
+
+    assert [turn["round_id"] for turn in turns] == [1]
+
+
 def test_gateway_config_endpoint_updates_memory_cooldown(monkeypatch, test_config, bucket_mgr):
     cfg = _gateway_config(
         test_config,

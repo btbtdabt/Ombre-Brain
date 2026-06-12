@@ -342,7 +342,6 @@ class PersonaStateEngine:
             tool_summary,
         )
         if evaluation is None:
-            self._mark_exchange_processed(session_id, exchange_hash)
             if self.event_recording_enabled:
                 self._record_event(
                     session_id=session_id,
@@ -360,6 +359,7 @@ class PersonaStateEngine:
         global_state = self._apply_global_delta(global_state, evaluation, now)
         session_state = self._apply_session_delta(session_id, session_state, evaluation, now)
         self._mark_exchange_processed(session_id, exchange_hash)
+        self._delete_failed_event(session_id, exchange_hash)
         if self._should_record_event(session_id, evaluation, now):
             self._record_event(
                 session_id=session_id,
@@ -851,6 +851,24 @@ class PersonaStateEngine:
         conn.commit()
         conn.close()
 
+    def _delete_failed_event(self, session_id: str, exchange_hash: str | None) -> None:
+        if not exchange_hash:
+            return
+        conn = self._connect()
+        conn.execute(
+            """
+            DELETE FROM persona_events
+            WHERE profile_id = ?
+              AND session_id = ?
+              AND exchange_hash = ?
+              AND error IS NOT NULL
+              AND error != ''
+            """,
+            (self.profile_id, session_id, exchange_hash),
+        )
+        conn.commit()
+        conn.close()
+
     def _list_sessions(self, limit: int) -> list[dict]:
         safe_limit = max(1, min(100, int(limit or 20)))
         conn = self._connect()
@@ -1073,6 +1091,7 @@ class PersonaStateEngine:
                 """
                 SELECT 1 FROM persona_events
                 WHERE profile_id = ? AND session_id = ? AND exchange_hash = ?
+                  AND (error IS NULL OR error = '')
                 LIMIT 1
                 """,
                 (self.profile_id, session_id, exchange_hash),

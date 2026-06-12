@@ -417,19 +417,6 @@ class GatewayStateStore:
     ) -> list[dict[str, Any]]:
         safe_limit = max(1, min(80, int(limit or 12)))
         safe_profile_id = str(profile_id or "default").strip() or "default"
-        conn = self._connect()
-        rows = conn.execute(
-            """
-            SELECT id, profile_id, session_id, round_id, created_at,
-                   user_text, assistant_text, model, client, route
-            FROM conversation_turns
-            WHERE profile_id = ?
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (safe_profile_id, max(safe_limit, 500)),
-        ).fetchall()
-        conn.close()
 
         compare_tz = start_at.tzinfo or end_at.tzinfo
 
@@ -459,6 +446,28 @@ class GatewayStateStore:
             start = start.replace(tzinfo=None)
         elif end.tzinfo is not None:
             end = end.replace(tzinfo=None)
+
+        sql_start = (start.replace(tzinfo=None) - timedelta(days=1)).isoformat(timespec="seconds")
+        sql_end = (end.replace(tzinfo=None) + timedelta(days=1)).isoformat(timespec="seconds")
+
+        conn = self._connect()
+        rows = conn.execute(
+            """
+            SELECT id, profile_id, session_id, round_id, created_at,
+                   user_text, assistant_text, model, client, route
+            FROM conversation_turns
+            WHERE profile_id = ?
+              AND replace(substr(created_at, 1, 19), ' ', 'T') >= ?
+              AND replace(substr(created_at, 1, 19), ' ', 'T') < ?
+            ORDER BY id DESC
+            """,
+            (
+                safe_profile_id,
+                sql_start,
+                sql_end,
+            ),
+        ).fetchall()
+        conn.close()
 
         filtered = []
         for row in rows:
