@@ -90,6 +90,15 @@ def load_config(config_path: str = None) -> dict:
             "max_candidates": 20,
             "max_text_chars": 220,
         },
+        "debug_trace": {
+            "enabled": False,
+            "gateway_payloads": True,
+            "mcp_http": True,
+            "max_value_chars": 12000,
+            "max_body_chars": 20000,
+            "max_files": 7,
+            "dir": "",
+        },
         "recall_thresholds": {
             "vector_min_score": 0.50,
             "facet_vector_min_score": 0.45,

@@ -23,6 +23,7 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 from bucket_manager import BucketManager
+from debug_trace import DebugTraceLogger, headers_to_dict
 from dehydrator import Dehydrator
 from dream_engine import DreamEngine
 from embedding_engine import EmbeddingEngine
@@ -278,6 +279,7 @@ class GatewayService:
         http_client: httpx.AsyncClient | None = None,
     ):
         self.config = config
+        self.debug_trace = DebugTraceLogger(config)
         self.identity = identity_names(config)
         self.gateway_cfg = config.get("gateway", {})
         self.bucket_mgr = bucket_mgr or BucketManager(config)
@@ -1073,6 +1075,7 @@ class GatewayService:
 
         session_id = (request.headers.get("X-Ombre-Session-Id") or self.default_session_id).strip()
         client_label = self._client_label_from_request(request, "/v1/chat/completions")
+        trace_id = secrets.token_hex(6)
 
         try:
             payload = await request.json()
@@ -1095,6 +1098,18 @@ class GatewayService:
             payload.get("stream") is True,
             self._summarize_messages_for_debug(payload.get("messages")),
         )
+        self.debug_trace.write(
+            "gateway",
+            "incoming_request",
+            payload={
+                "route": "/v1/chat/completions",
+                "session_id": session_id,
+                "client": client_label,
+                "headers": headers_to_dict(request.headers),
+                "body": payload,
+            },
+            trace_id=trace_id,
+        )
 
         try:
             payload, marker_favorite = self._strip_favorite_memory_marker_from_payload(payload)
@@ -1107,6 +1122,19 @@ class GatewayService:
                 session_id,
                 include_favorite_memory=include_favorite_memory,
                 include_debug=True,
+            )
+            self.debug_trace.write(
+                "gateway",
+                "prepared_payload",
+                payload={
+                    "route": "/v1/chat/completions",
+                    "session_id": session_id,
+                    "client": client_label,
+                    "recalled_ids": recalled_ids,
+                    "injection_debug": injection_debug,
+                    "body": forward_payload,
+                },
+                trace_id=trace_id,
             )
         except ValueError as exc:
             return JSONResponse(
@@ -1128,6 +1156,7 @@ class GatewayService:
                     persona_user_message,
                     client_label,
                     injection_debug,
+                    trace_id,
                 )
             except RuntimeError as exc:
                 return JSONResponse(
@@ -1135,12 +1164,18 @@ class GatewayService:
                     status_code=503,
                 )
 
-        upstream_response = await self._forward_upstream(forward_payload)
+        upstream_response = await self._forward_upstream(
+            forward_payload,
+            trace_id=trace_id,
+            gateway_route="/v1/chat/completions",
+        )
         if 200 <= upstream_response.status_code < 300:
             upstream_response, memory_detail_debug = await self._maybe_retry_with_memory_detail(
                 forward_payload=forward_payload,
                 upstream_response=upstream_response,
                 injection_debug=injection_debug,
+                trace_id=trace_id,
+                gateway_route="/v1/chat/completions",
             )
             if memory_detail_debug and isinstance(injection_debug, dict):
                 injection_debug["memory_detail_recall_debug"] = memory_detail_debug
@@ -1179,6 +1214,7 @@ class GatewayService:
 
         session_id = (request.headers.get("X-Ombre-Session-Id") or self.default_session_id).strip()
         client_label = self._client_label_from_request(request, "/v1/messages")
+        trace_id = secrets.token_hex(6)
 
         try:
             payload = await request.json()
@@ -1199,6 +1235,19 @@ class GatewayService:
             openai_payload.get("model") or self.upstream_default_model,
             self._summarize_messages_for_debug(openai_payload.get("messages")),
         )
+        self.debug_trace.write(
+            "gateway",
+            "incoming_request",
+            payload={
+                "route": "/v1/messages",
+                "session_id": session_id,
+                "client": client_label,
+                "headers": headers_to_dict(request.headers),
+                "body": payload,
+                "openai_body": openai_payload,
+            },
+            trace_id=trace_id,
+        )
 
         try:
             openai_payload, marker_favorite = self._strip_favorite_memory_marker_from_payload(openai_payload)
@@ -1211,6 +1260,19 @@ class GatewayService:
                 session_id,
                 include_favorite_memory=include_favorite_memory,
                 include_debug=True,
+            )
+            self.debug_trace.write(
+                "gateway",
+                "prepared_payload",
+                payload={
+                    "route": "/v1/messages",
+                    "session_id": session_id,
+                    "client": client_label,
+                    "recalled_ids": recalled_ids,
+                    "injection_debug": injection_debug,
+                    "body": forward_payload,
+                },
+                trace_id=trace_id,
             )
         except ValueError as exc:
             return self._anthropic_error(str(exc), status_code=400)
@@ -1225,14 +1287,21 @@ class GatewayService:
                 persona_user_message,
                 client_label,
                 injection_debug,
+                trace_id,
             )
 
-        upstream_response = await self._forward_upstream(forward_payload)
+        upstream_response = await self._forward_upstream(
+            forward_payload,
+            trace_id=trace_id,
+            gateway_route="/v1/messages",
+        )
         if 200 <= upstream_response.status_code < 300:
             upstream_response, memory_detail_debug = await self._maybe_retry_with_memory_detail(
                 forward_payload=forward_payload,
                 upstream_response=upstream_response,
                 injection_debug=injection_debug,
+                trace_id=trace_id,
+                gateway_route="/v1/messages",
             )
             if memory_detail_debug and isinstance(injection_debug, dict):
                 injection_debug["memory_detail_recall_debug"] = memory_detail_debug
@@ -1799,7 +1868,14 @@ class GatewayService:
 
         return None
 
-    async def _forward_upstream(self, payload: dict) -> httpx.Response:
+    async def _forward_upstream(
+        self,
+        payload: dict,
+        *,
+        trace_id: str = "",
+        gateway_route: str = "",
+        trace_stage: str = "main",
+    ) -> httpx.Response:
         model = str(payload.get("model") or "").strip()
         route = self._resolve_upstream_for_model(model)
         upstream = route["upstream"]
@@ -1808,6 +1884,20 @@ class GatewayService:
         key_entries = self._available_upstream_api_keys(upstream)
         last_error: Exception | None = None
         last_response: httpx.Response | None = None
+        self.debug_trace.write(
+            "gateway",
+            "upstream_request",
+            payload={
+                "route": gateway_route,
+                "stage": trace_stage,
+                "upstream": upstream.get("name", ""),
+                "url": url,
+                "public_model": model,
+                "upstream_model": route["upstream_model"],
+                "body": upstream_payload,
+            },
+            trace_id=trace_id,
+        )
 
         for attempt, key_entry in enumerate(key_entries, start=1):
             started_at = time.perf_counter()
@@ -1854,22 +1944,99 @@ class GatewayService:
             )
             if 200 <= response.status_code < 300:
                 self._clear_upstream_key_cooldown(upstream, key_entry)
+                self._trace_upstream_response(
+                    response,
+                    trace_id=trace_id,
+                    gateway_route=gateway_route,
+                    trace_stage=trace_stage,
+                    upstream_name=upstream.get("name", ""),
+                    attempt=attempt,
+                    latency_ms=latency_ms,
+                )
                 return response
             if not self._should_retry_upstream_status(response.status_code):
+                self._trace_upstream_response(
+                    response,
+                    trace_id=trace_id,
+                    gateway_route=gateway_route,
+                    trace_stage=trace_stage,
+                    upstream_name=upstream.get("name", ""),
+                    attempt=attempt,
+                    latency_ms=latency_ms,
+                )
                 return response
             self._cool_down_upstream_key(upstream, key_entry)
             if attempt < len(key_entries):
                 continue
+            self._trace_upstream_response(
+                response,
+                trace_id=trace_id,
+                gateway_route=gateway_route,
+                trace_stage=trace_stage,
+                upstream_name=upstream.get("name", ""),
+                attempt=attempt,
+                latency_ms=latency_ms,
+                retry_exhausted=True,
+            )
             return response
 
         if last_response is not None:
             return last_response
-        return self._upstream_request_error_response(upstream, model, last_error)
+        error_response = self._upstream_request_error_response(upstream, model, last_error)
+        self._trace_upstream_response(
+            error_response,
+            trace_id=trace_id,
+            gateway_route=gateway_route,
+            trace_stage=trace_stage,
+            upstream_name=upstream.get("name", ""),
+            error_type=type(last_error).__name__ if last_error else "",
+        )
+        return error_response
+
+    def _trace_upstream_response(
+        self,
+        response: httpx.Response,
+        *,
+        trace_id: str = "",
+        gateway_route: str = "",
+        trace_stage: str = "main",
+        upstream_name: str = "",
+        attempt: int | None = None,
+        latency_ms: int | None = None,
+        retry_exhausted: bool = False,
+        error_type: str = "",
+    ) -> None:
+        payload = self.debug_trace.response_payload(
+            response.status_code,
+            headers_to_dict(response.headers),
+            response.content,
+        )
+        payload.update(
+            {
+                "route": gateway_route,
+                "stage": trace_stage,
+                "upstream": upstream_name,
+                "attempt": attempt,
+                "latency_ms": latency_ms,
+                "retry_exhausted": retry_exhausted,
+                "error_type": error_type,
+            }
+        )
+        self.debug_trace.write(
+            "gateway",
+            "upstream_response",
+            payload=payload,
+            trace_id=trace_id,
+        )
 
     async def _open_upstream_stream(
         self,
         route: dict[str, Any],
         payload: dict,
+        *,
+        trace_id: str = "",
+        gateway_route: str = "",
+        trace_stage: str = "main",
     ) -> httpx.Response:
         upstream = route["upstream"]
         model = route["public_model"]
@@ -1878,6 +2045,20 @@ class GatewayService:
         key_entries = self._available_upstream_api_keys(upstream)
         last_error: Exception | None = None
         last_response: httpx.Response | None = None
+        self.debug_trace.write(
+            "gateway",
+            "upstream_stream_request",
+            payload={
+                "route": gateway_route,
+                "stage": trace_stage,
+                "upstream": upstream.get("name", ""),
+                "url": url,
+                "public_model": model,
+                "upstream_model": route["upstream_model"],
+                "body": upstream_payload,
+            },
+            trace_id=trace_id,
+        )
 
         for attempt, key_entry in enumerate(key_entries, start=1):
             request = self.http_client.build_request(
@@ -1925,6 +2106,20 @@ class GatewayService:
             )
             if 200 <= upstream_response.status_code < 300:
                 self._clear_upstream_key_cooldown(upstream, key_entry)
+                self.debug_trace.write(
+                    "gateway",
+                    "upstream_stream_response",
+                    payload={
+                        "route": gateway_route,
+                        "stage": trace_stage,
+                        "upstream": upstream.get("name", ""),
+                        "status_code": upstream_response.status_code,
+                        "headers": headers_to_dict(upstream_response.headers),
+                        "attempt": attempt,
+                        "latency_ms": latency_ms,
+                    },
+                    trace_id=trace_id,
+                )
                 return upstream_response
 
             body = await upstream_response.aread()
@@ -1935,15 +2130,43 @@ class GatewayService:
                 headers=upstream_response.headers,
             )
             if not self._should_retry_upstream_status(upstream_response.status_code):
+                self._trace_upstream_response(
+                    last_response,
+                    trace_id=trace_id,
+                    gateway_route=gateway_route,
+                    trace_stage=trace_stage,
+                    upstream_name=upstream.get("name", ""),
+                    attempt=attempt,
+                    latency_ms=latency_ms,
+                )
                 return last_response
             self._cool_down_upstream_key(upstream, key_entry)
             if attempt < len(key_entries):
                 continue
+            self._trace_upstream_response(
+                last_response,
+                trace_id=trace_id,
+                gateway_route=gateway_route,
+                trace_stage=trace_stage,
+                upstream_name=upstream.get("name", ""),
+                attempt=attempt,
+                latency_ms=latency_ms,
+                retry_exhausted=True,
+            )
             return last_response
 
         if last_response is not None:
             return last_response
-        return self._upstream_request_error_response(upstream, model, last_error)
+        error_response = self._upstream_request_error_response(upstream, model, last_error)
+        self._trace_upstream_response(
+            error_response,
+            trace_id=trace_id,
+            gateway_route=gateway_route,
+            trace_stage=trace_stage,
+            upstream_name=upstream.get("name", ""),
+            error_type=type(last_error).__name__ if last_error else "",
+        )
+        return error_response
 
     async def _stream_upstream(
         self,
@@ -1953,10 +2176,16 @@ class GatewayService:
         user_message: str,
         client: str = "",
         injection_debug: dict[str, Any] | None = None,
+        trace_id: str = "",
     ) -> Response:
         model = str(payload.get("model") or "").strip()
         route = self._resolve_upstream_for_model(model)
-        upstream_response = await self._open_upstream_stream(route, payload)
+        upstream_response = await self._open_upstream_stream(
+            route,
+            payload,
+            trace_id=trace_id,
+            gateway_route="/v1/chat/completions",
+        )
         content_type = upstream_response.headers.get("content-type", "text/event-stream")
 
         if not 200 <= upstream_response.status_code < 300:
@@ -2132,6 +2361,8 @@ class GatewayService:
         forward_payload: dict[str, Any],
         upstream_response: httpx.Response,
         injection_debug: dict[str, Any] | None,
+        trace_id: str = "",
+        gateway_route: str = "",
     ) -> tuple[httpx.Response, dict[str, Any] | None]:
         try:
             body = upstream_response.json()
@@ -2195,7 +2426,12 @@ class GatewayService:
             detail_context,
         )
         debug["detail_tokens"] = count_tokens_approx(detail_context)
-        retry_response = await self._forward_upstream(retry_payload)
+        retry_response = await self._forward_upstream(
+            retry_payload,
+            trace_id=trace_id,
+            gateway_route=gateway_route,
+            trace_stage="memory_detail_retry",
+        )
         debug["retry_status_code"] = retry_response.status_code
         if 200 <= retry_response.status_code < 300:
             debug["retried"] = True
@@ -3355,10 +3591,16 @@ class GatewayService:
         user_message: str,
         client: str = "",
         injection_debug: dict[str, Any] | None = None,
+        trace_id: str = "",
     ) -> Response:
         model = str(payload.get("model") or "").strip()
         route = self._resolve_upstream_for_model(model)
-        upstream_response = await self._open_upstream_stream(route, payload)
+        upstream_response = await self._open_upstream_stream(
+            route,
+            payload,
+            trace_id=trace_id,
+            gateway_route="/v1/messages",
+        )
 
         if not 200 <= upstream_response.status_code < 300:
             body = await upstream_response.aread()
@@ -7477,7 +7719,12 @@ class GatewayService:
                 return None, f"query_planner_parse_failed:{exc}"
 
         try:
-            response = await self._forward_upstream(payload)
+            response = await self._forward_upstream(
+                payload,
+                trace_id=secrets.token_hex(6),
+                gateway_route="/internal/query-planner",
+                trace_stage="query_planner",
+            )
         except Exception as exc:
             logger.warning("Gateway query planner call failed: %s", exc)
             return None, f"query_planner_call_failed:{type(exc).__name__}"

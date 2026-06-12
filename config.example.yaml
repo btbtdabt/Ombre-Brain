@@ -26,6 +26,20 @@ log_level: "INFO"
 # 保存 Persona State 等运行时 SQLite 状态，建议放在 buckets 同步目录外。
 # state_dir: "/path/to/ombre-brain/state"
 
+# --- Debug trace / 调试追踪 ---
+# Temporary prompt/tool tracing for deployment debugging. Keep disabled unless
+# you are diagnosing Gateway or MCP payload issues; logs may contain private
+# chat content after secret redaction.
+# 临时追踪 Gateway/MCP 输入输出。只在排查问题时开启；脱敏后仍可能包含私密聊天内容。
+debug_trace:
+  enabled: false
+  gateway_payloads: true
+  mcp_http: true
+  max_value_chars: 12000
+  max_body_chars: 20000
+  max_files: 7
+  dir: ""  # empty = state_dir/debug_traces
+
 # --- Identity / 名字口径 ---
 # These names are used in prompts and comment authors. Change this block first
 # when adapting the fork for another person/persona.

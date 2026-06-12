@@ -64,6 +64,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mcp.server.fastmcp import Context, FastMCP
 
 from bucket_manager import BucketManager
+from debug_trace import DebugTraceASGIMiddleware, DebugTraceLogger
 from dehydrator import Dehydrator
 from decay_engine import DecayEngine
 from darkroom import DarkroomStore
@@ -139,6 +140,7 @@ from utils import (
 config = load_config()
 setup_logging(config.get("log_level", "INFO"))
 logger = logging.getLogger("ombre_brain")
+debug_trace = DebugTraceLogger(config)
 
 MEMORY_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 
@@ -10592,6 +10594,7 @@ if __name__ == "__main__":
             provider=OMBRE_CHATGPT_OAUTH,
             protected_hosts=OMBRE_CHATGPT_OAUTH_PROTECTED_HOSTS,
         )
+        _app = DebugTraceASGIMiddleware(_app, debug_trace, component="mcp")
         logger.info("CORS middleware enabled for remote transport / 已启用 CORS 中间件")
         if OMBRE_CHATGPT_OAUTH.enabled:
             logger.info(
