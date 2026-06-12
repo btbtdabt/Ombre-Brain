@@ -371,6 +371,8 @@ def test_gateway_private_context_adds_identity_boundary(monkeypatch, test_config
     assert "Identity boundary: you are TestAI" in dynamic
     assert "The current user is 用户 / TestUser / 对方 / 伙伴" in dynamic
     assert "Do not address the user as TestAI" in dynamic
+    assert "canonical participant names in narration: user=用户, ai=TestAI" in dynamic
+    assert "Do not narrate memory subjects as generic 用户/user/AI/assistant/模型" in dynamic
     assert "Prefer direct recall items as evidence" in dynamic
     assert "Recalled Memory" in dynamic
 

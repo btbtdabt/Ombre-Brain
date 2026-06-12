@@ -81,6 +81,22 @@ class DigestDehydrator(DummyDehydrator):
         ]
 
 
+def test_mcp_write_tool_descriptions_require_canonical_identity_names():
+    import server
+
+    for tool in (
+        server.comment_bucket,
+        server.hold,
+        server.grow,
+        server.profile_fact,
+        server.trace,
+    ):
+        doc = tool.__doc__ or ""
+        assert "当前身份名" in doc
+        assert "用户/AI/助手/模型" in doc
+        assert "亲昵称呼" in doc
+
+
 class ClassifiedDehydrator(DummyDehydrator):
     async def analyze(self, content: str):
         result = await super().analyze(content)
