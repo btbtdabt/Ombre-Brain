@@ -222,6 +222,10 @@ WORKSPACE_ATTACHMENT_RE = re.compile(
     r"<workspace_attachment>[\s\S]*?</workspace_attachment>",
     re.IGNORECASE,
 )
+CLIENT_MCP_TOOL_RESULTS_RE = re.compile(
+    r"\n*\[MCP Tool Results\b[\s\S]*$",
+    re.IGNORECASE,
+)
 LEADING_PROXY_SENDER_RE = re.compile(
     r"^\s*<proxy_sender\b[^>]*/>\s*",
     re.IGNORECASE,
@@ -4002,8 +4006,12 @@ class GatewayService:
         cleaned = WORKSPACE_ATTACHMENT_RE.sub("", str(text or ""))
         cleaned = EXTERNAL_CONTEXT_ATTACHMENT_RE.sub("", cleaned)
         cleaned = SELF_CLOSING_ATTACHMENT_RE.sub("", cleaned)
+        cleaned = self._strip_client_mcp_tool_results(cleaned)
         cleaned = self._strip_leading_auto_context_markers(cleaned)
         return self._strip_external_context_blocks(cleaned)
+
+    def _strip_client_mcp_tool_results(self, text: Any) -> str:
+        return CLIENT_MCP_TOOL_RESULTS_RE.sub("", str(text or "")).strip()
 
     def _strip_leading_auto_context_markers(self, text: str) -> str:
         cleaned = str(text or "")
@@ -4947,18 +4955,18 @@ class GatewayService:
         if terms:
             matched = [
                 turn for turn in turns
-                if any(
-                    term in (
-                        str(turn.get("user_text") or "")
-                        + "\n"
-                        + str(turn.get("assistant_text") or "")
-                    )
-                    for term in terms
-                )
+                if any(term in self._conversation_turn_search_text(turn) for term in terms)
             ]
             if matched:
                 return matched
         return turns
+
+    def _conversation_turn_search_text(self, turn: dict[str, Any]) -> str:
+        return (
+            self._clean_conversation_turn_text(turn.get("user_text", ""))
+            + "\n"
+            + self._clean_conversation_turn_text(turn.get("assistant_text", ""))
+        )
 
     @staticmethod
     def _just_now_query_terms(query_text: str) -> list[str]:
@@ -4994,7 +5002,7 @@ class GatewayService:
         return parsed.strftime("%Y-%m-%d %H:%M")
 
     def _clean_conversation_turn_text(self, text: Any) -> str:
-        cleaned = str(text or "").strip()
+        cleaned = self._strip_client_mcp_tool_results(text)
         cleaner = getattr(self.persona_engine, "_clean_client_status_lines", None)
         if callable(cleaner):
             try:

@@ -4643,7 +4643,12 @@ def test_gateway_just_now_context_uses_conversation_turns_and_skips_memory_recal
         profile_id="haven_xiaoyu",
         session_id="window-one",
         round_id=1,
-        user_text="哥哥，我们刚刚的暗号是星河折纸。",
+        user_text=(
+            "哥哥，我们刚刚的暗号是星河折纸。\n\n"
+            "[MCP Tool Results — auto-fetched by the system, use as factual basis for your reply]\n\n"
+            '— Ombre-Brain.breath({"query":"暗号"}):\n'
+            "旧工具结果不该回放。"
+        ),
         assistant_text="记住了，星河折纸。",
         model="dummy",
         client="unit-test",
@@ -4664,6 +4669,8 @@ def test_gateway_just_now_context_uses_conversation_turns_and_skips_memory_recal
     assert embedding_queries == []
     assert "Just Now Chat Context" in injected
     assert "星河折纸" in injected
+    assert "MCP Tool Results" not in injected
+    assert "旧工具结果不该回放" not in injected
     assert "旧窗口折角" not in injected
     assert "Recalled Memory" not in injected
     assert "Recent Context" not in injected
@@ -4905,7 +4912,19 @@ def test_gateway_records_successful_chat_turn_for_just_now_context(
                 "X-Ombre-Session-Id": "window-one",
                 "X-Ombre-Client": "unit-client",
             },
-            json={"messages": [{"role": "user", "content": "哥哥，暗号是星河折纸"}]},
+            json={
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": (
+                            "哥哥，暗号是星河折纸\n\n"
+                            "[MCP Tool Results — auto-fetched by the system, use as factual basis for your reply]\n\n"
+                            '— Ombre-Brain.breath({"query":"暗号"}):\n'
+                            "旧工具结果不该存进短期聊天。"
+                        ),
+                    }
+                ]
+            },
         )
 
     assert response.status_code == 200
