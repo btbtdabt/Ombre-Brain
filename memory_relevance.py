@@ -23,6 +23,15 @@ DEFAULT_FACET_ALIASES = {
     ),
     "intimacy": (
         "intimacy",
+        "亲密",
+        "吻",
+        "接吻",
+        "亲吻",
+        "亲亲",
+        "拥吻",
+        "欲望",
+        "湿润",
+        "发烫",
     ),
     "embodiment": (
         "embodiment",
@@ -477,7 +486,7 @@ def facets_for_node(
     meta = node.get("metadata", {}) if isinstance(node.get("metadata"), dict) else {}
     fields = (
         ("tags", _join_text(meta.get("tags")) + " " + _join_text(meta.get("bucket_tags")), 0.55),
-        ("domain", _join_text(meta.get("domain")) + " " + _join_text(meta.get("bucket_domain")), 0.45),
+        ("domain", _join_text(meta.get("domain")) + " " + _join_text(meta.get("bucket_domain")), 0.5),
         (
             "name",
             " ".join(

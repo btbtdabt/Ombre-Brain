@@ -1434,6 +1434,7 @@ class GatewayService:
         date_recall_requested = (
             self.date_recall_enabled
             and self._query_requests_date_recall(current_user_query)
+            and not has_handoff_context
         )
 
         persona_block = ""
@@ -4836,7 +4837,7 @@ class GatewayService:
     def _bucket_matches_date_recall(self, bucket: dict, date_key: str) -> bool:
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
         for key in ("date", "created", "updated_at", "last_active"):
-            if self._local_date_key(meta.get(key)) == date_key:
+            if date_key in self._local_date_key_candidates(meta.get(key)):
                 return True
         return False
 
@@ -4854,19 +4855,40 @@ class GatewayService:
         return date_value, importance
 
     def _local_date_key(self, value: Any) -> str:
+        candidates = self._local_date_key_candidates(value)
+        return candidates[0] if candidates else ""
+
+    def _local_date_key_candidates(self, value: Any) -> list[str]:
         text = str(value or "").strip()
         if not text:
-            return ""
+            return []
         if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
-            return text
+            return [text]
         try:
             parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
         except ValueError:
             match = re.match(r"^\d{4}-\d{2}-\d{2}", text)
-            return match.group(0) if match else ""
+            return [match.group(0)] if match else []
+        candidates: list[str] = []
+
+        def add(date_key: str) -> None:
+            if date_key and date_key not in candidates:
+                candidates.append(date_key)
+
         if parsed.tzinfo is not None:
-            parsed = parsed.astimezone(self.gateway_tz)
-        return parsed.date().isoformat()
+            add(parsed.astimezone(self.gateway_tz).date().isoformat())
+            add(parsed.date().isoformat())
+            return candidates
+
+        add(parsed.date().isoformat())
+        try:
+            local_tz = datetime.now().astimezone().tzinfo
+            if local_tz is not None:
+                add(parsed.replace(tzinfo=local_tz).astimezone(self.gateway_tz).date().isoformat())
+        except Exception:
+            pass
+        add(parsed.replace(tzinfo=self.gateway_tz).date().isoformat())
+        return candidates
 
     def _build_just_now_chat_context(self, query_text: str) -> tuple[str, dict[str, Any]]:
         debug = self._just_now_context_debug_base(query_text)
@@ -6510,7 +6532,15 @@ class GatewayService:
                 return
             row["bucket_id"] = bucket_id
             row["moment_id"] = moment_id
-            row["has_topic_evidence"] = self._moment_has_query_topic_evidence(query_text, moment)
+            row["has_topic_evidence"] = self._moment_has_query_topic_evidence(
+                query_text,
+                moment,
+            ) or self._diffused_temperature_has_query_topic_evidence(
+                query_text,
+                moment,
+                path=row.get("path"),
+                moment_map=moment_map,
+            )
             row["runtime_allowed"] = can_moment_be_related_target(
                 moment,
                 explicit_lookup=allow_archive_targets,
@@ -7254,6 +7284,35 @@ class GatewayService:
                 break
 
         return contexts
+
+    def _diffused_temperature_has_query_topic_evidence(
+        self,
+        query: str,
+        moment: dict,
+        *,
+        path: Any | None = None,
+        moment_map: dict[str, dict] | None = None,
+    ) -> bool:
+        if not query:
+            return False
+        moment_map = moment_map or {}
+        for item in self._diffused_temperature_context_items(
+            moment,
+            path=path,
+            moment_map=moment_map,
+            max_items=4,
+            max_chars=220,
+        ):
+            moment_id = str(item.get("moment_id") or "")
+            candidate = moment_map.get(moment_id)
+            if isinstance(candidate, dict) and self._moment_has_query_topic_evidence(query, candidate):
+                return True
+            if self._date_recall_text_has_topic_terms(
+                str(item.get("text_preview") or ""),
+                self.recall_policy.specific_query_terms(query),
+            ):
+                return True
+        return False
 
     @staticmethod
     def _format_temperature_context_items(items: list[dict[str, Any]]) -> str:
@@ -8817,12 +8876,12 @@ class GatewayService:
         persona_block: str,
         core_memory: str,
         portrait_memory: str,
-        just_now_context: str,
-        recent_context: str,
-        recalled_memory: str,
-        relationship_weather: str,
-        favorite_memory: str,
-        related_memory: str,
+        just_now_context: str = "",
+        recent_context: str = "",
+        recalled_memory: str = "",
+        relationship_weather: str = "",
+        favorite_memory: str = "",
+        related_memory: str = "",
         targeted_memory_detail: str = "",
         dream_context: str = "",
         memory_detail_recall_instruction: str = "",

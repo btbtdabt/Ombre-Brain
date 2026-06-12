@@ -572,7 +572,11 @@ def direct_candidate_satisfies_anchor_plan(node: dict, plan: QueryAnchorPlan) ->
     if not plan.must_groups:
         return True
     text = _candidate_anchor_text(node)
-    return any(_anchor_group_matches(text, group) for group in plan.must_groups)
+    return any(
+        _anchor_group_matches(text, group)
+        or _anchor_group_matches_distributed(node, group)
+        for group in plan.must_groups
+    )
 
 
 def _emotional_must_groups(emotional_plan: Any) -> tuple[tuple[str, ...], ...]:
@@ -639,13 +643,13 @@ def _candidate_anchor_text(node: dict) -> str:
     if "bucket_id" in node or node.get("moment_id"):
         return " ".join(
             [
+                str(meta.get("bucket_name") or ""),
+                _join_terms(meta.get("bucket_tags")),
+                _join_terms(meta.get("bucket_domain")),
                 str(node.get("text") or ""),
                 str(node.get("content") or ""),
                 str(meta.get("annotation_summary") or ""),
                 _evidence_spans_text(meta.get("evidence_spans")),
-                str(meta.get("bucket_name") or ""),
-                _join_terms(meta.get("bucket_tags")),
-                _join_terms(meta.get("bucket_domain")),
             ]
         )
     return " ".join(
@@ -683,6 +687,63 @@ def _anchor_group_matches(text: str, group: tuple[str, ...]) -> bool:
         if end - start <= ANCHOR_MUST_GROUP_MAX_SPAN:
             return True
     return False
+
+
+def _anchor_group_matches_distributed(node: dict, group: tuple[str, ...]) -> bool:
+    context_text, body_text = _candidate_anchor_parts(node)
+    context_key = _compact_anchor_term(context_text)
+    body_key = _compact_anchor_term(body_text)
+    if not context_key or not body_key:
+        return False
+    matched_context = False
+    matched_body = False
+    for term in group:
+        key = _compact_anchor_term(term)
+        if not key:
+            continue
+        in_context = key in context_key
+        in_body = key in body_key
+        if not in_context and not in_body:
+            return False
+        matched_context = matched_context or in_context
+        matched_body = matched_body or in_body
+    return matched_context and matched_body
+
+
+def _candidate_anchor_parts(node: dict) -> tuple[str, str]:
+    if not isinstance(node, dict):
+        return "", ""
+    meta = node.get("metadata", {}) if isinstance(node.get("metadata"), dict) else {}
+    context = " ".join(
+        [
+            str(node.get("name") or ""),
+            str(meta.get("name") or ""),
+            str(meta.get("bucket_name") or ""),
+            _join_terms(meta.get("tags")),
+            _join_terms(meta.get("bucket_tags")),
+            _join_terms(meta.get("domain")),
+            _join_terms(meta.get("bucket_domain")),
+        ]
+    )
+    if "bucket_id" in node or node.get("moment_id"):
+        body = " ".join(
+            [
+                str(node.get("text") or ""),
+                str(node.get("content") or ""),
+                str(meta.get("annotation_summary") or ""),
+                _evidence_spans_text(meta.get("evidence_spans")),
+            ]
+        )
+    else:
+        body = " ".join(
+            [
+                _content_without_context_only_sections(str(node.get("content") or "")),
+                str(node.get("text") or ""),
+                str(meta.get("annotation_summary") or meta.get("summary") or ""),
+                _evidence_spans_text(meta.get("evidence_spans")),
+            ]
+        )
+    return context, body
 
 
 def _anchor_term_positions(text: str, term: str) -> list[tuple[int, int]]:

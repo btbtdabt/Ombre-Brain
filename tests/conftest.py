@@ -68,6 +68,12 @@ def test_config(tmp_path):
             "check_interval_hours": 24,
             "emotion_weights": {"base": 1.0, "arousal_boost": 0.8},
         },
+        "identity": {
+            "ai_name": "Haven",
+            "user_name": "Xiaoyu",
+            "user_display_name": "小雨",
+            "user_aliases": ["小雨"],
+        },
         "dehydration": {
             "api_key": os.environ.get("OMBRE_API_KEY", ""),
             "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
