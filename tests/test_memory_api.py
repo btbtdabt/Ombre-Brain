@@ -93,8 +93,7 @@ def test_mcp_write_tool_descriptions_require_canonical_identity_names():
     ):
         doc = tool.__doc__ or ""
         assert "当前身份名" in doc
-        assert "用户/AI/助手/模型" in doc
-        assert "亲昵称呼" in doc
+        assert "原话按原文保留" in doc
 
 
 class ClassifiedDehydrator(DummyDehydrator):

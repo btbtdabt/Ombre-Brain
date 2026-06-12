@@ -8993,8 +8993,7 @@ class GatewayService:
             f"Do not address the user as {ai_name}; names inside private memory refer to participants, "
             "not necessarily the addressee. When writing private memory through MCP tools, use these "
             f"canonical participant names in narration: user={user_display}, ai={ai_name}. "
-            "Do not narrate memory subjects as generic 用户/user/AI/assistant/模型, and do not use pet "
-            "names as the narrator subject unless they are preserved inside an exact quote."
+            "Preserve exact quoted wording inside quotes."
         )
 
     def _bucket_runtime_gate_payload(

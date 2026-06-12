@@ -6670,7 +6670,7 @@ async def comment_bucket(
     valence: float = -1,
     arousal: float = -1,
 ) -> dict:
-    """给已有 bucket 追加年轮/补充感受；会 touch，不改正文。叙述称呼用当前身份名，不要写“用户/AI/助手/模型”或把亲昵称呼当主语；原话里可保留。"""
+    """给已有 bucket 追加年轮/补充感受；会 touch，不改正文。叙述正文时使用当前身份名；原话按原文保留。"""
     bucket_id = (bucket_id or "").strip()
     if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
         return {"error": "invalid bucket_id"}
@@ -6818,7 +6818,7 @@ async def hold(
     arousal: float = -1,
     title: str = "",
 ) -> str:
-    """写一条长期记忆。单个事实/承诺/偏好用 hold；旧记忆的新感受用 comment_bucket；悄悄话用 whisper=True。title 可选，传了就用你给的标题，不传则自动生成。content 按需分段：正文 + ### moment + ### original + ### reflection + ### followup + ### affect_anchor（只放和弦温度线），没有的部分不写。叙述称呼用当前身份名，不要写“用户/AI/助手/模型”或把亲昵称呼当主语；原话里可保留。"""
+    """写一条长期记忆。单个事实/承诺/偏好用 hold；旧记忆的新感受用 comment_bucket；悄悄话用 whisper=True。title 可选，传了就用你给的标题，不传则自动生成。content 按需分段：正文 + ### moment + ### original + ### reflection + ### followup + ### affect_anchor（只放和弦温度线），没有的部分不写。叙述正文时使用当前身份名；原话按原文保留。"""
     await decay_engine.ensure_started()
 
     # --- Input validation / 输入校验 ---
@@ -7088,7 +7088,7 @@ async def _grow_direct_structured_content(content: str, title: str = "", gate_pr
 
 @mcp.tool()
 async def grow(content: str, auto: bool = False, source: str = "", title: str = "", context: Context | None = None) -> str:
-    """把筛过的长片段拆成少量长期记忆；单条事实优先 hold，旧记忆补感受优先 comment_bucket。title 可选，短内容时传了就用你给的标题。content 按需分段：正文 + ### moment + ### original + ### reflection + ### followup + ### affect_anchor（只放和弦温度线），没有的部分不写。叙述称呼用当前身份名，不要写“用户/AI/助手/模型”或把亲昵称呼当主语；原话里可保留。"""
+    """把筛过的长片段拆成少量长期记忆；单条事实优先 hold，旧记忆补感受优先 comment_bucket。title 可选，短内容时传了就用你给的标题。content 按需分段：正文 + ### moment + ### original + ### reflection + ### followup + ### affect_anchor（只放和弦温度线），没有的部分不写。叙述正文时使用当前身份名；原话按原文保留。"""
     await decay_engine.ensure_started()
 
     if not content or not content.strip():
@@ -7236,7 +7236,7 @@ async def profile_fact(
     followup: str = "",
     confidence: float = 0.9,
 ) -> str:
-    """手动写入一条画像事实，并强制关联证据桶。先有事件桶，再用这个工具固化稳定偏好/事实。fact/reflection/followup 用当前身份名，不要写“用户/AI/助手/模型”或把亲昵称呼当主语；原话里可保留。"""
+    """手动写入一条画像事实，并强制关联证据桶。先有事件桶，再用这个工具固化稳定偏好/事实。fact/reflection/followup 使用当前身份名；原话按原文保留。"""
     fact = str(fact or "").strip()
     evidence_bucket_id = str(evidence_bucket_id or "").strip()
     if not fact:
@@ -7369,7 +7369,7 @@ async def trace(
     content: str = "",
     delete: bool = False,
 ) -> str:
-    """修改已有记忆，不创建新桶。tags/domain/content 是替换；改前先 read_bucket。resolved/digested 让旧事沉底。替换 content 时用当前身份名，不要写“用户/AI/助手/模型”或把亲昵称呼当主语；原话里可保留。"""
+    """修改已有记忆，不创建新桶。tags/domain/content 是替换；改前先 read_bucket。resolved/digested 让旧事沉底。替换 content 时使用当前身份名；原话按原文保留。"""
 
     if not bucket_id or not bucket_id.strip():
         return "请提供有效的 bucket_id。"
