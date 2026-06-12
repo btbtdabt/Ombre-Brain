@@ -261,7 +261,7 @@ class DebugTraceASGIMiddleware:
                 message = request_messages[request_index]
                 request_index += 1
                 return message
-            return {"type": "http.request", "body": b"", "more_body": False}
+            return await receive()
 
         status_code = 0
         response_headers: dict[str, str] = {}
