@@ -70,7 +70,7 @@ def test_config(tmp_path):
         },
         "identity": {
             "ai_name": "Haven",
-            "user_name": "Xiaoyu",
+            "user_name": "Rain",
             "user_display_name": "小雨",
             "user_aliases": ["小雨"],
         },

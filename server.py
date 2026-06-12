@@ -89,6 +89,7 @@ from memory_moments import MemoryMomentStore, parse_bucket_moments
 from memory_relevance import (
     active_facets,
     emotional_recall_plan,
+    facets_for_node,
     facets_for_text,
     memory_relevance_options_from_config,
     query_has_explicit_entity_marker,
@@ -4904,7 +4905,22 @@ def _query_requires_direct_topic_evidence(query: str) -> bool:
 
 
 def _recall_rank(query: str, moment: dict) -> tuple[int, float]:
-    return recall_rank(query, moment, _recall_relevance_options())
+    options = _recall_relevance_options()
+    rank = recall_rank(query, moment, options)
+    if rank[0] == 20 and _is_body_hardware_bridge_moment(query, moment, options):
+        return 1, rank[1]
+    return rank
+
+
+def _is_body_hardware_bridge_moment(query: str, moment: dict, options=None) -> bool:
+    options = options or _recall_relevance_options()
+    query_active = active_facets(facets_for_text(query, options))
+    if "embodiment" not in query_active:
+        return False
+    try:
+        return float(facets_for_node(moment, options).get("hardware_protocol", 0.0)) >= 0.28
+    except (TypeError, ValueError):
+        return False
 
 
 async def _build_recall_debug_payload(
@@ -7019,7 +7035,7 @@ def _looks_like_operit_auto_grow_content(content: str) -> bool:
 
 
 async def _grow_direct_structured_content(content: str, title: str = "", gate_prefix: str = "") -> str:
-    direct_content = str(content or "").strip()
+    direct_content = _normalize_memory_sections_for_write(content)
     try:
         analysis = await dehydrator.analyze(direct_content)
     except Exception as e:
@@ -7030,6 +7046,7 @@ async def _grow_direct_structured_content(content: str, title: str = "", gate_pr
         }
 
     tags = analysis.get("tags", []) if isinstance(analysis.get("tags", []), list) else []
+    direct_content = await _auto_generate_write_moment_if_needed(direct_content, tags)
     classification = normalize_write_classification(
         memory_subject=analysis.get("memory_subject", ""),
         memory_layer=analysis.get("memory_layer", ""),

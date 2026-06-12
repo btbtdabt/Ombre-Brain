@@ -262,6 +262,19 @@ def patch_breath(monkeypatch, tmp_path):
         recall_diagnostics=None,
     ) -> FakeBucketManager:
         bucket_mgr = FakeBucketManager(buckets, search_ids=search_ids)
+        monkeypatch.setattr(
+            server,
+            "config",
+            {
+                **server.config,
+                "identity": {
+                    "ai_name": "Haven",
+                    "user_name": "Rain",
+                    "user_display_name": "小雨",
+                    "user_aliases": ["小雨"],
+                },
+            },
+        )
         monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
         monkeypatch.setattr(server, "decay_engine", DummyDecayEngine())
         monkeypatch.setattr(server, "dehydrator", DummyDehydrator())

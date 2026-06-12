@@ -49,9 +49,16 @@ DEFAULT_FACET_ALIASES = {
         "protocol",
         "bluetooth",
         "ble",
+        "esp32",
+        "mpr121",
+        "bjd",
         "硬件",
         "协议",
         "蓝牙",
+        "触摸模块",
+        "触摸",
+        "触碰",
+        "铜箔",
     ),
     "communication_action": (
         "email",
@@ -486,7 +493,7 @@ def facets_for_node(
     meta = node.get("metadata", {}) if isinstance(node.get("metadata"), dict) else {}
     fields = (
         ("tags", _join_text(meta.get("tags")) + " " + _join_text(meta.get("bucket_tags")), 0.55),
-        ("domain", _join_text(meta.get("domain")) + " " + _join_text(meta.get("bucket_domain")), 0.5),
+        ("domain", _join_text(meta.get("domain")) + " " + _join_text(meta.get("bucket_domain")), 0.45),
         (
             "name",
             " ".join(

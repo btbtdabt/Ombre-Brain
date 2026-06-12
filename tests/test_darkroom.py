@@ -8,6 +8,7 @@ def _store(tmp_path):
         {
             "state_dir": str(tmp_path / "state"),
             "buckets_dir": str(tmp_path / "buckets"),
+            "identity": {"ai_name": "Haven"},
         }
     )
 

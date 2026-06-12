@@ -34,6 +34,7 @@ WEAK_TERMS = {
     "commitment",
     "emotional_echo",
     "project_event",
+    "relationship",
     "relationship_event",
     "family_milestone",
     "task_status_signal",

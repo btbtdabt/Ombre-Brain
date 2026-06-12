@@ -125,6 +125,29 @@ class DummyRequest:
         return json.dumps(self._body or {}).encode("utf-8")
 
 
+def _patch_server_identity(
+    monkeypatch,
+    server,
+    *,
+    ai_name: str = "Haven",
+    user_name: str = "Rain",
+    user_display_name: str = "小雨",
+) -> None:
+    monkeypatch.setattr(
+        server,
+        "config",
+        {
+            **server.config,
+            "identity": {
+                "ai_name": ai_name,
+                "user_name": user_name,
+                "user_display_name": user_display_name,
+                "user_aliases": [user_display_name],
+            },
+        },
+    )
+
+
 def mixed_affect_anchor_content() -> str:
     return (
         "这条记忆正文继续保留在开头。\n\n"
@@ -2289,6 +2312,7 @@ async def test_dashboard_comment_api_writes_rain_author(monkeypatch, bucket_mgr,
     monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
     monkeypatch.setattr(server, "decay_engine", decay_eng)
     monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+    _patch_server_identity(monkeypatch, server)
     embedding_engine = CapturingEmbeddingEngine()
     monkeypatch.setattr(server, "embedding_engine", embedding_engine)
 
@@ -2415,6 +2439,7 @@ async def test_dashboard_comment_delete_only_allows_rain_dashboard_comments(monk
     monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
     monkeypatch.setattr(server, "decay_engine", decay_eng)
     monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+    _patch_server_identity(monkeypatch, server)
     embedding_engine = CapturingEmbeddingEngine()
     monkeypatch.setattr(server, "embedding_engine", embedding_engine)
 

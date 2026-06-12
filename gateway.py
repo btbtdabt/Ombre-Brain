@@ -7442,7 +7442,10 @@ class GatewayService:
         return bool(active_facets(facets_for_text(query, self.relevance_options)))
 
     def _recall_rank(self, query: str, moment: dict) -> tuple[int, float]:
-        return recall_rank(query, moment, self.relevance_options)
+        rank = recall_rank(query, moment, self.relevance_options)
+        if rank[0] == 20 and self._is_gateway_hardware_bridge_node(query, moment):
+            return 1, rank[1]
+        return rank
 
     def _apply_relevance_to_moment_candidates(self, query: str, candidates: list[dict]) -> list[dict]:
         filtered = []
@@ -8408,7 +8411,10 @@ class GatewayService:
     def _bucket_recall_rank(self, query: str, bucket: dict, score: float = 0.0) -> tuple[int, float]:
         node = self._bucket_relevance_node(bucket)
         node["score"] = score
-        return recall_rank(query, node, self.relevance_options)
+        rank = recall_rank(query, node, self.relevance_options)
+        if rank[0] == 20 and self._is_gateway_hardware_bridge_node(query, node):
+            return 1, rank[1]
+        return rank
 
     def _bucket_rerank_document(self, bucket: dict) -> str:
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
@@ -9791,6 +9797,16 @@ class GatewayService:
             self.relevance_options,
         )
 
+    def _is_gateway_hardware_bridge_node(self, query: str, node: dict, facets: dict | None = None) -> bool:
+        query_active = active_facets(facets_for_text(query, self.relevance_options))
+        if "embodiment" not in query_active:
+            return False
+        node_facets = facets if facets is not None else facets_for_node(node, self.relevance_options)
+        try:
+            return float(node_facets.get("hardware_protocol", 0.0)) >= 0.28
+        except (TypeError, ValueError):
+            return False
+
     def _is_relevance_candidate_bucket(self, query: str, bucket: dict) -> bool:
         if is_self_anchor_bucket(bucket):
             return False
@@ -9810,12 +9826,14 @@ class GatewayService:
         node = self._bucket_relevance_node(bucket)
         if should_suppress_context_candidate(query, node, self.relevance_options):
             return False
-        node_active = active_facets(facets_for_node(node, self.relevance_options), threshold=0.3)
-        if not node_active:
+        node_facets = facets_for_node(node, self.relevance_options)
+        node_active = active_facets(node_facets, threshold=0.3)
+        hardware_bridge = self._is_gateway_hardware_bridge_node(query, node, node_facets)
+        if not node_active and not hardware_bridge:
             return False
         if query_active & node_active:
             return True
-        if "embodiment" in query_active and "hardware_protocol" in node_active:
+        if "embodiment" in query_active and ("hardware_protocol" in node_active or hardware_bridge):
             return True
         if "old_or_resolved" in query_active and "old_or_resolved" in node_active:
             return True

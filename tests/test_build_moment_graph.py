@@ -7,6 +7,19 @@ from memory_moments import MemoryMomentStore
 from scripts import build_moment_graph
 
 
+def _relevance_options():
+    return build_moment_graph.memory_relevance_options_from_config(
+        {
+            "identity": {
+                "ai_name": "Haven",
+                "user_name": "Rain",
+                "user_display_name": "小雨",
+                "user_aliases": ["小雨"],
+            }
+        }
+    )
+
+
 def _moment(
     bucket_id: str,
     text: str,
@@ -165,7 +178,7 @@ def test_terms_and_metadata_filters_drop_worker_noise():
 
     indexed = build_moment_graph.index_moments(
         [moment],
-        build_moment_graph.memory_relevance_options_from_config(),
+        _relevance_options(),
         max_moments=10,
     )
 
@@ -181,7 +194,7 @@ def test_terms_and_metadata_filters_drop_worker_noise():
 
 
 def test_context_term_with_real_content_survives_filter():
-    options = build_moment_graph.memory_relevance_options_from_config()
+    options = _relevance_options()
 
     assert build_moment_graph.is_context_glue_term("小雨与", options.context_terms)
     assert not build_moment_graph.is_context_glue_term("喜欢看haven闹脾气", options.context_terms)
