@@ -320,6 +320,7 @@ class GatewayService:
                 if default_model:
                     self.upstream_default_model = default_model
                     break
+        self.gateway_token_routes = self._load_gateway_token_routes()
 
         self.head_recent_hours = int(self.gateway_cfg.get("head_recent_hours", 72))
         self.recent_context_reentry_idle_hours = float(
@@ -1077,6 +1078,7 @@ class GatewayService:
         auth_result = self._authorize(request.headers.get("Authorization", ""))
         if auth_result is not None:
             return auth_result
+        auth_context = self._auth_context_from_headers(request.headers)
 
         session_id = (request.headers.get("X-Ombre-Session-Id") or self.default_session_id).strip()
         client_label = self._client_label_from_request(request, "/v1/chat/completions")
@@ -1095,6 +1097,7 @@ class GatewayService:
                 {"error": {"message": "Request body must be a JSON object", "type": "invalid_request_error"}},
                 status_code=400,
             )
+        payload = self._apply_auth_default_model(payload, auth_context)
 
         logger.info(
             "Gateway incoming chat | session=%s model=%s stream=%s messages=%s",
@@ -1216,11 +1219,16 @@ class GatewayService:
         auth_result = self._authorize(request.headers.get("Authorization", ""))
         if auth_result is not None:
             return auth_result
+        auth_context = self._auth_context_from_headers(request.headers)
 
         session_id = (request.headers.get("X-Ombre-Session-Id") or self.default_session_id).strip()
         client_label = self._client_label_from_request(request, "/v1beta/models/:generateContent")
         trace_id = secrets.token_hex(6)
-        model = str(request.path_params.get("model") or self.upstream_default_model).strip()
+        model = str(
+            request.path_params.get("model")
+            or auth_context.get("default_model")
+            or self.upstream_default_model
+        ).strip()
 
         try:
             payload = await request.json()
@@ -1323,6 +1331,7 @@ class GatewayService:
         auth_result = self._authorize_anthropic_request(request)
         if auth_result is not None:
             return auth_result
+        auth_context = self._auth_context_from_headers(request.headers)
 
         session_id = (request.headers.get("X-Ombre-Session-Id") or self.default_session_id).strip()
         client_label = self._client_label_from_request(request, "/v1/messages")
@@ -1338,6 +1347,7 @@ class GatewayService:
 
         try:
             openai_payload = self._anthropic_request_to_openai(payload)
+            openai_payload = self._apply_auth_default_model(openai_payload, auth_context)
         except ValueError as exc:
             return self._anthropic_error(str(exc), status_code=400)
 
@@ -1947,7 +1957,7 @@ class GatewayService:
                 status_code=401,
             )
 
-        if not secrets.compare_digest(token, self.gateway_token):
+        if self._auth_context_from_token(token) is None:
             return JSONResponse(
                 {"error": {"message": "Invalid gateway token", "type": "authentication_error"}},
                 status_code=401,
@@ -1973,7 +1983,7 @@ class GatewayService:
                 error_type="authentication_error",
             )
 
-        if not secrets.compare_digest(token, self.gateway_token):
+        if self._auth_context_from_token(token) is None:
             return self._anthropic_error(
                 "Invalid gateway token",
                 status_code=401,
@@ -1981,6 +1991,79 @@ class GatewayService:
             )
 
         return None
+
+    def _load_gateway_token_routes(self) -> list[dict[str, str]]:
+        routes: list[dict[str, str]] = []
+        raw_routes = self.gateway_cfg.get("token_routes", [])
+        if isinstance(raw_routes, dict):
+            raw_routes = [
+                {"name": name, **value}
+                for name, value in raw_routes.items()
+                if isinstance(value, dict)
+            ]
+        if isinstance(raw_routes, list):
+            for index, raw in enumerate(raw_routes, start=1):
+                if not isinstance(raw, dict):
+                    continue
+                token_env = str(raw.get("token_env") or raw.get("api_key_env") or "").strip()
+                token = os.environ.get(token_env, "") if token_env else str(raw.get("token") or "").strip()
+                if not token:
+                    continue
+                routes.append(
+                    {
+                        "name": str(raw.get("name") or token_env or f"token-route-{index}").strip(),
+                        "token": token,
+                        "default_model": str(raw.get("default_model") or "").strip(),
+                    }
+                )
+
+        gemini_token = os.environ.get("OMBRE_GATEWAY_GEMINI_TOKEN", "").strip()
+        if gemini_token:
+            routes.append(
+                {
+                    "name": "gemini",
+                    "token": gemini_token,
+                    "default_model": os.environ.get(
+                        "OMBRE_GATEWAY_GEMINI_DEFAULT_MODEL",
+                        "gemini-3.5-flash",
+                    ).strip(),
+                }
+            )
+        return routes
+
+    def _auth_context_from_headers(self, headers: Any) -> dict[str, str]:
+        auth_header = str(headers.get("Authorization", "") or "")
+        scheme, _, bearer_token = auth_header.partition(" ")
+        api_key = str(headers.get("x-api-key", "") or "").strip()
+        token = bearer_token.strip() if scheme.lower() == "bearer" else api_key
+        return self._auth_context_from_token(token) or {}
+
+    def _auth_context_from_token(self, token: str) -> dict[str, str] | None:
+        token = str(token or "").strip()
+        if not token:
+            return None
+        if self.gateway_token and secrets.compare_digest(token, self.gateway_token):
+            return {"name": "default", "default_model": ""}
+        for route in self.gateway_token_routes:
+            route_token = str(route.get("token") or "")
+            if route_token and secrets.compare_digest(token, route_token):
+                return {
+                    "name": str(route.get("name") or ""),
+                    "default_model": str(route.get("default_model") or ""),
+                }
+        return None
+
+    def _apply_auth_default_model(
+        self,
+        payload: dict[str, Any],
+        auth_context: dict[str, str],
+    ) -> dict[str, Any]:
+        default_model = str(auth_context.get("default_model") or "").strip()
+        if not default_model or str(payload.get("model") or "").strip():
+            return payload
+        next_payload = deepcopy(payload)
+        next_payload["model"] = default_model
+        return next_payload
 
     async def _forward_upstream(
         self,

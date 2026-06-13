@@ -2091,6 +2091,54 @@ def test_gateway_preserves_tool_call_fields(monkeypatch, test_config, bucket_mgr
     assert tool_message["tool_call_id"] == "call_read_diary"
 
 
+def test_gateway_token_specific_default_model_routes_to_different_upstreams(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    monkeypatch.setenv("OMBRE_GATEWAY_GEMINI_TOKEN", "gemini-gateway-secret")
+    cfg = _gateway_config(
+        test_config,
+        upstream_default_model="claude-fable-5",
+        upstreams=[
+            {
+                "name": "anthropic",
+                "base_url": "https://claude.example/v1",
+                "api_key_env": "OMBRE_GATEWAY_UPSTREAM_API_KEY",
+                "default_model": "claude-fable-5",
+                "models": ["claude-fable-5"],
+            },
+            {
+                "name": "gemini",
+                "base_url": "https://gemini.example/v1",
+                "api_key_env": "OMBRE_GATEWAY_UPSTREAM_API_KEY",
+                "default_model": "gemini-3.5-flash",
+                "models": ["gemini-3.5-flash"],
+            },
+        ],
+    )
+    app, _, _, captured = _build_service(monkeypatch, cfg, bucket_mgr)
+
+    with TestClient(app) as client:
+        claude_response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer gateway-secret"},
+            json={"messages": [{"role": "user", "content": "hello"}]},
+        )
+        gemini_response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer gemini-gateway-secret"},
+            json={"messages": [{"role": "user", "content": "hello"}]},
+        )
+
+    assert claude_response.status_code == 200
+    assert gemini_response.status_code == 200
+    assert captured[0]["url"] == "https://claude.example/v1/chat/completions"
+    assert captured[0]["json"]["model"] == "claude-fable-5"
+    assert captured[1]["url"] == "https://gemini.example/v1/chat/completions"
+    assert captured[1]["json"]["model"] == "gemini-3.5-flash"
+
+
 def test_gateway_skips_persona_reanalysis_on_tool_continuation(monkeypatch, test_config, bucket_mgr):
     monkeypatch.setenv("OMBRE_GATEWAY_TOKEN", "gateway-secret")
     monkeypatch.setenv("OMBRE_GATEWAY_UPSTREAM_API_KEY", "upstream-secret")

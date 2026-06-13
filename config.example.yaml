@@ -270,6 +270,15 @@ gateway:
   # openai: 使用 X-Ombre-Session-Id 发送 prompt_cache_key；其他供应商保持空值。
   prompt_cache: "openai"
   # prompt_cache_retention: "24h"  # Optional for supported OpenAI models / 支持模型可选
+  # Optional token-specific defaults. Requests using OMBRE_GATEWAY_TOKEN use
+  # upstream_default_model; requests using one of these token routes use its
+  # default_model when the client omits model.
+  # 可选：按 token 指定默认模型。OMBRE_GATEWAY_TOKEN 使用 upstream_default_model；
+  # token_routes 里的 token 在客户端不传 model 时使用对应 default_model。
+  # token_routes:
+  #   - name: "gemini"
+  #     token_env: "OMBRE_GATEWAY_GEMINI_TOKEN"
+  #     default_model: "gemini-3.5-flash"
   # Optional multi-upstream mode / 可选多上游模式
   # When upstreams is set, the gateway aggregates all listed models and routes
   # each request by model name to the matching upstream.
