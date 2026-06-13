@@ -2235,13 +2235,14 @@ def test_gateway_gemini_native_injects_initial_turn_and_skips_conversation_log(
             headers={
                 "Authorization": "Bearer gateway-secret",
                 "X-Ombre-Session-Id": "sess-gemini-native",
+                "X-Ombre-Current-Query-B64": "c2VhZm9vZCBwcmVmZXJlbmNl",
             },
             json={
                 "systemInstruction": {"parts": [{"text": "coordinator system"}]},
                 "contents": [
                     {
                         "role": "user",
-                        "parts": [{"text": "帮我想起海鲜偏好"}],
+                        "parts": [{"text": "coordinator wrapper without the recall keyword"}],
                     }
                 ],
                 "tools": [{"functionDeclarations": [{"name": "breath"}]}],

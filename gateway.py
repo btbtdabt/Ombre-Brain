@@ -5,6 +5,7 @@ import re
 import secrets
 import json
 import codecs
+import base64
 import time
 import asyncio
 from contextlib import asynccontextmanager
@@ -1261,6 +1262,7 @@ class GatewayService:
                 openai_payload,
                 session_id,
                 include_debug=True,
+                query_override=self._current_query_override_from_headers(request.headers),
             )
             forward_payload = (
                 self._openai_payload_to_gemini_native_request(payload, forward_openai_payload)
@@ -1515,6 +1517,7 @@ class GatewayService:
         *,
         include_favorite_memory: bool = False,
         include_debug: bool = False,
+        query_override: str = "",
     ) -> tuple[dict, list[str] | None] | tuple[dict, list[str] | None, dict[str, Any]]:
         messages = payload.get("messages")
         if not isinstance(messages, list) or not messages:
@@ -1526,7 +1529,7 @@ class GatewayService:
         self._get_upstream_for_model(model)
 
         all_buckets = await self.bucket_mgr.list_all(include_archive=False)
-        current_user_query = self._extract_current_turn_user_query(messages)
+        current_user_query = str(query_override or "").strip() or self._extract_current_turn_user_query(messages)
         is_new_user_turn = bool(current_user_query)
         has_handoff_context = self._messages_contain_handoff_context(messages)
         is_handoff_trigger_query = self._query_is_handoff_trigger(current_user_query)
@@ -4356,6 +4359,15 @@ class GatewayService:
             if isinstance(text, str) and text:
                 chunks.append(text)
         return "\n".join(chunks)
+
+    def _current_query_override_from_headers(self, headers: Any) -> str:
+        encoded = str(headers.get("X-Ombre-Current-Query-B64", "") or "").strip()
+        if encoded:
+            try:
+                return base64.b64decode(encoded, validate=True).decode("utf-8").strip()
+            except Exception:
+                logger.warning("Gateway ignored invalid X-Ombre-Current-Query-B64 header")
+        return str(headers.get("X-Ombre-Current-Query", "") or "").strip()
 
     def _gemini_native_request_to_openai(self, payload: dict[str, Any], model: str) -> dict[str, Any]:
         contents = payload.get("contents")
