@@ -1266,11 +1266,13 @@ class GatewayService:
         try:
             openai_payload = self._gemini_native_request_to_openai(payload, model)
             persona_user_message = self._extract_last_user_query(openai_payload.get("messages", []))
+            is_tool_continuation = self._gemini_native_request_has_function_response(payload)
+            query_override = "" if is_tool_continuation else self._current_query_override_from_headers(request.headers)
             forward_openai_payload, recalled_ids, injection_debug = await self.prepare_payload(
                 openai_payload,
                 session_id,
                 include_debug=True,
-                query_override=self._current_query_override_from_headers(request.headers),
+                query_override=query_override,
             )
             forward_payload = (
                 self._openai_payload_to_gemini_native_request(payload, forward_openai_payload)
@@ -4430,6 +4432,23 @@ class GatewayService:
                     item["function_responses"] = function_responses
             summary.append(item)
         return summary
+
+    def _gemini_native_request_has_function_response(self, payload: dict[str, Any]) -> bool:
+        contents = payload.get("contents")
+        if not isinstance(contents, list):
+            return False
+        for content in contents:
+            if not isinstance(content, dict):
+                continue
+            parts = content.get("parts")
+            if not isinstance(parts, list):
+                continue
+            if any(
+                isinstance(part, dict) and isinstance(part.get("functionResponse"), dict)
+                for part in parts
+            ):
+                return True
+        return False
 
     def _gemini_parts_text(self, parts: Any) -> str:
         if not isinstance(parts, list):

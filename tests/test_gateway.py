@@ -2388,6 +2388,7 @@ def test_gateway_gemini_native_tool_continuation_preserves_payload_without_reinj
             headers={
                 "Authorization": "Bearer gateway-secret",
                 "X-Ombre-Session-Id": "sess-gemini-native-tools",
+                "X-Ombre-Current-Query-B64": "6K+35byA5aeL5Zue5aSNLg==",
             },
             json={
                 "systemInstruction": {"parts": [{"text": "coordinator system"}]},
