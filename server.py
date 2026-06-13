@@ -6832,6 +6832,7 @@ async def hold(
         whisper_valence = valence if 0 <= valence <= 1 else 0.5
         whisper_arousal = arousal if 0 <= arousal <= 1 else 0.3
         whisper_tags = list(dict.fromkeys(extra_tags + ["whisper"]))
+        whisper_name = title.strip() or None
         bucket_id = await bucket_mgr.create(
             content=content,
             tags=whisper_tags,
@@ -6839,7 +6840,7 @@ async def hold(
             domain=[],
             valence=whisper_valence,
             arousal=whisper_arousal,
-            name=None,
+            name=whisper_name,
             bucket_type="feel",
         )
         _queue_embedding_refresh(bucket_id)

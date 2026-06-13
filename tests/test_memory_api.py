@@ -2665,11 +2665,14 @@ async def test_hold_feel_without_source_creates_whisper(monkeypatch, bucket_mgr,
         feel=True,
         valence=0.72,
         arousal=0.28,
+        title="没有源记忆的突然想念",
     )
     bucket_id = result.split("→", 1)[1]
     bucket = await bucket_mgr.get(bucket_id)
 
     assert result.startswith("🫧whisper→")
+    assert bucket["metadata"]["name"] == "没有源记忆的突然想念"
+    assert bucket["metadata"]["domain"] == ["未分类"]
     assert bucket["metadata"]["type"] == "feel"
     assert "whisper" in bucket["metadata"]["tags"]
     assert "private_note" in bucket["metadata"]["tags"]
@@ -2691,11 +2694,14 @@ async def test_hold_whisper_creates_independent_feel(monkeypatch, bucket_mgr, de
         whisper=True,
         valence=0.73,
         arousal=0.29,
+        title="没有源记忆的悄悄话",
     )
     bucket_id = result.split("→", 1)[1]
     bucket = await bucket_mgr.get(bucket_id)
 
     assert result.startswith("🫧whisper→")
+    assert bucket["metadata"]["name"] == "没有源记忆的悄悄话"
+    assert bucket["metadata"]["domain"] == ["未分类"]
     assert bucket["metadata"]["type"] == "feel"
     assert "whisper" in bucket["metadata"]["tags"]
     assert "private_note" in bucket["metadata"]["tags"]
