@@ -11,15 +11,37 @@
 
 import os
 import re
+import json
 import uuid
 import yaml
 import logging
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from typing import Any
 
 
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def parse_first_json_value(raw: str) -> Any:
+    """
+    Parse the first JSON object or array in an LLM response.
+    解析 LLM 返回里第一个 JSON object 或 array。
+    """
+    text = str(raw or "").strip()
+    if not text:
+        raise ValueError("empty_json_response")
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char not in "{[":
+            continue
+        try:
+            value, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        return value
+    raise ValueError("no_json_object_or_array_found")
 
 
 def load_config(config_path: str = None) -> dict:
