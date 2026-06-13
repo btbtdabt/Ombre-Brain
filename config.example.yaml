@@ -280,6 +280,10 @@ gateway:
   # upstreams:
   #   - name: "deepseek"
   #     base_url: "https://api.deepseek.com/v1"
+  #     # Optional: native Gemini generateContent route uses this instead of base_url.
+  #     # 可选：原生 Gemini generateContent 路由使用这个地址，而不是 base_url。
+  #     # gemini_base_url: "https://generativelanguage.googleapis.com/v1beta"
+  #     # gemini_auth: "google"  # google = x-goog-api-key; bearer = Authorization: Bearer
   #     api_key_env: "OMBRE_GATEWAY_DEEPSEEK_API_KEY"
   #     # Optional fallback keys. Retryable errors switch to the next key.
   #     # 可选备用 key。遇到可重试错误时自动换下一个 key。

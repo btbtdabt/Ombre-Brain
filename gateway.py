@@ -1211,6 +1211,112 @@ class GatewayService:
 
         return self._proxy_response(upstream_response)
 
+    async def handle_gemini_generate_content(self, request: Request) -> Response:
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+
+        session_id = (request.headers.get("X-Ombre-Session-Id") or self.default_session_id).strip()
+        client_label = self._client_label_from_request(request, "/v1beta/models/:generateContent")
+        trace_id = secrets.token_hex(6)
+        model = str(request.path_params.get("model") or self.upstream_default_model).strip()
+
+        try:
+            payload = await request.json()
+        except Exception:
+            return JSONResponse(
+                {"error": {"message": "Request body must be valid JSON", "type": "invalid_request_error"}},
+                status_code=400,
+            )
+
+        if not isinstance(payload, dict):
+            return JSONResponse(
+                {"error": {"message": "Request body must be a JSON object", "type": "invalid_request_error"}},
+                status_code=400,
+            )
+
+        logger.info(
+            "Gateway incoming Gemini native request | session=%s model=%s contents=%s",
+            session_id,
+            model,
+            self._summarize_gemini_contents_for_debug(payload.get("contents")),
+        )
+        self.debug_trace.write(
+            "gateway",
+            "incoming_request",
+            payload={
+                "route": "/v1beta/models/:generateContent",
+                "session_id": session_id,
+                "client": client_label,
+                "headers": headers_to_dict(request.headers),
+                "body": payload,
+            },
+            trace_id=trace_id,
+        )
+
+        try:
+            openai_payload = self._gemini_native_request_to_openai(payload, model)
+            persona_user_message = self._extract_last_user_query(openai_payload.get("messages", []))
+            forward_openai_payload, recalled_ids, injection_debug = await self.prepare_payload(
+                openai_payload,
+                session_id,
+                include_debug=True,
+            )
+            forward_payload = (
+                self._openai_payload_to_gemini_native_request(payload, forward_openai_payload)
+                if recalled_ids is not None
+                else deepcopy(payload)
+            )
+            self.debug_trace.write(
+                "gateway",
+                "prepared_payload",
+                payload={
+                    "route": "/v1beta/models/:generateContent",
+                    "session_id": session_id,
+                    "client": client_label,
+                    "recalled_ids": recalled_ids,
+                    "injection_debug": injection_debug,
+                    "body": forward_payload,
+                },
+                trace_id=trace_id,
+            )
+        except ValueError as exc:
+            return JSONResponse(
+                {"error": {"message": str(exc), "type": "invalid_request_error"}},
+                status_code=400,
+            )
+        except RuntimeError as exc:
+            return JSONResponse(
+                {"error": {"message": str(exc), "type": "server_error"}},
+                status_code=503,
+            )
+
+        upstream_response = await self._forward_gemini_native_upstream(
+            forward_payload,
+            model,
+            trace_id=trace_id,
+            gateway_route="/v1beta/models/:generateContent",
+        )
+        if 200 <= upstream_response.status_code < 300:
+            await self._record_successful_round(
+                session_id,
+                recalled_ids,
+                injection_debug,
+                user_message="",
+                assistant_message=None,
+                model=model,
+                client=client_label,
+                route="/v1beta/models/:generateContent",
+                upstream_usage=self._usage_from_gemini_native_response(upstream_response),
+            )
+            if persona_user_message:
+                logger.info(
+                    "Gateway Gemini native persona post-update skipped | session=%s reason=coordinator_native_route",
+                    session_id,
+                )
+
+        return self._proxy_response(upstream_response)
+
     async def handle_anthropic_messages(self, request: Request) -> Response:
         auth_result = self._authorize_anthropic_request(request)
         if auth_result is not None:
@@ -1959,6 +2065,129 @@ class GatewayService:
                     latency_ms=latency_ms,
                 )
                 return response
+            if not self._should_retry_upstream_status(response.status_code):
+                self._trace_upstream_response(
+                    response,
+                    trace_id=trace_id,
+                    gateway_route=gateway_route,
+                    trace_stage=trace_stage,
+                    upstream_name=upstream.get("name", ""),
+                    attempt=attempt,
+                    latency_ms=latency_ms,
+                )
+                return response
+            self._cool_down_upstream_key(upstream, key_entry)
+            if attempt < len(key_entries):
+                continue
+            self._trace_upstream_response(
+                response,
+                trace_id=trace_id,
+                gateway_route=gateway_route,
+                trace_stage=trace_stage,
+                upstream_name=upstream.get("name", ""),
+                attempt=attempt,
+                latency_ms=latency_ms,
+                retry_exhausted=True,
+            )
+            return response
+
+        if last_response is not None:
+            return last_response
+        error_response = self._upstream_request_error_response(upstream, model, last_error)
+        self._trace_upstream_response(
+            error_response,
+            trace_id=trace_id,
+            gateway_route=gateway_route,
+            trace_stage=trace_stage,
+            upstream_name=upstream.get("name", ""),
+            error_type=type(last_error).__name__ if last_error else "",
+        )
+        return error_response
+
+    async def _forward_gemini_native_upstream(
+        self,
+        payload: dict[str, Any],
+        model: str,
+        *,
+        trace_id: str = "",
+        gateway_route: str = "",
+        trace_stage: str = "main",
+    ) -> httpx.Response:
+        route = self._resolve_upstream_for_model(model)
+        upstream = route["upstream"]
+        upstream_model = route["upstream_model"]
+        url = self._gemini_native_endpoint(upstream, upstream_model)
+        key_entries = self._available_upstream_api_keys(upstream)
+        last_error: Exception | None = None
+        last_response: httpx.Response | None = None
+        self.debug_trace.write(
+            "gateway",
+            "upstream_request",
+            payload={
+                "route": gateway_route,
+                "stage": trace_stage,
+                "upstream": upstream.get("name", ""),
+                "url": url,
+                "public_model": model,
+                "upstream_model": upstream_model,
+                "body": payload,
+            },
+            trace_id=trace_id,
+        )
+
+        for attempt, key_entry in enumerate(key_entries, start=1):
+            started_at = time.perf_counter()
+            try:
+                response = await self.http_client.post(
+                    url,
+                    headers=self._gemini_native_headers(upstream, key_entry, url),
+                    json=payload,
+                )
+            except httpx.RequestError as exc:
+                latency_ms = int((time.perf_counter() - started_at) * 1000)
+                last_error = exc
+                self._cool_down_upstream_key(upstream, key_entry)
+                logger.warning(
+                    "Gateway Gemini native upstream request failed | upstream=%s key=%s "
+                    "model=%s upstream_model=%s attempt=%s/%s latency_ms=%s error=%s",
+                    upstream["name"],
+                    key_entry["label"],
+                    model,
+                    upstream_model,
+                    attempt,
+                    len(key_entries),
+                    latency_ms,
+                    exc,
+                )
+                continue
+
+            latency_ms = int((time.perf_counter() - started_at) * 1000)
+            last_response = response
+            logger.info(
+                "Gateway Gemini native upstream response | upstream=%s key=%s model=%s "
+                "upstream_model=%s status=%s attempt=%s/%s latency_ms=%s",
+                upstream["name"],
+                key_entry["label"],
+                model,
+                upstream_model,
+                response.status_code,
+                attempt,
+                len(key_entries),
+                latency_ms,
+            )
+            if 200 <= response.status_code < 300:
+                self._clear_upstream_key_cooldown(upstream, key_entry)
+                self._trace_upstream_response(
+                    response,
+                    trace_id=trace_id,
+                    gateway_route=gateway_route,
+                    trace_stage=trace_stage,
+                    upstream_name=upstream.get("name", ""),
+                    attempt=attempt,
+                    latency_ms=latency_ms,
+                )
+                return response
+
             if not self._should_retry_upstream_status(response.status_code):
                 self._trace_upstream_response(
                     response,
@@ -4081,6 +4310,206 @@ class GatewayService:
             summary.append(item)
 
         return summary
+
+    def _summarize_gemini_contents_for_debug(self, contents: Any) -> list[dict[str, Any]] | str:
+        if not isinstance(contents, list):
+            return "<invalid>"
+        summary: list[dict[str, Any]] = []
+        for index, content in enumerate(contents):
+            if not isinstance(content, dict):
+                summary.append({"idx": index, "type": type(content).__name__})
+                continue
+            item: dict[str, Any] = {
+                "idx": index,
+                "role": str(content.get("role") or ""),
+            }
+            parts = content.get("parts")
+            if isinstance(parts, list):
+                item["parts"] = len(parts)
+                if any(isinstance(part, dict) and isinstance(part.get("text"), str) and part.get("text") for part in parts):
+                    item["has_text"] = True
+                function_calls = [
+                    str(part.get("functionCall", {}).get("name") or "")
+                    for part in parts
+                    if isinstance(part, dict) and isinstance(part.get("functionCall"), dict)
+                ]
+                function_responses = [
+                    str(part.get("functionResponse", {}).get("name") or "")
+                    for part in parts
+                    if isinstance(part, dict) and isinstance(part.get("functionResponse"), dict)
+                ]
+                if function_calls:
+                    item["function_calls"] = function_calls
+                if function_responses:
+                    item["function_responses"] = function_responses
+            summary.append(item)
+        return summary
+
+    def _gemini_parts_text(self, parts: Any) -> str:
+        if not isinstance(parts, list):
+            return ""
+        chunks = []
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            text = part.get("text")
+            if isinstance(text, str) and text:
+                chunks.append(text)
+        return "\n".join(chunks)
+
+    def _gemini_native_request_to_openai(self, payload: dict[str, Any], model: str) -> dict[str, Any]:
+        contents = payload.get("contents")
+        if not isinstance(contents, list) or not contents:
+            raise ValueError("contents must be a non-empty list")
+
+        messages: list[dict[str, Any]] = []
+        system_instruction = payload.get("systemInstruction")
+        system_parts = system_instruction.get("parts") if isinstance(system_instruction, dict) else []
+        system_text = self._gemini_parts_text(system_parts).strip()
+        if system_text:
+            messages.append({"role": "system", "content": system_text})
+
+        for content_index, content in enumerate(contents):
+            if not isinstance(content, dict):
+                continue
+            role = str(content.get("role") or "user").strip().lower()
+            parts = content.get("parts")
+            text = self._gemini_parts_text(parts).strip()
+            if role == "model":
+                message: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": text or None,
+                }
+                tool_calls = []
+                if isinstance(parts, list):
+                    for part_index, part in enumerate(parts):
+                        if not isinstance(part, dict):
+                            continue
+                        function_call = part.get("functionCall")
+                        if not isinstance(function_call, dict) or not function_call.get("name"):
+                            continue
+                        call_id = str(function_call.get("id") or part.get("id") or f"call_{content_index}_{part_index}")
+                        try:
+                            arguments = json.dumps(function_call.get("args") or {}, ensure_ascii=False)
+                        except TypeError:
+                            arguments = "{}"
+                        tool_calls.append(
+                            {
+                                "id": call_id,
+                                "type": "function",
+                                "function": {
+                                    "name": str(function_call.get("name")),
+                                    "arguments": arguments,
+                                },
+                            }
+                        )
+                if tool_calls:
+                    message["tool_calls"] = tool_calls
+                messages.append(message)
+                continue
+
+            if isinstance(parts, list):
+                function_responses = [
+                    part.get("functionResponse")
+                    for part in parts
+                    if isinstance(part, dict) and isinstance(part.get("functionResponse"), dict)
+                ]
+                if function_responses and not text:
+                    for response_index, function_response in enumerate(function_responses):
+                        name = str(function_response.get("name") or f"function_response_{response_index}")
+                        response_payload = function_response.get("response")
+                        try:
+                            content_text = json.dumps(response_payload, ensure_ascii=False)
+                        except TypeError:
+                            content_text = str(response_payload)
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": str(function_response.get("id") or name),
+                                "content": content_text,
+                            }
+                        )
+                    continue
+
+            messages.append({"role": "user", "content": text})
+
+        return {
+            "model": model or self.upstream_default_model,
+            "messages": messages,
+            "stream": False,
+        }
+
+    def _openai_payload_to_gemini_native_request(
+        self,
+        original_payload: dict[str, Any],
+        openai_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = deepcopy(original_payload)
+        system_parts: list[dict[str, str]] = []
+        contents: list[dict[str, Any]] = []
+        for message in openai_payload.get("messages", []):
+            if not isinstance(message, dict):
+                continue
+            role = str(message.get("role") or "").strip().lower()
+            text = self._coerce_message_text(message.get("content")).strip()
+            if role == "system":
+                if text:
+                    system_parts.append({"text": text})
+                continue
+            if role == "assistant":
+                parts = []
+                if text:
+                    parts.append({"text": text})
+                tool_calls = message.get("tool_calls")
+                if isinstance(tool_calls, list):
+                    for tool_call in tool_calls:
+                        if not isinstance(tool_call, dict):
+                            continue
+                        function = tool_call.get("function")
+                        if not isinstance(function, dict) or not function.get("name"):
+                            continue
+                        args: dict[str, Any] = {}
+                        raw_args = function.get("arguments")
+                        if isinstance(raw_args, str) and raw_args.strip():
+                            try:
+                                parsed_args = json.loads(raw_args)
+                                if isinstance(parsed_args, dict):
+                                    args = parsed_args
+                            except ValueError:
+                                args = {}
+                        function_call = {"name": str(function.get("name")), "args": args}
+                        if tool_call.get("id"):
+                            function_call["id"] = str(tool_call["id"])
+                        parts.append({"functionCall": function_call})
+                if parts:
+                    contents.append({"role": "model", "parts": parts})
+                continue
+            if role == "tool":
+                response = {"result": text}
+                name = str(message.get("tool_call_id") or "tool_response")
+                contents.append(
+                    {
+                        "role": "user",
+                        "parts": [
+                            {
+                                "functionResponse": {
+                                    "name": name,
+                                    "response": response,
+                                }
+                            }
+                        ],
+                    }
+                )
+                continue
+            if text:
+                contents.append({"role": "user", "parts": [{"text": text}]})
+
+        if system_parts:
+            payload["systemInstruction"] = {"parts": system_parts}
+        else:
+            payload.pop("systemInstruction", None)
+        payload["contents"] = contents
+        return payload
 
     def _should_inject_interval(self, session_id: str, interval_rounds: int) -> bool:
         if interval_rounds <= 0:
@@ -9983,6 +10412,55 @@ class GatewayService:
         upstream_payload["model"] = upstream_model
         return upstream_payload
 
+    def _gemini_native_endpoint(self, upstream: dict[str, Any], upstream_model: str) -> str:
+        base = str(upstream.get("gemini_base_url") or upstream.get("base_url") or "").rstrip("/")
+        if base.lower().endswith("/openai"):
+            base = base[:-7].rstrip("/")
+        if re.search(r"/models/[^/]+:generateContent$", base, flags=re.IGNORECASE):
+            return base
+        model_path = str(upstream_model or "").strip()
+        if not model_path:
+            raise RuntimeError(f'gateway upstream "{upstream["name"]}" model is not configured')
+        if not model_path.startswith("models/"):
+            model_path = f"models/{model_path}"
+        return f"{base}/{model_path}:generateContent"
+
+    def _gemini_native_headers(
+        self,
+        upstream: dict[str, Any],
+        key_entry: dict[str, str],
+        url: str,
+    ) -> dict[str, str]:
+        auth_mode = str(upstream.get("gemini_auth") or "").strip().lower()
+        if not auth_mode:
+            auth_mode = "google" if "generativelanguage.googleapis.com" in url else "bearer"
+        headers = {"Content-Type": "application/json"}
+        if auth_mode in {"google", "x-goog-api-key", "api-key", "api_key"}:
+            headers["x-goog-api-key"] = key_entry["value"]
+        elif auth_mode == "both":
+            headers["Authorization"] = f"Bearer {key_entry['value']}"
+            headers["x-goog-api-key"] = key_entry["value"]
+        else:
+            headers["Authorization"] = f"Bearer {key_entry['value']}"
+        return headers
+
+    def _usage_from_gemini_native_response(self, upstream_response: httpx.Response) -> dict[str, Any] | None:
+        try:
+            body = upstream_response.json()
+        except ValueError:
+            return None
+        if not isinstance(body, dict):
+            return None
+        usage = body.get("usageMetadata")
+        if not isinstance(usage, dict) or not usage:
+            return None
+        return {
+            "prompt_tokens": usage.get("promptTokenCount"),
+            "completion_tokens": usage.get("candidatesTokenCount"),
+            "total_tokens": usage.get("totalTokenCount"),
+            "usageMetadata": usage,
+        }
+
     def _available_upstream_api_keys(self, upstream: dict[str, Any]) -> list[dict[str, str]]:
         key_entries = list(upstream.get("api_keys", []))
         if not key_entries:
@@ -10067,10 +10545,19 @@ class GatewayService:
                 )
                 prompt_cache = str(raw.get("prompt_cache") or "").strip().lower()
                 prompt_cache_retention = str(raw.get("prompt_cache_retention") or "").strip()
+                gemini_base_url = str(
+                    raw.get("gemini_base_url")
+                    or raw.get("native_base_url")
+                    or raw.get("gemini_native_base_url")
+                    or ""
+                ).rstrip("/")
+                gemini_auth = str(raw.get("gemini_auth") or "").strip().lower()
                 upstreams.append(
                     {
                         "name": name,
                         "base_url": base_url,
+                        "gemini_base_url": gemini_base_url,
+                        "gemini_auth": gemini_auth,
                         "api_key": api_keys[0]["value"] if api_keys else "",
                         "api_keys": api_keys,
                         "default_model": default_model,
@@ -10091,6 +10578,13 @@ class GatewayService:
             {
                 "name": "default",
                 "base_url": self.upstream_base_url,
+                "gemini_base_url": str(
+                    self.gateway_cfg.get("gemini_base_url")
+                    or self.gateway_cfg.get("native_base_url")
+                    or self.gateway_cfg.get("gemini_native_base_url")
+                    or ""
+                ).rstrip("/"),
+                "gemini_auth": str(self.gateway_cfg.get("gemini_auth") or "").strip().lower(),
                 "api_key": self.upstream_api_key,
                 "api_keys": self._api_key_entries_from_config(
                     self.gateway_cfg,
@@ -10198,6 +10692,9 @@ def create_gateway_app(
     async def chat_completions(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_chat(request)
 
+    async def gemini_generate_content(request: Request) -> Response:
+        return await request.app.state.gateway_service.handle_gemini_generate_content(request)
+
     async def anthropic_messages(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_anthropic_messages(request)
 
@@ -10222,6 +10719,8 @@ def create_gateway_app(
             Route("/api/debug/upstream-usage", upstream_usage_debug, methods=["GET"]),
             Route("/v1/models", models, methods=["GET"]),
             Route("/v1/chat/completions", chat_completions, methods=["POST"]),
+            Route("/v1beta/models/{model}:generateContent", gemini_generate_content, methods=["POST"]),
+            Route("/models/{model}:generateContent", gemini_generate_content, methods=["POST"]),
             Route("/v1/messages", anthropic_messages, methods=["POST"]),
         ],
         lifespan=lifespan,
