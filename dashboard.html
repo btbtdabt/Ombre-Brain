@@ -2574,7 +2574,7 @@
       <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">留空不改。不会持久化到 yaml（请用环境变量）</div>
       <div class="config-row">
         <label>Max Tokens</label>
-        <input type="number" id="cfg-dehy-maxtokens" min="128" max="8192" />
+        <input type="number" id="cfg-dehy-maxtokens" min="128" max="64000" />
       </div>
       <div class="config-row">
         <label>Temperature</label>
@@ -5851,7 +5851,7 @@ async function loadConfig() {
     document.getElementById('cfg-dehy-url').value = cfg.dehydration.base_url || '';
     document.getElementById('cfg-dehy-key').placeholder = '当前: ' + (cfg.dehydration.api_key_masked || '未设置');
     document.getElementById('cfg-dehy-key').value = '';
-    document.getElementById('cfg-dehy-maxtokens').value = cfg.dehydration.max_tokens || 1024;
+    document.getElementById('cfg-dehy-maxtokens').value = cfg.dehydration.max_tokens || 64000;
     document.getElementById('cfg-dehy-temp').value = cfg.dehydration.temperature ?? 0.1;
     document.getElementById('cfg-emb-enabled').value = cfg.embedding.enabled ? 'true' : 'false';
     document.getElementById('cfg-emb-model').value = cfg.embedding.model || '';
@@ -6028,7 +6028,7 @@ async function saveConfig(persist, persistEnv) {
     candidate.dehydration = {
       model: document.getElementById('cfg-dehy-model').value,
       base_url: document.getElementById('cfg-dehy-url').value,
-      max_tokens: numberValue('cfg-dehy-maxtokens', 4096),
+      max_tokens: numberValue('cfg-dehy-maxtokens', 64000),
       temperature: floatValue('cfg-dehy-temp', 0.3),
     };
     candidate.embedding = {

@@ -109,7 +109,7 @@ dehydration:
   #   OMBRE_DEHYDRATION_BASE_URL
   #   OMBRE_DEHYDRATION_MODEL
   #   OMBRE_MODEL
-  max_tokens: 1024
+  max_tokens: 64000
   temperature: 0.1
 
 # --- Anchor / 长期锚点 ---
@@ -343,7 +343,7 @@ gateway:
   query_planner_model: ""      # empty = use dehydration.model via dehydration API
   query_planner_min_chars: 16  # also catches short emotional reason lookups like "今天为什么激动哭"
   query_planner_max_queries: 3
-  query_planner_max_tokens: 360
+  query_planner_max_tokens: 64000
   memory_detail_recall_enabled: false # optional internal [memory_detail ids="..."] retry for admitted bucket ids
   memory_detail_recall_max_ids: 3
   memory_detail_recall_budget: 1200
@@ -469,7 +469,7 @@ persona:
   thinking_mode: ""
   # api_key: ""                  # Use OMBRE_PERSONA_API_KEY; falls back to OMBRE_API_KEY
   temperature: 0.1
-  max_tokens: 500
+  max_tokens: 64000
   global_decay_hours: 168
   session_mood_half_life_minutes: 90
   max_personality_delta: 0.01
@@ -530,7 +530,7 @@ reflection:
   thinking_mode: ""               # empty = persona.thinking_mode
   # api_key: ""                   # empty = persona.api_key; OMBRE_REFLECTION_API_KEY overrides
   temperature: 0.1
-  max_tokens: 700
+  max_tokens: 64000
   timezone: "Asia/Shanghai"
   daily_hour: 4                   # generate daily impression after this local hour
   persona_events_limit: 12         # selected and deduped; persona events supplement daily weather only
@@ -579,7 +579,7 @@ portrait:
   # api_key: ""                     # OMBRE_PORTRAIT_API_KEY overrides
   thinking_mode: ""
   temperature: 0.1
-  max_tokens: 3200
+  max_tokens: 64000
   json_response_format: true
   material_limit: 18
   first_run_material_limit: 160
@@ -607,7 +607,7 @@ dream:
   # api_key: ""                   # OMBRE_DREAM_API_KEY overrides
   thinking_mode: "disabled"
   temperature: 0.85
-  max_tokens: 900
+  max_tokens: 64000
   timezone: "Asia/Shanghai"
   daily_hour: 3
   run_window_hours: 3

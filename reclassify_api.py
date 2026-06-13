@@ -71,7 +71,7 @@ async def reclassify():
                     {"role": "system", "content": ANALYZE_PROMPT},
                     {"role": "user", "content": full_text[:2000]},
                 ],
-                max_tokens=256,
+                max_tokens=64000,
                 temperature=0.1,
             )
             raw = resp.choices[0].message.content.strip()

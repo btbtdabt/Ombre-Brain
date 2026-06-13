@@ -1993,7 +1993,7 @@ async def _call_profile_fact_proposal_model(
             {"role": "system", "content": prompt},
             {"role": "user", "content": _json_lib.dumps(evidence_payload, ensure_ascii=False)},
         ],
-        **dehydrator._completion_options(max_tokens=900, temperature=0.0),
+        **dehydrator._completion_options(max_tokens=dehydrator.max_tokens, temperature=0.0),
     )
     if not response.choices:
         return "[]"
@@ -2145,7 +2145,7 @@ async def _call_anchor_proposal_model(
             {"role": "system", "content": prompt},
             {"role": "user", "content": _json_lib.dumps(evidence_payload, ensure_ascii=False)},
         ],
-        **dehydrator._completion_options(max_tokens=500, temperature=0.0),
+        **dehydrator._completion_options(max_tokens=dehydrator.max_tokens, temperature=0.0),
     )
     if not response.choices:
         return "[]"
@@ -4940,7 +4940,7 @@ async def _build_recall_debug_payload(
 
     max_candidates = _int_between(max_candidates, 20, 1, 100)
     max_results = _int_between(max_results, 3, 1, 20)
-    max_tokens = _int_between(max_tokens, 800, 1, 20000)
+    max_tokens = _int_between(max_tokens, 800, 1, 64000)
     direct_render_mode = _normalize_direct_render_mode(direct_render_mode)
     domain_filter = [d.strip() for d in str(domain or "").split(",") if d.strip()] or None
     q_valence = valence if isinstance(valence, (int, float)) and 0 <= valence <= 1 else None
@@ -5810,7 +5810,7 @@ async def breath(
     """只读检索记忆。查主题用 query；新窗口轻交接用 mode="handoff"；domain="feel"/"whisper" 读取对应私密通道。"""
     await decay_engine.ensure_started()
     max_results = _int_between(max_results, 20, 1, 50)
-    max_tokens = _int_between(max_tokens, 10000, 0, 20000)
+    max_tokens = _int_between(max_tokens, 10000, 0, 64000)
     include_related = _bool_value(include_related, True)
     related_per_memory = _int_between(related_per_memory, 1, 0, 5)
     edge_min_confidence = _float_between(edge_min_confidence, 0.55, 0.0, 1.0)
@@ -5830,7 +5830,7 @@ async def breath(
 
     if mode_key == "handoff":
         return await _build_handoff_breath(
-            max_tokens=min(max_tokens or 1200, 1600),
+            max_tokens=max_tokens or 1200,
             session_id=session_id,
             debug=debug,
         )
@@ -9105,7 +9105,7 @@ async def api_recall_debug(request):
         request.query_params.get("q", ""),
         max_candidates=_int_between(request.query_params.get("max_candidates"), 20, 1, 100),
         max_results=_int_between(request.query_params.get("max_results"), 3, 1, 20),
-        max_tokens=_int_between(request.query_params.get("max_tokens"), 800, 1, 20000),
+        max_tokens=_int_between(request.query_params.get("max_tokens"), 800, 1, 64000),
         direct_render_mode=request.query_params.get("direct_render_mode", "auto"),
         domain=request.query_params.get("domain", ""),
         valence=q_valence,
@@ -9710,7 +9710,7 @@ async def api_config_update(request):
             gateway_hot_update_body["query_planner_max_queries"] = gateway_cfg["query_planner_max_queries"]
             updated.append("gateway.query_planner_max_queries")
         if "query_planner_max_tokens" in g:
-            gateway_cfg["query_planner_max_tokens"] = _int_between(g["query_planner_max_tokens"], 360, 128, 2000)
+            gateway_cfg["query_planner_max_tokens"] = _int_between(g["query_planner_max_tokens"], 360, 128, 64000)
             gateway_hot_update_body["query_planner_max_tokens"] = gateway_cfg["query_planner_max_tokens"]
             updated.append("gateway.query_planner_max_tokens")
         if "memory_detail_recall_enabled" in g:
@@ -10066,7 +10066,7 @@ async def api_config_update(request):
                         body["gateway"]["query_planner_max_tokens"],
                         360,
                         128,
-                        2000,
+                        64000,
                     )
                 if "word_map_hint_enabled" in body["gateway"]:
                     sc_gateway["word_map_hint_enabled"] = _bool_value(

@@ -720,14 +720,20 @@ class ImportEngine:
         if not self.dehydrator.api_available:
             raise RuntimeError("API not available")
 
+        max_tokens = int(getattr(self.dehydrator, "max_tokens", 64000))
+        completion_options = getattr(self.dehydrator, "_completion_options", None)
+        if callable(completion_options):
+            options = completion_options(max_tokens=max_tokens, temperature=0.0)
+        else:
+            options = {"max_tokens": max_tokens, "temperature": 0.0}
+
         response = await self.dehydrator.client.chat.completions.create(
             model=self.dehydrator.model,
             messages=[
                 {"role": "system", "content": IMPORT_EXTRACT_PROMPT},
                 {"role": "user", "content": chunk_content[:12000]},
             ],
-            max_tokens=4096,
-            temperature=0.0,
+            **options,
         )
 
         if not response.choices:

@@ -427,7 +427,7 @@ dehydration:
   model: $(yaml_quote "${dehy_model}")
   base_url: $(yaml_quote "${dehy_base_url}")
   thinking_mode: ""
-  max_tokens: 1024
+  max_tokens: 64000
   temperature: 0.1
 
 embedding:
@@ -529,7 +529,7 @@ gateway:
   query_planner_model: ""
   query_planner_min_chars: 16
   query_planner_max_queries: 3
-  query_planner_max_tokens: 360
+  query_planner_max_tokens: 64000
   memory_detail_recall_enabled: false
   memory_detail_recall_max_ids: 3
   memory_detail_recall_budget: 1200
@@ -583,7 +583,7 @@ persona:
   model: $(yaml_quote "${dehy_model}")
   thinking_mode: ""
   temperature: 0.1
-  max_tokens: 500
+  max_tokens: 64000
 
 portrait:
   enabled: true
@@ -598,7 +598,7 @@ portrait:
   model: ""
   thinking_mode: ""
   temperature: 0.1
-  max_tokens: 3200
+  max_tokens: 64000
   json_response_format: true
   material_limit: 18
   first_run_material_limit: 160
@@ -618,6 +618,7 @@ reflection:
   base_url: $(yaml_quote "${dehy_base_url}")
   model: $(yaml_quote "${dehy_model}")
   thinking_mode: ""
+  max_tokens: 64000
   timezone: "Asia/Shanghai"
   daily_hour: 4
   check_interval_minutes: 60
@@ -632,7 +633,7 @@ dream:
   model: $(yaml_quote "${dream_model}")
   thinking_mode: "disabled"
   temperature: 0.85
-  max_tokens: 900
+  max_tokens: 64000
   timezone: "Asia/Shanghai"
   daily_hour: 3
   run_window_hours: 3

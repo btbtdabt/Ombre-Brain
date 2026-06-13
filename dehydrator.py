@@ -530,7 +530,7 @@ class Dehydrator:
                 {"role": "user", "content": content[:2000]},
             ],
             **self._completion_options(
-                max_tokens=256,
+                max_tokens=self.max_tokens,
                 temperature=0.1,
             ),
         )
@@ -628,7 +628,7 @@ class Dehydrator:
                     )},
                     {"role": "user", "content": body[:1500]},
                 ],
-                **self._completion_options(max_tokens=64, temperature=0.0),
+                **self._completion_options(max_tokens=self.max_tokens, temperature=0.0),
             )
             raw = response.choices[0].message.content if response.choices else ""
             text = raw.strip().strip('"').strip("'").strip()
@@ -686,7 +686,7 @@ class Dehydrator:
                 {"role": "user", "content": content[:5000]},
             ],
             **self._completion_options(
-                max_tokens=2048,
+                max_tokens=self.max_tokens,
                 temperature=0.0,
             ),
         )

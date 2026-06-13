@@ -68,7 +68,7 @@ def test_import_prompt_allows_up_to_ten_items_per_chunk():
     assert "总条目数控制在 0~5 个" not in IMPORT_EXTRACT_PROMPT
 
 
-def test_import_extraction_output_budget_supports_ten_items():
+def test_import_extraction_output_budget_uses_high_default():
     class DummyClient:
         class chat:
             class completions:
@@ -103,7 +103,7 @@ def test_import_extraction_output_budget_supports_ten_items():
 
     asyncio.run(engine._extract_memories("hello"))
 
-    assert DummyClient.kwargs["max_tokens"] == 4096
+    assert DummyClient.kwargs["max_tokens"] == 64000
 
 
 @pytest.mark.asyncio

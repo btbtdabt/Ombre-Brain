@@ -1151,7 +1151,7 @@ class ReflectionEngine:
                         {"role": "system", "content": self._diary_memory_prompt()},
                         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
                     ],
-                    **self._completion_options(max_tokens=min(self.max_tokens, 520), temperature=self.temperature),
+                    **self._completion_options(max_tokens=self.max_tokens, temperature=self.temperature),
                 )
                 raw = response.choices[0].message.content if response.choices else ""
                 parsed = self._parse_json_object(raw or "")
