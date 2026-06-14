@@ -282,6 +282,7 @@ def _build_service(
     dehydrator=None,
     reranker_engine=None,
     dream_engine=None,
+    persona_engine=None,
     upstream_responder=None,
 ):
     monkeypatch.setenv("OMBRE_GATEWAY_TOKEN", "gateway-secret")
@@ -325,7 +326,7 @@ def _build_service(
         embedding_engine=DummyEmbeddingEngine(embedding_results, enabled=True, query_sink=embedding_queries),
         reranker_engine=reranker_engine or DummyRerankerEngine(enabled=False),
         state_store=state_store,
-        persona_engine=DummyPersonaEngine(),
+        persona_engine=persona_engine or DummyPersonaEngine(),
         dream_engine=dream_engine,
         http_client=http_client,
     )
@@ -2222,7 +2223,7 @@ def test_gateway_skips_persona_reanalysis_on_tool_continuation(monkeypatch, test
     assert state_store.get_current_round("sess-tool-continuation") == 0
 
 
-def test_gateway_gemini_native_injects_initial_turn_and_skips_conversation_log(
+def test_gateway_gemini_native_coordinator_injects_initial_turn_and_skips_conversation_log(
     monkeypatch,
     test_config,
     bucket_mgr,
@@ -2269,10 +2270,12 @@ def test_gateway_gemini_native_injects_initial_turn_and_skips_conversation_log(
             }
         ],
     )
+    persona_engine = RecordingPersonaEngine()
     app, service, state_store, captured = _build_service(
         monkeypatch,
         cfg,
         bucket_mgr,
+        persona_engine=persona_engine,
         embedding_results=[(bucket_id, 0.96)],
         upstream_responder=upstream_responder,
     )
@@ -2283,6 +2286,7 @@ def test_gateway_gemini_native_injects_initial_turn_and_skips_conversation_log(
             headers={
                 "Authorization": "Bearer gateway-secret",
                 "X-Ombre-Session-Id": "sess-gemini-native",
+                "X-Ombre-Client-Role": "coordinator",
                 "X-Ombre-Current-Query-B64": "c2VhZm9vZCBwcmVmZXJlbmNl",
             },
             json={
@@ -2312,6 +2316,92 @@ def test_gateway_gemini_native_injects_initial_turn_and_skips_conversation_log(
         limit=5,
     )
     assert turns == []
+    assert persona_engine.post_calls == []
+
+
+def test_gateway_gemini_native_chat_records_turn_and_updates_persona(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    persona_engine = RecordingPersonaEngine()
+
+    def upstream_responder(body, request, captured):
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {
+                        "content": {
+                            "role": "model",
+                            "parts": [{"text": "记得，你喜欢海鲜，但不喜欢海鲜市场的味道。"}],
+                        }
+                    }
+                ],
+                "usageMetadata": {
+                    "promptTokenCount": 10,
+                    "candidatesTokenCount": 8,
+                    "totalTokenCount": 18,
+                },
+            },
+        )
+
+    cfg = _gateway_config(
+        test_config,
+        upstream_default_model="gemini-3.5-flash",
+        upstreams=[
+            {
+                "name": "gemini",
+                "base_url": "https://proxy.example/v1",
+                "gemini_base_url": "https://proxy.example/v1beta",
+                "gemini_auth": "bearer",
+                "api_key_env": "OMBRE_GATEWAY_UPSTREAM_API_KEY",
+                "default_model": "gemini-3.5-flash",
+                "models": ["gemini-3.5-flash"],
+            }
+        ],
+    )
+    app, service, state_store, _ = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        persona_engine=persona_engine,
+        upstream_responder=upstream_responder,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1beta/models/gemini-3.5-flash:generateContent",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-gemini-native-chat",
+            },
+            json={
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [{"text": "你还记得我喜欢吃什么吗"}],
+                    }
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+    assert state_store.get_current_round("sess-gemini-native-chat") == 1
+    assert persona_engine.post_calls == [
+        {
+            "session_id": "sess-gemini-native-chat",
+            "user_message": "你还记得我喜欢吃什么吗",
+        }
+    ]
+    turns = state_store.list_recent_conversation_turns(
+        profile_id=service.persona_engine.profile_id,
+        limit=5,
+    )
+    assert len(turns) == 1
+    assert turns[0]["session_id"] == "sess-gemini-native-chat"
+    assert turns[0]["user_text"] == "你还记得我喜欢吃什么吗"
+    assert turns[0]["assistant_text"] == "记得，你喜欢海鲜，但不喜欢海鲜市场的味道。"
 
 
 def test_gateway_gemini_native_tool_continuation_preserves_payload_without_reinjecting(
@@ -2349,10 +2439,12 @@ def test_gateway_gemini_native_tool_continuation_preserves_payload_without_reinj
             }
         ],
     )
+    persona_engine = RecordingPersonaEngine()
     app, _, state_store, captured = _build_service(
         monkeypatch,
         cfg,
         bucket_mgr,
+        persona_engine=persona_engine,
         upstream_responder=upstream_responder,
     )
     original_contents = [
@@ -2400,6 +2492,9 @@ def test_gateway_gemini_native_tool_continuation_preserves_payload_without_reinj
     assert captured[0]["json"]["contents"] == original_contents
     assert "Live private context" not in json.dumps(captured[0]["json"], ensure_ascii=False)
     assert state_store.get_current_round("sess-gemini-native-tools") == 0
+    assert persona_engine.post_calls == [
+        {"session_id": "sess-gemini-native-tools", "user_message": "查一下暗号"}
+    ]
 
 
 def test_gateway_skips_persona_post_update_for_assistant_tool_call_state(

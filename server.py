@@ -5807,7 +5807,7 @@ async def breath(
     mode: str = "",
     session_id: str = "",
 ) -> str:
-    """只读检索记忆。查主题用 query；新窗口轻交接用 mode="handoff"；domain="feel"/"whisper" 读取对应私密通道。"""
+    """只读召回记忆。query=主题/原句/日期；mode="handoff"=新窗口/断连轻交接；domain="self_anchor"/"feel"/"whisper" 读取专门通道。"""
     await decay_engine.ensure_started()
     max_results = _int_between(max_results, 20, 1, 50)
     max_tokens = _int_between(max_tokens, 10000, 0, 64000)
@@ -6670,7 +6670,7 @@ async def comment_bucket(
     valence: float = -1,
     arousal: float = -1,
 ) -> dict:
-    """给已有 bucket 追加年轮/补充感受；会 touch，不改正文。叙述正文时使用当前身份名；原话按原文保留。"""
+    """给已有 bucket 追加后续、澄清或新感受；先 read_bucket。会 touch，不替换正文。叙述正文时使用当前身份名；原话按原文保留。"""
     bucket_id = (bucket_id or "").strip()
     if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
         return {"error": "invalid bucket_id"}
@@ -6818,7 +6818,7 @@ async def hold(
     arousal: float = -1,
     title: str = "",
 ) -> str:
-    """写一条长期记忆。单个事实/承诺/偏好用 hold；旧记忆的新感受用 comment_bucket；悄悄话用 whisper=True。title 可选，传了就用你给的标题，不传则自动生成。content 按需分段：正文 + ### moment + ### original + ### reflection + ### followup + ### affect_anchor（只放和弦温度线），没有的部分不写。叙述正文时使用当前身份名；原话按原文保留。"""
+    """新建一条长期记忆。普通事实/承诺/偏好用 hold(content,title)；核心记忆用 pinned=True；独立私密内心用 whisper=True；旧记忆的新感受用 comment_bucket。一次选择一种写入模式。title 可选，传了就用给定标题，不传则自动生成。content 可按需分段：正文 + ### moment + ### original + ### reflection + ### followup + ### affect_anchor（只放和弦温度线）。叙述正文时使用当前身份名；原话按原文保留。"""
     await decay_engine.ensure_started()
 
     # --- Input validation / 输入校验 ---
@@ -7089,7 +7089,7 @@ async def _grow_direct_structured_content(content: str, title: str = "", gate_pr
 
 @mcp.tool()
 async def grow(content: str, auto: bool = False, source: str = "", title: str = "", context: Context | None = None) -> str:
-    """把筛过的长片段拆成少量长期记忆；单条事实优先 hold，旧记忆补感受优先 comment_bucket。title 可选，短内容时传了就用你给的标题。content 按需分段：正文 + ### moment + ### original + ### reflection + ### followup + ### affect_anchor（只放和弦温度线），没有的部分不写。叙述正文时使用当前身份名；原话按原文保留。"""
+    """把筛过的长片段或多个长期记忆点拆成少量记忆桶；单条事实优先 hold，旧记忆补感受优先 comment_bucket。title 可选，短内容时传了就用给定标题。content 可按需分段：正文 + ### moment + ### original + ### reflection + ### followup + ### affect_anchor（只放和弦温度线）。叙述正文时使用当前身份名；原话按原文保留。"""
     await decay_engine.ensure_started()
 
     if not content or not content.strip():
@@ -7237,7 +7237,7 @@ async def profile_fact(
     followup: str = "",
     confidence: float = 0.9,
 ) -> str:
-    """手动写入一条画像事实，并强制关联证据桶。先有事件桶，再用这个工具固化稳定偏好/事实。fact/reflection/followup 使用当前身份名；原话按原文保留。"""
+    """手动固化一条稳定画像事实，必须关联 evidence_bucket_id。先有事件记忆，再把稳定偏好/事实写成 profile_fact。fact/reflection/followup 使用当前身份名；原话按原文保留。"""
     fact = str(fact or "").strip()
     evidence_bucket_id = str(evidence_bucket_id or "").strip()
     if not fact:
@@ -7370,7 +7370,7 @@ async def trace(
     content: str = "",
     delete: bool = False,
 ) -> str:
-    """修改已有记忆，不创建新桶。tags/domain/content 是替换；改前先 read_bucket。resolved/digested 让旧事沉底。替换 content 时使用当前身份名；原话按原文保留。"""
+    """修改已有 bucket 的标题、域、标签、正文或状态；不创建新桶。改前先 read_bucket。tags/domain/content 是替换；resolved/digested 让旧事沉底。替换 content 时使用当前身份名；原话按原文保留。"""
 
     if not bucket_id or not bucket_id.strip():
         return "请提供有效的 bucket_id。"

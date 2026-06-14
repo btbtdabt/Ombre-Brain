@@ -1223,6 +1223,8 @@ class GatewayService:
 
         session_id = (request.headers.get("X-Ombre-Session-Id") or self.default_session_id).strip()
         client_label = self._client_label_from_request(request, "/v1beta/models/:generateContent")
+        client_role = (request.headers.get("X-Ombre-Client-Role") or "").strip().lower()
+        is_coordinator_request = client_role == "coordinator"
         trace_id = secrets.token_hex(6)
         model = str(
             request.path_params.get("model")
@@ -1257,6 +1259,7 @@ class GatewayService:
                 "route": "/v1beta/models/:generateContent",
                 "session_id": session_id,
                 "client": client_label,
+                "client_role": client_role,
                 "headers": headers_to_dict(request.headers),
                 "body": payload,
             },
@@ -1265,9 +1268,15 @@ class GatewayService:
 
         try:
             openai_payload = self._gemini_native_request_to_openai(payload, model)
-            persona_user_message = self._extract_last_user_query(openai_payload.get("messages", []))
+            current_query_override = self._current_query_override_from_headers(request.headers)
+            extracted_user_message = self._extract_last_user_query(openai_payload.get("messages", []))
+            persona_user_message = (
+                current_query_override
+                if is_coordinator_request
+                else (extracted_user_message or current_query_override)
+            )
             is_tool_continuation = self._gemini_native_request_has_function_response(payload)
-            query_override = "" if is_tool_continuation else self._current_query_override_from_headers(request.headers)
+            query_override = "" if is_tool_continuation else current_query_override
             forward_openai_payload, recalled_ids, injection_debug = await self.prepare_payload(
                 openai_payload,
                 session_id,
@@ -1286,6 +1295,7 @@ class GatewayService:
                     "route": "/v1beta/models/:generateContent",
                     "session_id": session_id,
                     "client": client_label,
+                    "client_role": client_role,
                     "recalled_ids": recalled_ids,
                     "injection_debug": injection_debug,
                     "body": forward_payload,
@@ -1310,22 +1320,35 @@ class GatewayService:
             gateway_route="/v1beta/models/:generateContent",
         )
         if 200 <= upstream_response.status_code < 300:
+            assistant_message = (
+                None
+                if is_coordinator_request
+                else self._extract_assistant_message_from_gemini_native_response(upstream_response)
+            )
             await self._record_successful_round(
                 session_id,
                 recalled_ids,
                 injection_debug,
-                user_message="",
-                assistant_message=None,
+                user_message="" if is_coordinator_request else persona_user_message,
+                assistant_message=assistant_message,
                 model=model,
                 client=client_label,
                 route="/v1beta/models/:generateContent",
                 upstream_usage=self._usage_from_gemini_native_response(upstream_response),
             )
             if persona_user_message:
-                logger.info(
-                    "Gateway Gemini native persona post-update skipped | session=%s reason=coordinator_native_route",
-                    session_id,
-                )
+                if is_coordinator_request:
+                    logger.info(
+                        "Gateway Gemini native persona post-update deferred | session=%s reason=coordinator_client_role",
+                        session_id,
+                    )
+                else:
+                    await self._update_persona_after_assistant_message(
+                        session_id,
+                        persona_user_message,
+                        assistant_message,
+                        recalled_ids or [],
+                    )
 
         return self._proxy_response(upstream_response)
 
@@ -10574,6 +10597,59 @@ class GatewayService:
             "total_tokens": usage.get("totalTokenCount"),
             "usageMetadata": usage,
         }
+
+    def _extract_assistant_message_from_gemini_native_response(
+        self,
+        upstream_response: httpx.Response,
+    ) -> dict[str, Any] | None:
+        try:
+            body = upstream_response.json()
+        except ValueError:
+            return None
+        return self._extract_assistant_message_from_gemini_native_body(body)
+
+    def _extract_assistant_message_from_gemini_native_body(self, body: Any) -> dict[str, Any] | None:
+        if not isinstance(body, dict):
+            return None
+        candidates = body.get("candidates")
+        if not isinstance(candidates, list) or not candidates:
+            return None
+        candidate = candidates[0]
+        if not isinstance(candidate, dict):
+            return None
+        content = candidate.get("content")
+        if not isinstance(content, dict):
+            return None
+        parts = content.get("parts")
+        text = self._gemini_parts_text(parts).strip()
+        message: dict[str, Any] = {"role": "assistant", "content": text or None}
+        tool_calls: list[dict[str, Any]] = []
+        if isinstance(parts, list):
+            for part_index, part in enumerate(parts):
+                if not isinstance(part, dict):
+                    continue
+                function_call = part.get("functionCall")
+                if not isinstance(function_call, dict) or not function_call.get("name"):
+                    continue
+                try:
+                    arguments = json.dumps(function_call.get("args") or {}, ensure_ascii=False)
+                except TypeError:
+                    arguments = "{}"
+                tool_calls.append(
+                    {
+                        "id": str(function_call.get("id") or part.get("id") or f"call_0_{part_index}"),
+                        "type": "function",
+                        "function": {
+                            "name": str(function_call.get("name")),
+                            "arguments": arguments,
+                        },
+                    }
+                )
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+        if text or tool_calls:
+            return message
+        return None
 
     def _available_upstream_api_keys(self, upstream: dict[str, Any]) -> list[dict[str, str]]:
         key_entries = list(upstream.get("api_keys", []))
