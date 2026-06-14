@@ -5352,7 +5352,7 @@ def test_gateway_records_successful_chat_turn_for_just_now_context(
     assert turns[0]["client"] == "unit-client"
 
 
-def test_gateway_records_synthetic_user_trigger_as_assistant_only_turn(
+def test_gateway_records_literal_continue_as_user_turn(
     monkeypatch,
     test_config,
     bucket_mgr,
@@ -5410,11 +5410,11 @@ def test_gateway_records_synthetic_user_trigger_as_assistant_only_turn(
     )
     assert len(turns) == 1
     assert turns[0]["session_id"] == "window-proactive"
-    assert turns[0]["user_text"] == ""
+    assert turns[0]["user_text"] == "Continue."
     assert turns[0]["assistant_text"] == "我自己过来找你了。"
 
 
-def test_gateway_skips_persona_update_for_synthetic_user_trigger(
+def test_gateway_updates_persona_for_literal_continue_user_turn(
     monkeypatch,
     test_config,
     bucket_mgr,
@@ -5466,7 +5466,9 @@ def test_gateway_skips_persona_update_for_synthetic_user_trigger(
         )
 
     assert response.status_code == 200
-    assert persona_engine.post_calls == []
+    assert persona_engine.post_calls == [
+        {"session_id": "window-proactive", "user_message": "请开始回复。"}
+    ]
 
 
 def test_gateway_recent_context_allows_twenty_four_hour_reentry(
