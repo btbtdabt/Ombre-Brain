@@ -10816,6 +10816,8 @@ class GatewayService:
             if not normalized_model:
                 normalized_model = str(upstream.get("default_model") or self.upstream_default_model).strip()
             model_map = upstream.get("model_map", {})
+            if model_map and normalized_model not in model_map:
+                raise ValueError(f'model "{normalized_model}" is not configured in gateway upstream "{upstream["name"]}"')
             upstream_model = model_map.get(normalized_model, normalized_model)
         else:
             if not normalized_model:

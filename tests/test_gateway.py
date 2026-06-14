@@ -1593,6 +1593,43 @@ def test_gateway_routes_multi_upstreams_by_model(monkeypatch, test_config, bucke
     assert captured[1]["json"]["model"] == "THUDM/GLM-4-32B"
 
 
+def test_gateway_single_upstream_rejects_unconfigured_model(monkeypatch, test_config, bucket_mgr):
+    monkeypatch.setenv("OMBRE_GATEWAY_TOKEN", "gateway-secret")
+    monkeypatch.setenv("OMBRE_GATEWAY_GEMINI_API_KEY", "gemini-secret")
+
+    cfg = _gateway_config(
+        test_config,
+        upstream_base_url="",
+        upstream_models=[],
+        upstream_default_model="gemini-3.5-flash",
+        upstreams=[
+            {
+                "name": "gemini",
+                "base_url": "https://gemini.example/v1",
+                "api_key_env": "OMBRE_GATEWAY_GEMINI_API_KEY",
+                "default_model": "gemini-3.5-flash",
+                "models": ["gemini-3.5-flash"],
+            },
+        ],
+    )
+    app, _, _, captured = _build_service(monkeypatch, cfg, bucket_mgr)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer gateway-secret"},
+            json={
+                "model": "claude-opus-4-8",
+                "messages": [{"role": "user", "content": "route test"}],
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request_error"
+    assert 'model "claude-opus-4-8" is not configured' in response.json()["error"]["message"]
+    assert captured == []
+
+
 def test_gateway_routes_model_alias_to_same_upstream_model(monkeypatch, test_config, bucket_mgr):
     monkeypatch.setenv("OMBRE_GATEWAY_TOKEN", "gateway-secret")
     monkeypatch.setenv("OMBRE_GATEWAY_SITE_A_API_KEY", "site-a-secret")
