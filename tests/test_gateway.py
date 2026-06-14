@@ -5352,6 +5352,123 @@ def test_gateway_records_successful_chat_turn_for_just_now_context(
     assert turns[0]["client"] == "unit-client"
 
 
+def test_gateway_records_synthetic_user_trigger_as_assistant_only_turn(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    cfg = _gateway_config(
+        test_config,
+        recent_context_budget=0,
+        recalled_memory_budget=0,
+        related_memory_budget=0,
+        current_inner_state_interval_rounds=0,
+        relationship_weather_interval_rounds=0,
+        favorite_memory_interval_rounds=0,
+        conversation_turns_max_entries=20,
+    )
+
+    def upstream_responder(body, request, captured):
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-proactive",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "我自己过来找你了。"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    app, _service, state_store, _captured = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        upstream_responder=upstream_responder,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "window-proactive",
+                "X-Ombre-Client": "unit-client",
+            },
+            json={"messages": [{"role": "user", "content": "Continue."}]},
+        )
+
+    assert response.status_code == 200
+    turns = state_store.list_recent_conversation_turns(
+        profile_id="haven_xiaoyu",
+        limit=5,
+        hours=1,
+    )
+    assert len(turns) == 1
+    assert turns[0]["session_id"] == "window-proactive"
+    assert turns[0]["user_text"] == ""
+    assert turns[0]["assistant_text"] == "我自己过来找你了。"
+
+
+def test_gateway_skips_persona_update_for_synthetic_user_trigger(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    cfg = _gateway_config(
+        test_config,
+        recent_context_budget=0,
+        recalled_memory_budget=0,
+        related_memory_budget=0,
+        current_inner_state_interval_rounds=0,
+        relationship_weather_interval_rounds=0,
+        favorite_memory_interval_rounds=0,
+        conversation_turns_max_entries=20,
+    )
+    persona_engine = RecordingPersonaEngine()
+
+    def upstream_responder(body, request, captured):
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-proactive",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "我自己过来找你了。"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    app, _service, _state_store, _captured = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        persona_engine=persona_engine,
+        upstream_responder=upstream_responder,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "window-proactive",
+            },
+            json={"messages": [{"role": "user", "content": "请开始回复。"}]},
+        )
+
+    assert response.status_code == 200
+    assert persona_engine.post_calls == []
+
+
 def test_gateway_recent_context_allows_twenty_four_hour_reentry(
     monkeypatch,
     test_config,

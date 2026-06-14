@@ -91,6 +91,13 @@ from word_map import WordMapStore
 logger = logging.getLogger("ombre_brain.gateway")
 FAVORITE_MEMORY_MARKER = "[[ombre:favorite]]"
 RETRYABLE_UPSTREAM_STATUS_CODES = {401, 403, 429, 500, 502, 503, 504}
+SYNTHETIC_USER_TURN_TEXTS = {
+    "continue.",
+    "please continue.",
+    "[empty content omitted]",
+    "请开始回复",
+    "请开始回复。",
+}
 QUERY_PLANNER_GENERIC_TERMS = {
     "recent",
     "memory",
@@ -2678,6 +2685,8 @@ class GatewayService:
                 return
         user_text = self._clean_conversation_turn_text(user_message)
         assistant_text = self._clean_conversation_turn_text(assistant_text)
+        if self._is_synthetic_user_turn_text(user_text):
+            user_text = ""
         if not user_text and not assistant_text:
             return
         try:
@@ -3455,6 +3464,12 @@ class GatewayService:
         if not user_message.strip():
             logger.info(
                 "Persona post-reply update skipped | session=%s reason=missing_user_message",
+                session_id,
+            )
+            return
+        if self._is_synthetic_user_turn_text(user_message):
+            logger.info(
+                "Persona post-reply update skipped | session=%s reason=synthetic_user_turn",
                 session_id,
             )
             return
@@ -4257,6 +4272,17 @@ class GatewayService:
             if content.strip():
                 return content.strip()
         return ""
+
+    def _is_synthetic_user_turn_text(self, text: Any) -> bool:
+        cleaned = self._strip_external_context_from_user_text(str(text or ""))
+        cleaner = getattr(self.persona_engine, "_clean_client_status_lines", None)
+        if callable(cleaner):
+            try:
+                cleaned = str(cleaner(cleaned) or "")
+            except Exception:
+                pass
+        compact = re.sub(r"\s+", " ", cleaned).strip()
+        return compact.lower() in SYNTHETIC_USER_TURN_TEXTS
 
     def _extract_current_turn_user_query(self, messages: list[dict[str, Any]]) -> str:
         for message in reversed(messages):
