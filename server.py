@@ -9045,9 +9045,15 @@ async def api_bucket_update(request):
 
     content = str(body.get("content") or "").strip() if "content" in body else None
     name = str(body.get("name") or "").strip() if "name" in body else None
+    event_date = str(body.get("date") or "").strip() if "date" in body else None
 
-    if content is None and name is None:
-        return JSONResponse({"error": "missing content or name"}, status_code=400)
+    if content is None and name is None and event_date is None:
+        return JSONResponse({"error": "missing content, name, or date"}, status_code=400)
+    if event_date:
+        normalized_date = local_date_key(event_date)
+        if not normalized_date:
+            return JSONResponse({"error": "invalid date"}, status_code=400)
+        event_date = normalized_date
 
     bucket = await bucket_mgr.get(bucket_id)
     if not bucket:
@@ -9065,13 +9071,15 @@ async def api_bucket_update(request):
         update_kwargs["content"] = content
     if name is not None:
         update_kwargs["name"] = name or None
+    if event_date is not None:
+        update_kwargs["date"] = event_date
     update_kwargs["last_active"] = meta.get("last_active") or meta.get("created")
 
     ok = await bucket_mgr.update(bucket_id, **update_kwargs)
     if not ok:
         return JSONResponse({"error": "update failed"}, status_code=500)
 
-    embedding_queued = _queue_embedding_refresh(bucket_id)
+    embedding_queued = _queue_embedding_refresh(bucket_id) if (content is not None or name is not None) else False
 
     bucket = await bucket_mgr.get(bucket_id)
     return JSONResponse({

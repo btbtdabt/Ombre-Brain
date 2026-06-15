@@ -46,6 +46,21 @@ def test_dashboard_bucket_detail_loads_moment_diagnostics():
     assert ".moment-edge-list" in html
 
 
+def test_dashboard_bucket_detail_can_edit_event_date_separately():
+    html = Path("dashboard.html").read_text(encoding="utf-8")
+    detail_block = html.split("async function showDetail", 1)[1].split("function loadBucketMoments", 1)[0]
+    date_submit = html.split("async function submitBucketDateEdit", 1)[1].split("async function submitBucketTitleEdit", 1)[0]
+
+    assert 'id="bucket-date-view"' in detail_block
+    assert 'id="bucket-date-edit"' in detail_block
+    assert 'name="date" type="date"' in detail_block
+    assert "startBucketDateEdit()" in detail_block
+    assert "function dateInputValue(value)" in html
+    assert "JSON.stringify({date: newDate})" in date_submit
+    assert "JSON.stringify({name:" not in date_submit
+    assert "JSON.stringify({content:" not in date_submit
+
+
 def test_dashboard_bucket_list_has_bulk_delete_controls():
     html = Path("dashboard.html").read_text(encoding="utf-8")
     list_view = html.split('id="list-view"', 1)[1].split('id="breath-view"', 1)[0]

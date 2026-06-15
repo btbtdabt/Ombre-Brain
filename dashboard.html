@@ -504,6 +504,47 @@
     display: flex;
     gap: 4px;
   }
+  .field-edit-line {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 22px;
+  }
+  .field-edit-button {
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--accent);
+    border-radius: 50%;
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+  }
+  .field-edit-button:hover {
+    background: var(--accent-glow);
+    color: var(--accent-dark);
+  }
+  .date-edit-form {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 4px;
+  }
+  .date-edit-form input[type="date"] {
+    min-width: 128px;
+    padding: 4px 6px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--surface);
+    color: var(--text);
+    font-size: 12px;
+  }
+  .date-edit-form .content-edit-actions {
+    margin-top: 0;
+    gap: 4px;
+  }
   .content-edit-form textarea {
     width: 100%;
     min-height: 220px;
@@ -4455,7 +4496,19 @@ async function showDetail(id) {
         '<div class="field"><label>重要度</label>' + (meta.importance || 5) + '/10</div>' +
         '<div class="field"><label>置信度</label>' + (meta.confidence != null ? meta.confidence.toFixed(2) : '—') + '</div>' +
         '<div class="field"><label>周期</label>' + esc(meta.period || '—') + '</div>' +
-        '<div class="field"><label>日期</label>' + esc(meta.date || '—') + '</div>' +
+        '<div class="field"><label>日期</label>' +
+          '<div id="bucket-date-view" class="field-edit-line">' +
+            '<span>' + esc(meta.date || '—') + '</span>' +
+            '<button id="bucket-date-edit-button" type="button" class="field-edit-button" onclick="startBucketDateEdit()" aria-label="编辑日期" title="编辑日期">✎</button>' +
+          '</div>' +
+          '<form id="bucket-date-edit" class="date-edit-form hidden" onsubmit="submitBucketDateEdit(event, \'' + jsString(id) + '\')">' +
+            '<input name="date" type="date" value="' + escAttr(dateInputValue(meta.date || '')) + '" aria-label="事件日期" />' +
+            '<div class="content-edit-actions">' +
+              '<button type="button" class="secondary" onclick="cancelBucketDateEdit()">取消</button>' +
+              '<button type="submit">保存</button>' +
+            '</div>' +
+          '</form>' +
+        '</div>' +
         '<div class="field"><label>权重分</label>' + b.score.toFixed(4) + '</div>' +
         '<div class="field"><label>激活次数</label>' + (meta.activation_count || 0) + '</div>' +
         '<div class="field"><label>已解决</label>' + (meta.resolved ? '✓' : '—') + '</div>' +
@@ -4619,6 +4672,57 @@ function cancelBucketTitleEdit() {
   form.classList.add('hidden');
   view.classList.remove('hidden');
   if (editButton) editButton.classList.remove('hidden');
+}
+
+function dateInputValue(value) {
+  var text = String(value || '').trim();
+  var match = text.match(/^\d{4}-\d{2}-\d{2}/);
+  return match ? match[0] : '';
+}
+
+function startBucketDateEdit() {
+  var view = document.getElementById('bucket-date-view');
+  var form = document.getElementById('bucket-date-edit');
+  if (!view || !form) return;
+  view.classList.add('hidden');
+  form.classList.remove('hidden');
+  var input = form.querySelector('input[name="date"]');
+  if (input) input.focus();
+}
+
+function cancelBucketDateEdit() {
+  var view = document.getElementById('bucket-date-view');
+  var form = document.getElementById('bucket-date-edit');
+  if (!view || !form) return;
+  form.classList.add('hidden');
+  view.classList.remove('hidden');
+}
+
+async function submitBucketDateEdit(event, bucketId) {
+  event.preventDefault();
+  var form = event.target;
+  var input = form.querySelector('input[name="date"]');
+  var newDate = (input.value || '').trim();
+  var button = form.querySelector('button[type="submit"]');
+  button.disabled = true;
+  button.textContent = '保存中…';
+  try {
+    var res = await authFetch(BASE + '/api/bucket/' + encodeURIComponent(bucketId), {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({date: newDate})
+    });
+    if (!res) return;
+    if (!res.ok) {
+      var data = await res.json().catch(() => ({}));
+      throw new Error(data.error || '保存失败');
+    }
+    await showDetail(bucketId);
+  } catch (e) {
+    alert('保存日期失败: ' + e.message);
+    button.disabled = false;
+    button.textContent = '保存';
+  }
 }
 
 async function submitBucketTitleEdit(event, bucketId) {

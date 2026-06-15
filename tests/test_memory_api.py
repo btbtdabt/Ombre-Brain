@@ -2442,6 +2442,53 @@ async def test_dashboard_content_api_edits_body_preserves_comments(monkeypatch, 
 
 
 @pytest.mark.asyncio
+async def test_dashboard_date_api_updates_event_date_without_embedding(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    bucket_id = await bucket_mgr.create(
+        content="这条记忆只改事件日期。",
+        name="日期编辑",
+        date="2026-06-05",
+        last_active="2026-06-05T08:00:00+08:00",
+    )
+    before = await bucket_mgr.get(bucket_id)
+
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+    embedding_engine = CapturingEmbeddingEngine()
+    monkeypatch.setattr(server, "embedding_engine", embedding_engine)
+
+    response = await server.api_bucket_update(
+        DummyRequest(
+            {"date": "2026.06.15"},
+            path_params={"bucket_id": bucket_id},
+        )
+    )
+    payload = json.loads(response.body)
+    bucket = await bucket_mgr.get(bucket_id)
+    await asyncio.sleep(0.05)
+
+    assert response.status_code == 200
+    assert payload["embedding_queued"] is False
+    assert bucket["metadata"]["date"] == "2026-06-15"
+    assert bucket["metadata"]["last_active"] == before["metadata"]["last_active"]
+    assert embedding_engine.calls == []
+
+    clear_response = await server.api_bucket_update(
+        DummyRequest(
+            {"date": ""},
+            path_params={"bucket_id": bucket_id},
+        )
+    )
+    cleared = await bucket_mgr.get(bucket_id)
+
+    assert clear_response.status_code == 200
+    assert cleared["metadata"]["date"] == ""
+    assert embedding_engine.calls == []
+
+
+@pytest.mark.asyncio
 async def test_dashboard_comment_delete_only_allows_rain_dashboard_comments(monkeypatch, bucket_mgr, decay_eng):
     import server
 
