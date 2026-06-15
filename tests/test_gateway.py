@@ -2534,6 +2534,197 @@ def test_gateway_gemini_native_tool_continuation_preserves_payload_without_reinj
     ]
 
 
+def test_gateway_gemini_native_stream_coordinator_injects_initial_turn(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    bucket_id = _create_bucket(
+        bucket_mgr,
+        content="小雨喜欢海鲜，但不喜欢海鲜市场的气味。",
+        name="海鲜偏好",
+        hours_ago=2,
+    )
+
+    def upstream_responder(body, request, captured):
+        event = {
+            "candidates": [
+                {
+                    "content": {
+                        "role": "model",
+                        "parts": [{"text": "stream relevant info"}],
+                    }
+                }
+            ],
+            "usageMetadata": {
+                "promptTokenCount": 20,
+                "candidatesTokenCount": 3,
+                "totalTokenCount": 23,
+            },
+        }
+        return httpx.Response(
+            200,
+            content=f": upstream\n\ndata: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8"),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    cfg = _gateway_config(
+        test_config,
+        upstream_default_model="gemini-3.5-flash",
+        upstreams=[
+            {
+                "name": "gemini",
+                "base_url": "https://proxy.example/v1",
+                "gemini_base_url": "https://proxy.example/v1beta",
+                "gemini_auth": "bearer",
+                "api_key_env": "OMBRE_GATEWAY_UPSTREAM_API_KEY",
+                "default_model": "gemini-3.5-flash",
+                "models": ["gemini-3.5-flash"],
+            }
+        ],
+    )
+    persona_engine = RecordingPersonaEngine()
+    app, service, state_store, captured = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        persona_engine=persona_engine,
+        embedding_results=[(bucket_id, 0.96)],
+        upstream_responder=upstream_responder,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1beta/models/gemini-3.5-flash:streamGenerateContent?alt=sse",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-gemini-native-stream",
+                "X-Ombre-Client-Role": "coordinator",
+                "X-Ombre-Current-Query-B64": "c2VhZm9vZCBwcmVmZXJlbmNl",
+            },
+            json={
+                "systemInstruction": {"parts": [{"text": "coordinator system"}]},
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [{"text": "coordinator wrapper without the recall keyword"}],
+                    }
+                ],
+                "tools": [{"functionDeclarations": [{"name": "breath"}]}],
+            },
+        )
+
+    assert response.status_code == 200
+    assert "ombre-gateway-start" in response.text
+    assert "stream relevant info" in response.text
+    assert captured[0]["url"] == "https://proxy.example/v1beta/models/gemini-3.5-flash:streamGenerateContent?alt=sse"
+    user_text = captured[0]["json"]["contents"][0]["parts"][0]["text"]
+    assert "Live private context" in user_text
+    assert "Recalled Memory" in user_text
+    assert "海鲜" in user_text
+    assert state_store.get_current_round("sess-gemini-native-stream") == 1
+    turns = state_store.list_recent_conversation_turns(
+        profile_id=service.persona_engine.profile_id,
+        limit=5,
+    )
+    assert turns == []
+    assert persona_engine.post_calls == []
+
+
+def test_gateway_gemini_native_stream_tool_continuation_preserves_payload_without_reinjecting(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    def upstream_responder(body, request, captured):
+        event = {
+            "candidates": [
+                {
+                    "content": {
+                        "role": "model",
+                        "parts": [{"text": "done"}],
+                    }
+                }
+            ]
+        }
+        return httpx.Response(
+            200,
+            content=f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8"),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    cfg = _gateway_config(
+        test_config,
+        upstream_default_model="gemini-3.5-flash",
+        upstreams=[
+            {
+                "name": "gemini",
+                "base_url": "https://proxy.example/v1",
+                "gemini_base_url": "https://proxy.example/v1beta",
+                "gemini_auth": "bearer",
+                "api_key_env": "OMBRE_GATEWAY_UPSTREAM_API_KEY",
+                "default_model": "gemini-3.5-flash",
+                "models": ["gemini-3.5-flash"],
+            }
+        ],
+    )
+    persona_engine = RecordingPersonaEngine()
+    app, _, state_store, captured = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        persona_engine=persona_engine,
+        upstream_responder=upstream_responder,
+    )
+    original_contents = [
+        {"role": "user", "parts": [{"text": "查一下暗号"}]},
+        {
+            "role": "model",
+            "parts": [
+                {
+                    "functionCall": {
+                        "name": "breath",
+                        "args": {"query": "暗号"},
+                    },
+                    "thoughtSignature": "signed-thought",
+                }
+            ],
+        },
+        {
+            "role": "user",
+            "parts": [
+                {
+                    "functionResponse": {
+                        "name": "breath",
+                        "response": {"result": "旧记忆"},
+                    }
+                }
+            ],
+        },
+    ]
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1beta/models/gemini-3.5-flash:streamGenerateContent?alt=sse",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-gemini-native-stream-tools",
+                "X-Ombre-Client-Role": "coordinator",
+                "X-Ombre-Current-Query-B64": "6K+35byA5aeL5Zue5aSNLg==",
+            },
+            json={
+                "systemInstruction": {"parts": [{"text": "coordinator system"}]},
+                "contents": original_contents,
+            },
+        )
+
+    assert response.status_code == 200
+    assert captured[0]["json"]["contents"] == original_contents
+    assert "Live private context" not in json.dumps(captured[0]["json"], ensure_ascii=False)
+    assert state_store.get_current_round("sess-gemini-native-stream-tools") == 0
+    assert persona_engine.post_calls == []
+
+
 def test_gateway_skips_persona_post_update_for_assistant_tool_call_state(
     monkeypatch, test_config, bucket_mgr
 ):

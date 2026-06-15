@@ -1352,6 +1352,96 @@ class GatewayService:
 
         return self._proxy_response(upstream_response)
 
+    async def handle_gemini_stream_generate_content(self, request: Request) -> Response:
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+        auth_context = self._auth_context_from_headers(request.headers)
+
+        session_id = (request.headers.get("X-Ombre-Session-Id") or self.default_session_id).strip()
+        client_label = self._client_label_from_request(request, "/v1beta/models/:streamGenerateContent")
+        client_role = (request.headers.get("X-Ombre-Client-Role") or "").strip().lower()
+        is_coordinator_request = client_role == "coordinator"
+        trace_id = secrets.token_hex(6)
+        model = str(
+            request.path_params.get("model")
+            or auth_context.get("default_model")
+            or self.upstream_default_model
+        ).strip()
+
+        try:
+            payload = await request.json()
+        except Exception:
+            return JSONResponse(
+                {"error": {"message": "Request body must be valid JSON", "type": "invalid_request_error"}},
+                status_code=400,
+            )
+
+        if not isinstance(payload, dict):
+            return JSONResponse(
+                {"error": {"message": "Request body must be a JSON object", "type": "invalid_request_error"}},
+                status_code=400,
+            )
+
+        logger.info(
+            "Gateway incoming Gemini native stream request | session=%s model=%s contents=%s",
+            session_id,
+            model,
+            self._summarize_gemini_contents_for_debug(payload.get("contents")),
+        )
+        self.debug_trace.write(
+            "gateway",
+            "incoming_request",
+            payload={
+                "route": "/v1beta/models/:streamGenerateContent",
+                "session_id": session_id,
+                "client": client_label,
+                "client_role": client_role,
+                "headers": headers_to_dict(request.headers),
+                "body": payload,
+            },
+            trace_id=trace_id,
+        )
+
+        try:
+            openai_payload = self._gemini_native_request_to_openai(payload, model)
+        except ValueError as exc:
+            return JSONResponse(
+                {"error": {"message": str(exc), "type": "invalid_request_error"}},
+                status_code=400,
+            )
+
+        current_query_override = self._current_query_override_from_headers(request.headers)
+        extracted_user_message = self._extract_last_user_query(openai_payload.get("messages", []))
+        persona_user_message = (
+            current_query_override
+            if is_coordinator_request
+            else (extracted_user_message or current_query_override)
+        )
+        is_tool_continuation = self._gemini_native_request_has_function_response(payload)
+
+        return StreamingResponse(
+            self._stream_gemini_native_response(
+                payload=payload,
+                openai_payload=openai_payload,
+                session_id=session_id,
+                client_label=client_label,
+                client_role=client_role,
+                is_coordinator_request=is_coordinator_request,
+                is_tool_continuation=is_tool_continuation,
+                current_query_override=current_query_override,
+                persona_user_message=persona_user_message,
+                model=model,
+                trace_id=trace_id,
+            ),
+            status_code=200,
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     async def handle_anthropic_messages(self, request: Request) -> Response:
         auth_result = self._authorize_anthropic_request(request)
         if auth_result is not None:
@@ -2338,6 +2428,142 @@ class GatewayService:
         )
         return error_response
 
+    async def _open_gemini_native_upstream_stream(
+        self,
+        payload: dict[str, Any],
+        model: str,
+        *,
+        trace_id: str = "",
+        gateway_route: str = "",
+        trace_stage: str = "main",
+    ) -> httpx.Response:
+        route = self._resolve_upstream_for_model(model)
+        upstream = route["upstream"]
+        upstream_model = route["upstream_model"]
+        url = self._gemini_native_endpoint(upstream, upstream_model, stream=True)
+        key_entries = self._available_upstream_api_keys(upstream)
+        last_error: Exception | None = None
+        last_response: httpx.Response | None = None
+        self.debug_trace.write(
+            "gateway",
+            "upstream_stream_request",
+            payload={
+                "route": gateway_route,
+                "stage": trace_stage,
+                "upstream": upstream.get("name", ""),
+                "url": url,
+                "public_model": model,
+                "upstream_model": upstream_model,
+                "body": payload,
+            },
+            trace_id=trace_id,
+        )
+
+        for attempt, key_entry in enumerate(key_entries, start=1):
+            request = self.http_client.build_request(
+                "POST",
+                url,
+                headers=self._gemini_native_headers(upstream, key_entry, url),
+                json=payload,
+            )
+            started_at = time.perf_counter()
+            try:
+                upstream_response = await self.http_client.send(request, stream=True)
+            except httpx.RequestError as exc:
+                latency_ms = int((time.perf_counter() - started_at) * 1000)
+                last_error = exc
+                self._cool_down_upstream_key(upstream, key_entry)
+                logger.warning(
+                    "Gateway Gemini native stream failed | upstream=%s key=%s model=%s "
+                    "upstream_model=%s attempt=%s/%s latency_ms=%s error=%s",
+                    upstream["name"],
+                    key_entry["label"],
+                    model,
+                    upstream_model,
+                    attempt,
+                    len(key_entries),
+                    latency_ms,
+                    exc,
+                )
+                continue
+
+            latency_ms = int((time.perf_counter() - started_at) * 1000)
+            logger.info(
+                "Gateway Gemini native stream response | upstream=%s key=%s model=%s "
+                "upstream_model=%s status=%s attempt=%s/%s latency_ms=%s",
+                upstream["name"],
+                key_entry["label"],
+                model,
+                upstream_model,
+                upstream_response.status_code,
+                attempt,
+                len(key_entries),
+                latency_ms,
+            )
+            if 200 <= upstream_response.status_code < 300:
+                self._clear_upstream_key_cooldown(upstream, key_entry)
+                self.debug_trace.write(
+                    "gateway",
+                    "upstream_stream_response",
+                    payload={
+                        "route": gateway_route,
+                        "stage": trace_stage,
+                        "upstream": upstream.get("name", ""),
+                        "status_code": upstream_response.status_code,
+                        "headers": headers_to_dict(upstream_response.headers),
+                        "attempt": attempt,
+                        "latency_ms": latency_ms,
+                    },
+                    trace_id=trace_id,
+                )
+                return upstream_response
+
+            body = await upstream_response.aread()
+            await upstream_response.aclose()
+            last_response = httpx.Response(
+                status_code=upstream_response.status_code,
+                content=body,
+                headers=upstream_response.headers,
+            )
+            if not self._should_retry_upstream_status(upstream_response.status_code):
+                self._trace_upstream_response(
+                    last_response,
+                    trace_id=trace_id,
+                    gateway_route=gateway_route,
+                    trace_stage=trace_stage,
+                    upstream_name=upstream.get("name", ""),
+                    attempt=attempt,
+                    latency_ms=latency_ms,
+                )
+                return last_response
+            self._cool_down_upstream_key(upstream, key_entry)
+            if attempt < len(key_entries):
+                continue
+            self._trace_upstream_response(
+                last_response,
+                trace_id=trace_id,
+                gateway_route=gateway_route,
+                trace_stage=trace_stage,
+                upstream_name=upstream.get("name", ""),
+                attempt=attempt,
+                latency_ms=latency_ms,
+                retry_exhausted=True,
+            )
+            return last_response
+
+        if last_response is not None:
+            return last_response
+        error_response = self._upstream_request_error_response(upstream, model, last_error)
+        self._trace_upstream_response(
+            error_response,
+            trace_id=trace_id,
+            gateway_route=gateway_route,
+            trace_stage=trace_stage,
+            upstream_name=upstream.get("name", ""),
+            error_type=type(last_error).__name__ if last_error else "",
+        )
+        return error_response
+
     def _trace_upstream_response(
         self,
         response: httpx.Response,
@@ -2583,6 +2809,127 @@ class GatewayService:
                 "X-Accel-Buffering": "no",
             },
         )
+
+    async def _stream_gemini_native_response(
+        self,
+        *,
+        payload: dict[str, Any],
+        openai_payload: dict[str, Any],
+        session_id: str,
+        client_label: str,
+        client_role: str,
+        is_coordinator_request: bool,
+        is_tool_continuation: bool,
+        current_query_override: str,
+        persona_user_message: str,
+        model: str,
+        trace_id: str,
+    ):
+        yield self._sse_comment("ombre-gateway-start")
+
+        try:
+            query_override = "" if is_tool_continuation else current_query_override
+            forward_openai_payload, recalled_ids, injection_debug = await self.prepare_payload(
+                openai_payload,
+                session_id,
+                include_debug=True,
+                query_override=query_override,
+            )
+            forward_payload = (
+                self._openai_payload_to_gemini_native_request(payload, forward_openai_payload)
+                if recalled_ids is not None
+                else deepcopy(payload)
+            )
+            self.debug_trace.write(
+                "gateway",
+                "prepared_payload",
+                payload={
+                    "route": "/v1beta/models/:streamGenerateContent",
+                    "session_id": session_id,
+                    "client": client_label,
+                    "client_role": client_role,
+                    "recalled_ids": recalled_ids,
+                    "injection_debug": injection_debug,
+                    "body": forward_payload,
+                },
+                trace_id=trace_id,
+            )
+        except ValueError as exc:
+            yield self._sse_error_event(str(exc), status_code=400, error_type="invalid_request_error")
+            return
+        except RuntimeError as exc:
+            yield self._sse_error_event(str(exc), status_code=503, error_type="server_error")
+            return
+
+        yield self._sse_comment("ombre-gateway-prepared")
+        upstream_response: httpx.Response | None = None
+        stream_state = self._new_gemini_native_stream_capture_state()
+        try:
+            upstream_response = await self._open_gemini_native_upstream_stream(
+                forward_payload,
+                model,
+                trace_id=trace_id,
+                gateway_route="/v1beta/models/:streamGenerateContent",
+            )
+            if not 200 <= upstream_response.status_code < 300:
+                body = await upstream_response.aread()
+                yield self._sse_error_event(
+                    f"Upstream returned HTTP {upstream_response.status_code}",
+                    status_code=upstream_response.status_code,
+                    body=body.decode("utf-8", errors="replace")[:2000],
+                )
+                return
+
+            yield self._sse_comment("ombre-gateway-upstream")
+            iterator = upstream_response.aiter_bytes().__aiter__()
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(iterator.__anext__(), timeout=15.0)
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    yield self._sse_comment("ombre-gateway-upstream-wait")
+                    continue
+                if not chunk:
+                    continue
+                self._consume_gemini_native_stream_chunk(stream_state, chunk)
+                yield chunk
+
+            self._consume_gemini_native_stream_chunk(stream_state, b"", final=True)
+            body = self._gemini_native_stream_body(stream_state)
+            assistant_message = (
+                None
+                if is_coordinator_request
+                else self._extract_assistant_message_from_gemini_native_body(body)
+            )
+            await self._record_successful_round(
+                session_id,
+                recalled_ids,
+                injection_debug,
+                user_message="" if is_coordinator_request else persona_user_message,
+                assistant_message=assistant_message,
+                model=model,
+                client=client_label,
+                route="/v1beta/models/:streamGenerateContent",
+                upstream_usage=self._usage_from_gemini_native_body(body),
+            )
+            if persona_user_message:
+                if is_coordinator_request:
+                    logger.info(
+                        "Gateway Gemini native stream persona post-update deferred | "
+                        "session=%s reason=coordinator_client_role",
+                        session_id,
+                    )
+                else:
+                    await self._update_persona_after_assistant_message(
+                        session_id,
+                        persona_user_message,
+                        assistant_message,
+                        recalled_ids or [],
+                    )
+        finally:
+            if upstream_response is not None:
+                await upstream_response.aclose()
 
     async def _record_successful_round(
         self,
@@ -10549,18 +10896,39 @@ class GatewayService:
         upstream_payload["model"] = upstream_model
         return upstream_payload
 
-    def _gemini_native_endpoint(self, upstream: dict[str, Any], upstream_model: str) -> str:
+    def _gemini_native_endpoint(
+        self,
+        upstream: dict[str, Any],
+        upstream_model: str,
+        *,
+        stream: bool = False,
+    ) -> str:
         base = str(upstream.get("gemini_base_url") or upstream.get("base_url") or "").rstrip("/")
         if base.lower().endswith("/openai"):
             base = base[:-7].rstrip("/")
-        if re.search(r"/models/[^/]+:generateContent$", base, flags=re.IGNORECASE):
-            return base
+        suffix = ":streamGenerateContent" if stream else ":generateContent"
+        if re.search(r"/models/[^/]+:(?:generateContent|streamGenerateContent)(?:\?.*)?$", base, flags=re.IGNORECASE):
+            endpoint = re.sub(
+                r":(?:generateContent|streamGenerateContent)(?:\?.*)?$",
+                suffix,
+                base,
+                flags=re.IGNORECASE,
+            )
+            return self._ensure_gemini_stream_sse(endpoint) if stream else endpoint
         model_path = str(upstream_model or "").strip()
         if not model_path:
             raise RuntimeError(f'gateway upstream "{upstream["name"]}" model is not configured')
         if not model_path.startswith("models/"):
             model_path = f"models/{model_path}"
-        return f"{base}/{model_path}:generateContent"
+        endpoint = f"{base}/{model_path}{suffix}"
+        return self._ensure_gemini_stream_sse(endpoint) if stream else endpoint
+
+    @staticmethod
+    def _ensure_gemini_stream_sse(url: str) -> str:
+        if re.search(r"(?:\?|&)alt=sse(?:&|$)", url, flags=re.IGNORECASE):
+            return url
+        separator = "&" if "?" in url else "?"
+        return f"{url}{separator}alt=sse"
 
     def _gemini_native_headers(
         self,
@@ -10586,6 +10954,9 @@ class GatewayService:
             body = upstream_response.json()
         except ValueError:
             return None
+        return self._usage_from_gemini_native_body(body)
+
+    def _usage_from_gemini_native_body(self, body: Any) -> dict[str, Any] | None:
         if not isinstance(body, dict):
             return None
         usage = body.get("usageMetadata")
@@ -10597,6 +10968,148 @@ class GatewayService:
             "total_tokens": usage.get("totalTokenCount"),
             "usageMetadata": usage,
         }
+
+    @staticmethod
+    def _sse_comment(text: str) -> bytes:
+        return f": {text}\n\n".encode("utf-8")
+
+    @staticmethod
+    def _sse_json_event(payload: dict[str, Any]) -> bytes:
+        data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        return f"data: {data}\n\n".encode("utf-8")
+
+    def _sse_error_event(
+        self,
+        message: str,
+        *,
+        status_code: int = 500,
+        error_type: str = "upstream_error",
+        body: str = "",
+    ) -> bytes:
+        error: dict[str, Any] = {
+            "code": status_code,
+            "message": message,
+            "status": error_type,
+        }
+        if body:
+            error["body"] = body
+        return self._sse_json_event({"error": error})
+
+    def _new_gemini_native_stream_capture_state(self) -> dict[str, Any]:
+        return {
+            "decoder": codecs.getincrementaldecoder("utf-8")(),
+            "buffer": "",
+            "body": {},
+            "candidates_by_index": {},
+        }
+
+    def _consume_gemini_native_stream_chunk(
+        self,
+        stream_state: dict[str, Any],
+        chunk: bytes,
+        final: bool = False,
+    ) -> None:
+        decoder = stream_state["decoder"]
+        if chunk:
+            stream_state["buffer"] += decoder.decode(chunk)
+        if final:
+            stream_state["buffer"] += decoder.decode(b"", final=True)
+
+        buffer = stream_state["buffer"].replace("\r\n", "\n")
+        while "\n\n" in buffer:
+            event_text, buffer = buffer.split("\n\n", 1)
+            self._consume_gemini_native_stream_event(stream_state, event_text)
+
+        if final and buffer.strip():
+            self._consume_gemini_native_stream_event(stream_state, buffer)
+            buffer = ""
+
+        stream_state["buffer"] = buffer
+
+    def _consume_gemini_native_stream_event(self, stream_state: dict[str, Any], event_text: str) -> None:
+        data_lines = []
+        for raw_line in event_text.split("\n"):
+            line = raw_line.strip()
+            if not line or line.startswith(":"):
+                continue
+            if line.startswith("data:"):
+                data_lines.append(line[5:].strip())
+
+        if not data_lines:
+            return
+        payload_text = "\n".join(data_lines).strip()
+        if not payload_text or payload_text == "[DONE]":
+            return
+        try:
+            payload = json.loads(payload_text)
+        except json.JSONDecodeError:
+            return
+        if isinstance(payload, dict):
+            self._merge_gemini_native_stream_payload(stream_state, payload)
+
+    def _merge_gemini_native_stream_payload(
+        self,
+        stream_state: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> None:
+        body = stream_state["body"]
+        for key in ("usageMetadata", "promptFeedback", "responseId", "modelVersion"):
+            value = payload.get(key)
+            if value:
+                body[key] = deepcopy(value)
+
+        candidates = payload.get("candidates")
+        if not isinstance(candidates, list):
+            return
+        candidates_by_index = stream_state["candidates_by_index"]
+        for default_index, candidate in enumerate(candidates):
+            if not isinstance(candidate, dict):
+                continue
+            index = candidate.get("index")
+            if not isinstance(index, int):
+                index = default_index
+            target = candidates_by_index.setdefault(index, {"index": index, "content": {"role": "model", "parts": []}})
+            for key, value in candidate.items():
+                if key in {"content", "index"}:
+                    continue
+                if value is not None:
+                    target[key] = deepcopy(value)
+
+            content = candidate.get("content")
+            if not isinstance(content, dict):
+                continue
+            if content.get("role"):
+                target["content"]["role"] = content["role"]
+            parts = content.get("parts")
+            if not isinstance(parts, list):
+                continue
+            target_parts = target["content"].setdefault("parts", [])
+            for part in parts:
+                if not isinstance(part, dict):
+                    continue
+                text = part.get("text")
+                if (
+                    isinstance(text, str)
+                    and set(part.keys()) == {"text"}
+                    and target_parts
+                    and isinstance(target_parts[-1], dict)
+                    and set(target_parts[-1].keys()) == {"text"}
+                    and isinstance(target_parts[-1].get("text"), str)
+                ):
+                    target_parts[-1]["text"] += text
+                    continue
+                target_parts.append(deepcopy(part))
+
+    def _gemini_native_stream_body(self, stream_state: dict[str, Any]) -> dict[str, Any]:
+        body = deepcopy(stream_state.get("body") or {})
+        candidates_by_index = stream_state.get("candidates_by_index") or {}
+        if isinstance(candidates_by_index, dict) and candidates_by_index:
+            body["candidates"] = [
+                deepcopy(candidates_by_index[index])
+                for index in sorted(candidates_by_index)
+                if isinstance(candidates_by_index[index], dict)
+            ]
+        return body
 
     def _extract_assistant_message_from_gemini_native_response(
         self,
@@ -10887,6 +11400,9 @@ def create_gateway_app(
     async def gemini_generate_content(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_gemini_generate_content(request)
 
+    async def gemini_stream_generate_content(request: Request) -> Response:
+        return await request.app.state.gateway_service.handle_gemini_stream_generate_content(request)
+
     async def anthropic_messages(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_anthropic_messages(request)
 
@@ -10913,6 +11429,8 @@ def create_gateway_app(
             Route("/v1/chat/completions", chat_completions, methods=["POST"]),
             Route("/v1beta/models/{model}:generateContent", gemini_generate_content, methods=["POST"]),
             Route("/models/{model}:generateContent", gemini_generate_content, methods=["POST"]),
+            Route("/v1beta/models/{model}:streamGenerateContent", gemini_stream_generate_content, methods=["POST"]),
+            Route("/models/{model}:streamGenerateContent", gemini_stream_generate_content, methods=["POST"]),
             Route("/v1/messages", anthropic_messages, methods=["POST"]),
         ],
         lifespan=lifespan,
