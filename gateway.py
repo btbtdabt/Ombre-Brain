@@ -1124,12 +1124,16 @@ class GatewayService:
             include_favorite_memory = marker_favorite or self._truthy_header(
                 request.headers.get("X-Ombre-Include-Favorite-Memory")
             )
-            persona_user_message = self._extract_last_user_query(payload.get("messages", []))
+            extracted_user_message = self._extract_last_user_query(payload.get("messages", []))
+            current_query_override = self._current_query_override_from_headers(request.headers)
+            persona_user_message = extracted_user_message or current_query_override
+            query_override = "" if extracted_user_message else current_query_override
             forward_payload, recalled_ids, injection_debug = await self.prepare_payload(
                 payload,
                 session_id,
                 include_favorite_memory=include_favorite_memory,
                 include_debug=True,
+                query_override=query_override,
             )
             self.debug_trace.write(
                 "gateway",
@@ -1162,6 +1166,7 @@ class GatewayService:
                     session_id,
                     recalled_ids,
                     persona_user_message,
+                    extracted_user_message,
                     client_label,
                     injection_debug,
                     trace_id,
@@ -1200,6 +1205,7 @@ class GatewayService:
                 recalled_ids,
                 injection_debug,
                 user_message=persona_user_message,
+                conversation_user_message=extracted_user_message,
                 assistant_message=assistant_message,
                 model=forward_payload["model"],
                 client=client_label,
@@ -2745,6 +2751,7 @@ class GatewayService:
         session_id: str,
         recalled_ids: list[str] | None,
         user_message: str,
+        conversation_user_message: str | None = None,
         client: str = "",
         injection_debug: dict[str, Any] | None = None,
         trace_id: str = "",
@@ -2784,6 +2791,7 @@ class GatewayService:
                     stream_state=stream_state,
                     recalled_ids=recalled_ids,
                     user_message=user_message,
+                    conversation_user_message=conversation_user_message,
                     client=client,
                     injection_debug=injection_debug,
                 )
@@ -2943,6 +2951,7 @@ class GatewayService:
         client: str = "",
         route: str = "",
         upstream_usage: dict[str, Any] | None = None,
+        conversation_user_message: str | None = None,
     ) -> None:
         if recalled_ids is None:
             logger.info(
@@ -2974,7 +2983,7 @@ class GatewayService:
         self._record_conversation_turn(
             session_id=session_id,
             round_id=round_id,
-            user_message=user_message,
+            user_message=user_message if conversation_user_message is None else conversation_user_message,
             assistant_message=assistant_message,
             model=model,
             client=client,
@@ -3834,6 +3843,13 @@ class GatewayService:
                 recalled_memory_ids=recalled_ids,
                 tool_summary=tool_summary,
             )
+            logger.info(
+                "Persona post-reply update completed | session=%s user_chars=%s assistant_chars=%s recalled=%s",
+                session_id,
+                len(user_message),
+                len(assistant_response),
+                len(recalled_ids or []),
+            )
         except Exception as exc:
             logger.warning("Persona post-reply update failed | session=%s error=%s", session_id, exc)
 
@@ -3845,6 +3861,7 @@ class GatewayService:
         stream_state: dict[str, Any],
         recalled_ids: list[str] | None,
         user_message: str,
+        conversation_user_message: str | None = None,
         client: str = "",
         injection_debug: dict[str, Any] | None = None,
     ) -> None:
@@ -3861,6 +3878,7 @@ class GatewayService:
             recalled_ids,
             injection_debug,
             user_message=user_message,
+            conversation_user_message=conversation_user_message,
             assistant_message=assistant_message,
             model=model,
             client=client,

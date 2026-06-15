@@ -993,6 +993,52 @@ async def test_gateway_skips_persona_post_update_when_persona_disabled(
     assert not persona_engine.post_event.is_set()
 
 
+def test_gateway_chat_uses_current_query_header_for_system_only_persona_update(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    persona_engine = RecordingPersonaEngine()
+    app, service, state_store, captured = _build_service(
+        monkeypatch,
+        _gateway_config(test_config, current_inner_state_interval_rounds=1),
+        bucket_mgr,
+        persona_engine=persona_engine,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-system-only-persona",
+                "X-Ombre-Current-Query-B64": "UHJvYWN0aXZlOiBzZWFmb29kIHByZWZlcmVuY2U=",
+            },
+            json={
+                "messages": [
+                    {"role": "system", "content": "Generate one proactive message."}
+                ]
+            },
+        )
+
+    assert response.status_code == 200
+    assert state_store.get_current_round("sess-system-only-persona") == 1
+    assert persona_engine.post_calls == [
+        {
+            "session_id": "sess-system-only-persona",
+            "user_message": "Proactive: seafood preference",
+        }
+    ]
+    injected = _joined_message_content(captured[0]["json"]["messages"])
+    assert "Long-term State Summary" in injected
+    assert "Generate one proactive message." in injected
+    turns = state_store.list_recent_conversation_turns(
+        profile_id=service.persona_engine.profile_id,
+        limit=5,
+    )
+    assert turns == []
+
+
 def test_gateway_accepts_anthropic_messages(monkeypatch, test_config, bucket_mgr):
     app, _, state_store, captured = _build_service(
         monkeypatch,
@@ -1416,6 +1462,76 @@ def test_gateway_stream_finalize_survives_client_close_after_done(monkeypatch, t
         {"session_id": "sess-stream-close", "user_message": "你好"}
     ]
     assert state_store.get_current_round("sess-stream-close") == 1
+
+
+def test_gateway_stream_uses_current_query_header_for_system_only_persona_update(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    monkeypatch.setenv("OMBRE_GATEWAY_TOKEN", "gateway-secret")
+    monkeypatch.setenv("OMBRE_GATEWAY_UPSTREAM_API_KEY", "upstream-secret")
+
+    captured = []
+
+    def upstream_handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=b'data: {"choices":[{"delta":{"content":"proactive ok"}}]}\n\ndata: [DONE]\n\n',
+        )
+
+    state_store = GatewayStateStore(f"{test_config['buckets_dir']}\\gateway_state.db")
+    persona_engine = RecordingPersonaEngine()
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream_handler), timeout=10.0)
+    service = GatewayService(
+        config=_gateway_config(test_config, current_inner_state_interval_rounds=1),
+        bucket_mgr=bucket_mgr,
+        dehydrator=DummyDehydrator(),
+        embedding_engine=DummyEmbeddingEngine(enabled=False),
+        state_store=state_store,
+        persona_engine=persona_engine,
+        http_client=http_client,
+    )
+    app = create_gateway_app(config=test_config, service=service)
+
+    with TestClient(app) as client:
+        with client.stream(
+            "POST",
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-stream-system-only",
+                "X-Ombre-Current-Query": "Proactive stream: seafood preference",
+            },
+            json={
+                "messages": [
+                    {"role": "system", "content": "Generate one proactive message."}
+                ],
+                "stream": True,
+            },
+        ) as response:
+            body = response.read().decode("utf-8")
+
+        assert response.status_code == 200
+        assert "data: [DONE]" in body
+        assert persona_engine.post_event.wait(2)
+
+    assert persona_engine.post_calls == [
+        {
+            "session_id": "sess-stream-system-only",
+            "user_message": "Proactive stream: seafood preference",
+        }
+    ]
+    assert state_store.get_current_round("sess-stream-system-only") == 1
+    injected = _joined_message_content(captured[0]["messages"])
+    assert "Long-term State Summary" in injected
+    turns = state_store.list_recent_conversation_turns(
+        profile_id=service.persona_engine.profile_id,
+        limit=5,
+    )
+    assert turns == []
 
 
 def test_gateway_streams_tool_call_deltas(monkeypatch, test_config, bucket_mgr):
