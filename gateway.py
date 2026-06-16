@@ -2849,14 +2849,27 @@ class GatewayService:
     ):
         yield self._sse_comment("ombre-gateway-start")
 
+        prepare_task: asyncio.Task[tuple[dict[str, Any], list[str] | None, dict[str, Any] | None]] | None = None
         try:
             query_override = "" if is_tool_continuation else current_query_override
-            forward_openai_payload, recalled_ids, injection_debug = await self.prepare_payload(
-                openai_payload,
-                session_id,
-                include_debug=True,
-                query_override=query_override,
+            prepare_task = asyncio.create_task(
+                self.prepare_payload(
+                    openai_payload,
+                    session_id,
+                    include_debug=True,
+                    query_override=query_override,
+                )
             )
+            while True:
+                done, _ = await asyncio.wait(
+                    {prepare_task},
+                    timeout=GEMINI_NATIVE_STREAM_KEEPALIVE_SECONDS,
+                )
+                if done:
+                    forward_openai_payload, recalled_ids, injection_debug = prepare_task.result()
+                    break
+                yield self._sse_comment("ombre-gateway-preparing-wait")
+
             forward_payload = (
                 self._openai_payload_to_gemini_native_request(payload, forward_openai_payload)
                 if recalled_ids is not None
@@ -2882,6 +2895,11 @@ class GatewayService:
         except RuntimeError as exc:
             yield self._sse_error_event(str(exc), status_code=503, error_type="server_error")
             return
+        finally:
+            if prepare_task is not None and not prepare_task.done():
+                prepare_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await prepare_task
 
         yield self._sse_comment("ombre-gateway-prepared")
         upstream_response: httpx.Response | None = None
