@@ -2800,6 +2800,83 @@ def test_gateway_gemini_native_stream_coordinator_injects_initial_turn(
     assert persona_engine.post_calls == []
 
 
+def test_gateway_gemini_native_stream_keeps_alive_while_opening_upstream(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    monkeypatch.setattr("gateway.GEMINI_NATIVE_STREAM_KEEPALIVE_SECONDS", 0.01)
+
+    cfg = _gateway_config(
+        test_config,
+        upstream_default_model="gemini-3.5-flash",
+        upstreams=[
+            {
+                "name": "gemini",
+                "base_url": "https://proxy.example/v1",
+                "gemini_base_url": "https://proxy.example/v1beta",
+                "gemini_auth": "bearer",
+                "api_key_env": "OMBRE_GATEWAY_UPSTREAM_API_KEY",
+                "default_model": "gemini-3.5-flash",
+                "models": ["gemini-3.5-flash"],
+            }
+        ],
+    )
+    app, service, state_store, captured = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        embedding_results=[],
+    )
+
+    async def slow_open_upstream(*args, **kwargs):
+        await asyncio.sleep(0.03)
+        event = {
+            "candidates": [
+                {
+                    "content": {
+                        "role": "model",
+                        "parts": [{"text": "late stream response"}],
+                    }
+                }
+            ]
+        }
+        return httpx.Response(
+            200,
+            content=f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8"),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    monkeypatch.setattr(service, "_open_gemini_native_upstream_stream", slow_open_upstream)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1beta/models/gemini-3.5-flash:streamGenerateContent?alt=sse",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-gemini-native-open-wait",
+                "X-Ombre-Client-Role": "coordinator",
+                "X-Ombre-Current-Query-B64": "aGVsbG8=",
+            },
+            json={
+                "systemInstruction": {"parts": [{"text": "coordinator system"}]},
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [{"text": "hello"}],
+                    }
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+    assert "ombre-gateway-prepared" in response.text
+    assert "ombre-gateway-opening-upstream-wait" in response.text
+    assert "late stream response" in response.text
+    assert captured == []
+    assert state_store.get_current_round("sess-gemini-native-open-wait") == 1
+
+
 def test_gateway_gemini_native_stream_tool_continuation_preserves_payload_without_reinjecting(
     monkeypatch,
     test_config,

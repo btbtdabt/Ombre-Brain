@@ -8,7 +8,7 @@ import codecs
 import base64
 import time
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -94,6 +94,7 @@ from word_map import WordMapStore
 logger = logging.getLogger("ombre_brain.gateway")
 FAVORITE_MEMORY_MARKER = "[[ombre:favorite]]"
 RETRYABLE_UPSTREAM_STATUS_CODES = {401, 403, 429, 500, 502, 503, 504}
+GEMINI_NATIVE_STREAM_KEEPALIVE_SECONDS = 15.0
 QUERY_PLANNER_GENERIC_TERMS = {
     "recent",
     "memory",
@@ -2884,14 +2885,27 @@ class GatewayService:
 
         yield self._sse_comment("ombre-gateway-prepared")
         upstream_response: httpx.Response | None = None
+        open_upstream_task: asyncio.Task[httpx.Response] | None = None
         stream_state = self._new_gemini_native_stream_capture_state()
         try:
-            upstream_response = await self._open_gemini_native_upstream_stream(
-                forward_payload,
-                model,
-                trace_id=trace_id,
-                gateway_route="/v1beta/models/:streamGenerateContent",
+            open_upstream_task = asyncio.create_task(
+                self._open_gemini_native_upstream_stream(
+                    forward_payload,
+                    model,
+                    trace_id=trace_id,
+                    gateway_route="/v1beta/models/:streamGenerateContent",
+                )
             )
+            while True:
+                done, _ = await asyncio.wait(
+                    {open_upstream_task},
+                    timeout=GEMINI_NATIVE_STREAM_KEEPALIVE_SECONDS,
+                )
+                if done:
+                    upstream_response = open_upstream_task.result()
+                    break
+                yield self._sse_comment("ombre-gateway-opening-upstream-wait")
+
             if not 200 <= upstream_response.status_code < 300:
                 body = await upstream_response.aread()
                 yield self._sse_error_event(
@@ -2905,7 +2919,10 @@ class GatewayService:
             iterator = upstream_response.aiter_bytes().__aiter__()
             while True:
                 try:
-                    chunk = await asyncio.wait_for(iterator.__anext__(), timeout=15.0)
+                    chunk = await asyncio.wait_for(
+                        iterator.__anext__(),
+                        timeout=GEMINI_NATIVE_STREAM_KEEPALIVE_SECONDS,
+                    )
                 except StopAsyncIteration:
                     break
                 except asyncio.TimeoutError:
@@ -2949,6 +2966,10 @@ class GatewayService:
                         recalled_ids or [],
                     )
         finally:
+            if open_upstream_task is not None and not open_upstream_task.done():
+                open_upstream_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await open_upstream_task
             if upstream_response is not None:
                 await upstream_response.aclose()
 
