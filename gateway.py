@@ -94,6 +94,7 @@ from word_map import WordMapStore
 logger = logging.getLogger("ombre_brain.gateway")
 FAVORITE_MEMORY_MARKER = "[[ombre:favorite]]"
 RETRYABLE_UPSTREAM_STATUS_CODES = {401, 403, 429, 500, 502, 503, 504}
+CHAT_STREAM_KEEPALIVE_SECONDS = 15.0
 GEMINI_NATIVE_STREAM_KEEPALIVE_SECONDS = 15.0
 QUERY_PLANNER_GENERIC_TERMS = {
     "recent",
@@ -1132,6 +1133,25 @@ class GatewayService:
             current_query_override = self._current_query_override_from_headers(request.headers)
             persona_user_message = extracted_user_message or current_query_override
             query_override = "" if extracted_user_message else current_query_override
+            if payload.get("stream") is True:
+                return StreamingResponse(
+                    self._stream_chat_response(
+                        payload=payload,
+                        session_id=session_id,
+                        include_favorite_memory=include_favorite_memory,
+                        user_message=persona_user_message,
+                        conversation_user_message=extracted_user_message,
+                        query_override=query_override,
+                        client=client_label,
+                        trace_id=trace_id,
+                    ),
+                    status_code=200,
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "X-Accel-Buffering": "no",
+                    },
+                )
             forward_payload, recalled_ids, injection_debug = await self.prepare_payload(
                 payload,
                 session_id,
@@ -1162,24 +1182,6 @@ class GatewayService:
                 {"error": {"message": str(exc), "type": "server_error"}},
                 status_code=503,
             )
-
-        if forward_payload.get("stream") is True:
-            try:
-                return await self._stream_upstream(
-                    forward_payload,
-                    session_id,
-                    recalled_ids,
-                    persona_user_message,
-                    extracted_user_message,
-                    client_label,
-                    injection_debug,
-                    trace_id,
-                )
-            except RuntimeError as exc:
-                return JSONResponse(
-                    {"error": {"message": str(exc), "type": "server_error"}},
-                    status_code=503,
-                )
 
         upstream_response = await self._forward_upstream(
             forward_payload,
@@ -2831,6 +2833,153 @@ class GatewayService:
                 "X-Accel-Buffering": "no",
             },
         )
+
+    async def _stream_chat_response(
+        self,
+        *,
+        payload: dict,
+        session_id: str,
+        include_favorite_memory: bool,
+        user_message: str,
+        conversation_user_message: str | None,
+        query_override: str,
+        client: str,
+        trace_id: str,
+    ):
+        yield self._sse_comment("ombre-gateway-chat-start")
+
+        prepare_task: asyncio.Task[tuple[dict[str, Any], list[str] | None, dict[str, Any] | None]] | None = None
+        try:
+            prepare_task = asyncio.create_task(
+                self.prepare_payload(
+                    payload,
+                    session_id,
+                    include_favorite_memory=include_favorite_memory,
+                    include_debug=True,
+                    query_override=query_override,
+                )
+            )
+            while True:
+                done, _ = await asyncio.wait(
+                    {prepare_task},
+                    timeout=CHAT_STREAM_KEEPALIVE_SECONDS,
+                )
+                if done:
+                    forward_payload, recalled_ids, injection_debug = prepare_task.result()
+                    break
+                yield self._sse_comment("ombre-gateway-chat-preparing-wait")
+
+            self.debug_trace.write(
+                "gateway",
+                "prepared_payload",
+                payload={
+                    "route": "/v1/chat/completions",
+                    "session_id": session_id,
+                    "client": client,
+                    "recalled_ids": recalled_ids,
+                    "injection_debug": injection_debug,
+                    "body": forward_payload,
+                },
+                trace_id=trace_id,
+            )
+        except ValueError as exc:
+            yield self._sse_error_event(str(exc), status_code=400, error_type="invalid_request_error")
+            return
+        except RuntimeError as exc:
+            yield self._sse_error_event(str(exc), status_code=503, error_type="server_error")
+            return
+        finally:
+            if prepare_task is not None and not prepare_task.done():
+                prepare_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await prepare_task
+
+        yield self._sse_comment("ombre-gateway-chat-prepared")
+
+        model = str(forward_payload.get("model") or "").strip()
+        upstream_response: httpx.Response | None = None
+        open_upstream_task: asyncio.Task[httpx.Response] | None = None
+        stream_state = self._new_stream_capture_state()
+        try:
+            route = self._resolve_upstream_for_model(model)
+            open_upstream_task = asyncio.create_task(
+                self._open_upstream_stream(
+                    route,
+                    forward_payload,
+                    trace_id=trace_id,
+                    gateway_route="/v1/chat/completions",
+                )
+            )
+            while True:
+                done, _ = await asyncio.wait(
+                    {open_upstream_task},
+                    timeout=CHAT_STREAM_KEEPALIVE_SECONDS,
+                )
+                if done:
+                    upstream_response = open_upstream_task.result()
+                    break
+                yield self._sse_comment("ombre-gateway-chat-opening-upstream-wait")
+
+            if not 200 <= upstream_response.status_code < 300:
+                body = await upstream_response.aread()
+                yield self._sse_error_event(
+                    f"Upstream returned HTTP {upstream_response.status_code}",
+                    status_code=upstream_response.status_code,
+                    body=body.decode("utf-8", errors="replace")[:2000],
+                )
+                return
+
+            yield self._sse_comment("ombre-gateway-chat-upstream")
+            finalized = False
+
+            async def finalize_once() -> None:
+                nonlocal finalized
+                if finalized:
+                    return
+                finalized = True
+                await self._finalize_stream_turn(
+                    session_id=session_id,
+                    model=model,
+                    route="/v1/chat/completions",
+                    stream_state=stream_state,
+                    recalled_ids=recalled_ids,
+                    user_message=user_message,
+                    conversation_user_message=conversation_user_message,
+                    client=client,
+                    injection_debug=injection_debug,
+                )
+
+            iterator = upstream_response.aiter_bytes().__aiter__()
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(
+                        iterator.__anext__(),
+                        timeout=CHAT_STREAM_KEEPALIVE_SECONDS,
+                    )
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    yield self._sse_comment("ombre-gateway-chat-upstream-wait")
+                    continue
+                if not chunk:
+                    continue
+                self._consume_stream_capture_chunk(stream_state, chunk)
+                if stream_state.get("seen_done"):
+                    await finalize_once()
+                yield chunk
+
+            self._consume_stream_capture_chunk(stream_state, b"", final=True)
+            await finalize_once()
+        except RuntimeError as exc:
+            yield self._sse_error_event(str(exc), status_code=503, error_type="server_error")
+            return
+        finally:
+            if open_upstream_task is not None and not open_upstream_task.done():
+                open_upstream_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await open_upstream_task
+            if upstream_response is not None:
+                await upstream_response.aclose()
 
     async def _stream_gemini_native_response(
         self,

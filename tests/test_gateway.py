@@ -1461,6 +1461,93 @@ def test_gateway_streams_when_client_requires_stream(monkeypatch, test_config, b
     assert state_store.get_recent_bucket_ids("sess-stream", 5) == set()
 
 
+def test_gateway_chat_stream_keeps_alive_while_preparing_payload(monkeypatch, test_config, bucket_mgr):
+    monkeypatch.setattr("gateway.CHAT_STREAM_KEEPALIVE_SECONDS", 0.01)
+
+    def upstream_responder(body, request, captured):
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=b'data: {"choices":[{"delta":{"content":"prepared ok"}}]}\n\ndata: [DONE]\n\n',
+        )
+
+    app, service, state_store, captured = _build_service(
+        monkeypatch,
+        _gateway_config(test_config),
+        bucket_mgr,
+        upstream_responder=upstream_responder,
+    )
+
+    async def slow_prepare(
+        payload,
+        session_id,
+        *,
+        include_favorite_memory=False,
+        include_debug=False,
+        query_override="",
+    ):
+        await asyncio.sleep(0.03)
+        return payload, [], {"test_prepare": True}
+
+    monkeypatch.setattr(service, "prepare_payload", slow_prepare)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-chat-prepare-wait",
+            },
+            json={"messages": [{"role": "user", "content": "你好"}], "stream": True},
+        )
+
+    assert response.status_code == 200
+    assert "ombre-gateway-chat-start" in response.text
+    assert "ombre-gateway-chat-preparing-wait" in response.text
+    assert "ombre-gateway-chat-prepared" in response.text
+    assert "prepared ok" in response.text
+    assert captured[0]["json"]["stream"] is True
+    assert state_store.get_current_round("sess-chat-prepare-wait") == 1
+
+
+def test_gateway_chat_stream_keeps_alive_while_opening_upstream(monkeypatch, test_config, bucket_mgr):
+    monkeypatch.setattr("gateway.CHAT_STREAM_KEEPALIVE_SECONDS", 0.01)
+
+    app, service, state_store, captured = _build_service(
+        monkeypatch,
+        _gateway_config(test_config),
+        bucket_mgr,
+        embedding_results=[],
+    )
+
+    async def slow_open_upstream(*args, **kwargs):
+        await asyncio.sleep(0.03)
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=b'data: {"choices":[{"delta":{"content":"late chat"}}]}\n\ndata: [DONE]\n\n',
+        )
+
+    monkeypatch.setattr(service, "_open_upstream_stream", slow_open_upstream)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-chat-open-wait",
+            },
+            json={"messages": [{"role": "user", "content": "你好"}], "stream": True},
+        )
+
+    assert response.status_code == 200
+    assert "ombre-gateway-chat-prepared" in response.text
+    assert "ombre-gateway-chat-opening-upstream-wait" in response.text
+    assert "late chat" in response.text
+    assert captured == []
+    assert state_store.get_current_round("sess-chat-open-wait") == 1
+
+
 def test_gateway_stream_finalize_survives_client_close_after_done(monkeypatch, test_config, bucket_mgr):
     monkeypatch.setenv("OMBRE_GATEWAY_TOKEN", "gateway-secret")
     monkeypatch.setenv("OMBRE_GATEWAY_UPSTREAM_API_KEY", "upstream-secret")
