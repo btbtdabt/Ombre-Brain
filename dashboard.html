@@ -4712,7 +4712,7 @@ async function submitBucketDateEdit(event, bucketId) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({date: newDate})
     });
-    if (!res) return;
+    if (!res) throw new Error('保存失败');
     if (!res.ok) {
       var data = await res.json().catch(() => ({}));
       throw new Error(data.error || '保存失败');
@@ -4740,7 +4740,7 @@ async function submitBucketTitleEdit(event, bucketId) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({name: newName})
     });
-    if (!res) return;
+    if (!res) throw new Error('保存失败');
     if (!res.ok) {
       var data = await res.json().catch(() => ({}));
       throw new Error(data.error || '保存失败');
@@ -4795,7 +4795,7 @@ async function submitBucketContentEdit(event, bucketId) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({content: newContent})
     });
-    if (!res) return;
+    if (!res) throw new Error('保存失败');
     if (!res.ok) {
       var data = await res.json().catch(() => ({}));
       throw new Error(data.error || '保存失败');

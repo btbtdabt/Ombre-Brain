@@ -7048,6 +7048,16 @@ async def api_bucket_comment_delete(request):
     })
 
 
+def _normalize_event_date_for_write(date: str) -> tuple[str, str]:
+    raw = str(date or "").strip()
+    if not raw:
+        return "", ""
+    normalized = local_date_key(raw)
+    if not normalized:
+        return "", "date 无效。"
+    return normalized, ""
+
+
 # =============================================================
 # Tool 2: hold — Hold on to this
 # 工具 2：hold — 握住，留下来
@@ -7077,7 +7087,9 @@ async def hold(
     importance = max(1, min(10, importance))
     extra_tags = [t.strip() for t in tags.split(",") if t.strip()]
     requested_domain = [d.strip() for d in str(domain or "").split(",") if d.strip()]
-    event_date = str(date or "").strip()
+    event_date, date_error = _normalize_event_date_for_write(date)
+    if date_error:
+        return date_error
     requested_valence = valence if 0 <= valence <= 1 else None
     requested_arousal = arousal if 0 <= arousal <= 1 else None
 
@@ -7675,7 +7687,9 @@ async def trace(
         updates["digested"] = bool(digested)
     if content:
         updates["content"] = content
-    event_date = str(date or "").strip()
+    event_date, date_error = _normalize_event_date_for_write(date)
+    if date_error:
+        return date_error
     if event_date:
         updates["date"] = event_date
 

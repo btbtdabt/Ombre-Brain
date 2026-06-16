@@ -1082,10 +1082,30 @@ async def test_trace_can_set_event_date(monkeypatch, bucket_mgr, decay_eng):
     monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
     monkeypatch.setattr(server, "decay_engine", decay_eng)
 
-    result = await server.trace(bucket_id=bucket_id, date="2026-03-08")
+    result = await server.trace(bucket_id=bucket_id, date="2026.03.08")
     bucket = await bucket_mgr.get(bucket_id)
 
     assert "date=2026-03-08" in result
+    assert bucket["metadata"]["date"] == "2026-03-08"
+
+
+@pytest.mark.asyncio
+async def test_trace_rejects_invalid_event_date(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    bucket_id = await bucket_mgr.create(
+        content="旧正文。",
+        name="旧标题",
+        domain=["恋爱"],
+        date="2026-03-08",
+    )
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+
+    result = await server.trace(bucket_id=bucket_id, date="not-a-date")
+    bucket = await bucket_mgr.get(bucket_id)
+
+    assert result == "date 无效。"
     assert bucket["metadata"]["date"] == "2026-03-08"
 
 
@@ -1135,7 +1155,7 @@ async def test_hold_preserves_explicit_affect_and_event_date(monkeypatch, bucket
         tags="milestone",
         valence=0.85,
         arousal=0.6,
-        date="2026-03-08",
+        date="2026.03.08",
     )
     buckets = await bucket_mgr.list_all(include_archive=True)
     meta = buckets[0]["metadata"]
@@ -1144,6 +1164,26 @@ async def test_hold_preserves_explicit_affect_and_event_date(monkeypatch, bucket
     assert meta["valence"] == 0.85
     assert meta["arousal"] == 0.6
     assert meta["date"] == "2026-03-08"
+
+
+@pytest.mark.asyncio
+async def test_hold_rejects_invalid_event_date(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "dehydrator", DummyDehydrator())
+    monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
+
+    result = await server.hold(
+        content="这条不应该因为无效日期进入记忆。",
+        tags="milestone",
+        date="not-a-date",
+    )
+    buckets = await bucket_mgr.list_all(include_archive=True)
+
+    assert result == "date 无效。"
+    assert buckets == []
 
 
 @pytest.mark.asyncio

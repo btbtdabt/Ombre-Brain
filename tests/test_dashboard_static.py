@@ -62,6 +62,20 @@ def test_dashboard_bucket_detail_can_edit_event_date_separately():
     assert "JSON.stringify({content:" not in date_submit
 
 
+def test_dashboard_bucket_edit_forms_restore_button_when_auth_fetch_returns_empty():
+    html = Path("dashboard.html").read_text(encoding="utf-8")
+    edit_blocks = [
+        html.split("async function submitBucketDateEdit", 1)[1].split("async function submitBucketTitleEdit", 1)[0],
+        html.split("async function submitBucketTitleEdit", 1)[1].split("function startBucketContentEdit", 1)[0],
+        html.split("async function submitBucketContentEdit", 1)[1].split("function handleCommentKeydown", 1)[0],
+    ]
+
+    for block in edit_blocks:
+        assert "if (!res) throw new Error('保存失败');" in block
+        assert "button.disabled = false;" in block
+        assert "button.textContent = '保存';" in block
+
+
 def test_dashboard_bucket_list_has_bulk_delete_controls():
     html = Path("dashboard.html").read_text(encoding="utf-8")
     list_view = html.split('id="list-view"', 1)[1].split('id="breath-view"', 1)[0]
