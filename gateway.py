@@ -80,8 +80,11 @@ from source_refs import source_ref_window
 from utils import (
     count_tokens_approx,
     bucket_text_for_embedding,
+    local_date_key,
     load_config,
+    parse_human_date_reference,
     setup_logging,
+    strip_human_date_references,
     strip_display_temperature_sections,
     strip_temperature_meaning_lines,
     strip_wikilinks,
@@ -1848,11 +1851,21 @@ class GatewayService:
                 self.recalled_budget,
                 current_user_query,
             )
+            date_persona_trace_requested = (
+                date_recall_requested
+                or self._query_requests_date_persona_trace(current_user_query)
+            )
             if needs_handoff_first or just_now_context_requested:
                 date_persona_trace_debug["skip_reason"] = (
                     "just_now_context"
                     if just_now_context_requested and not needs_handoff_first
                     else ("handoff_trigger" if is_handoff_trigger_query else "session_start_handoff")
+                )
+            elif not date_persona_trace_requested:
+                date_persona_trace_debug["skip_reason"] = (
+                    "no_date_hint"
+                    if not self._query_date_hint(current_user_query)
+                    else "date_trace_not_requested"
                 )
             else:
                 date_persona_trace, date_persona_trace_debug = self._build_date_persona_trace_block(
@@ -4114,21 +4127,29 @@ class GatewayService:
             return [assistant_message]
 
         output: list[dict[str, Any]] = []
-        pending_text: list[str] = []
+        pending_blocks: list[dict[str, Any]] = []
         for block_index, block in enumerate(content):
             if isinstance(block, str):
-                pending_text.append(block)
+                self._append_openai_text_block(pending_blocks, block)
                 continue
             if not isinstance(block, dict):
                 raise ValueError(f"messages[{index}].content[{block_index}] must be an object")
             block_type = block.get("type")
             if block_type == "text":
-                pending_text.append(str(block.get("text") or ""))
+                self._append_openai_text_block(pending_blocks, str(block.get("text") or ""))
+                continue
+            if block_type == "image":
+                pending_blocks.append(
+                    self._anthropic_image_block_to_openai(
+                        block,
+                        f"messages[{index}].content[{block_index}]",
+                    )
+                )
                 continue
             if block_type == "tool_result":
-                if pending_text:
-                    output.append({"role": "user", "content": "\n".join(part for part in pending_text if part)})
-                    pending_text = []
+                if pending_blocks:
+                    output.append({"role": "user", "content": self._openai_user_content_from_blocks(pending_blocks)})
+                    pending_blocks = []
                 tool_use_id = str(block.get("tool_use_id") or "")
                 if not tool_use_id:
                     raise ValueError(f"messages[{index}].content[{block_index}] tool_result requires tool_use_id")
@@ -4145,8 +4166,8 @@ class GatewayService:
                 continue
             raise ValueError(f"messages[{index}].content[{block_index}] unsupported user block type")
 
-        if pending_text or not output:
-            output.append({"role": "user", "content": "\n".join(part for part in pending_text if part)})
+        if pending_blocks or not output:
+            output.append({"role": "user", "content": self._openai_user_content_from_blocks(pending_blocks)})
         return output
 
     def _anthropic_tools_to_openai(self, tools: Any) -> list[dict[str, Any]]:
@@ -4193,6 +4214,46 @@ class GatewayService:
                 raise ValueError("tool_choice.name is required when type is tool")
             return {"type": "function", "function": {"name": name}}
         return None
+
+    def _append_openai_text_block(self, blocks: list[dict[str, Any]], text: str) -> None:
+        text = str(text or "")
+        if not text:
+            return
+        if blocks and blocks[-1].get("type") == "text":
+            blocks[-1]["text"] = "\n".join(part for part in (blocks[-1].get("text"), text) if part)
+            return
+        blocks.append({"type": "text", "text": text})
+
+    def _openai_user_content_from_blocks(self, blocks: list[dict[str, Any]]) -> str | list[dict[str, Any]]:
+        if not blocks:
+            return ""
+        if all(block.get("type") == "text" for block in blocks):
+            return "\n".join(str(block.get("text") or "") for block in blocks if block.get("text"))
+        return blocks
+
+    def _anthropic_image_block_to_openai(self, block: dict[str, Any], field_name: str) -> dict[str, Any]:
+        source = block.get("source")
+        if not isinstance(source, dict):
+            raise ValueError(f"{field_name}.source must be an object")
+
+        source_type = str(source.get("type") or "").strip()
+        if source_type == "base64":
+            media_type = str(source.get("media_type") or "").strip()
+            data = str(source.get("data") or "").strip()
+            if not media_type or not data:
+                raise ValueError(f"{field_name}.source requires media_type and data")
+            return {
+                "type": "image_url",
+                "image_url": {"url": f"data:{media_type};base64,{data}"},
+            }
+
+        if source_type == "url":
+            url = str(source.get("url") or "").strip()
+            if not url:
+                raise ValueError(f"{field_name}.source.url is required")
+            return {"type": "image_url", "image_url": {"url": url}}
+
+        raise ValueError(f"{field_name}.source.type must be base64 or url")
 
     def _anthropic_content_to_text(self, content: Any, field_name: str) -> str:
         if content is None:
@@ -5660,31 +5721,7 @@ class GatewayService:
         text = str(query or "").strip()
         if not text:
             return None
-        now = datetime.now(self.gateway_tz)
-        explicit = re.search(r"(20\d{2})[-/.年](\d{1,2})[-/.月](\d{1,2})日?", text)
-        if explicit:
-            year, month, day = (int(part) for part in explicit.groups())
-            try:
-                target = datetime(year, month, day, tzinfo=self.gateway_tz).date()
-            except ValueError:
-                return None
-            return {"date": target.isoformat(), "label": target.isoformat()}
-        relative_days = [
-            ("大前天", -3),
-            ("前天", -2),
-            ("昨晚", -1),
-            ("昨天", -1),
-            ("昨日", -1),
-            ("今晚", 0),
-            ("今天", 0),
-        ]
-        for label, offset in relative_days:
-            if label in text:
-                return {
-                    "date": (now + timedelta(days=offset)).date().isoformat(),
-                    "label": label,
-                }
-        return None
+        return parse_human_date_reference(text, now=datetime.now(self.gateway_tz), tz=self.gateway_tz)
 
     def _date_recall_range(self, date_key: str) -> tuple[datetime, datetime]:
         target = datetime.fromisoformat(f"{date_key}T00:00:00").replace(tzinfo=self.gateway_tz)
@@ -5706,8 +5743,7 @@ class GatewayService:
         return self._dedupe_date_recall_topic_terms(terms)
 
     def _strip_date_recall_query_shell(self, query: str) -> str:
-        text = str(query or "")
-        text = re.sub(r"20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}日?", " ", text)
+        text = strip_human_date_references(query)
         shell_terms = {
             "大前天", "前天", "昨晚", "昨天", "昨日", "今晚", "今天",
             "我们", "咱们", "哥哥", "宝宝", "老婆", "我", "你",
@@ -5775,6 +5811,8 @@ class GatewayService:
 
     def _bucket_matches_date_recall(self, bucket: dict, date_key: str) -> bool:
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        if meta.get("date"):
+            return self._local_date_key(meta.get("date")) == date_key
         for key in ("date", "created", "updated_at", "last_active"):
             if date_key in self._local_date_key_candidates(meta.get(key)):
                 return True
@@ -5794,28 +5832,29 @@ class GatewayService:
         return date_value, importance
 
     def _local_date_key(self, value: Any) -> str:
-        candidates = self._local_date_key_candidates(value)
-        return candidates[0] if candidates else ""
+        return local_date_key(value, tz=self.gateway_tz)
 
     def _local_date_key_candidates(self, value: Any) -> list[str]:
         text = str(value or "").strip()
         if not text:
             return []
-        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
-            return [text]
-        try:
-            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        except ValueError:
-            match = re.match(r"^\d{4}-\d{2}-\d{2}", text)
-            return [match.group(0)] if match else []
         candidates: list[str] = []
 
         def add(date_key: str) -> None:
             if date_key and date_key not in candidates:
                 candidates.append(date_key)
 
+        add(local_date_key(text, tz=self.gateway_tz))
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+            return candidates
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            match = re.match(r"^\d{4}-\d{2}-\d{2}", text)
+            add(match.group(0) if match else "")
+            return candidates
+
         if parsed.tzinfo is not None:
-            add(parsed.astimezone(self.gateway_tz).date().isoformat())
             add(parsed.date().isoformat())
             return candidates
 
@@ -5988,6 +6027,38 @@ class GatewayService:
             "这次",
         )
         return any(marker in text for marker in detail_markers)
+
+    def _query_requests_date_persona_trace(self, query: str) -> bool:
+        text = str(query or "").strip()
+        if not text or not self._query_date_hint(text):
+            return False
+        if self._query_requests_just_now_context(text):
+            return False
+        trace_markers = (
+            "记得",
+            "记不记得",
+            "还记得",
+            "想起",
+            "想起来",
+            "为什么",
+            "怎么说",
+            "怎么回事",
+            "怎么了",
+            "确认",
+            "当时",
+            "那次",
+            "这次",
+            "的事",
+            "什么事",
+            "发生",
+            "聊",
+            "说",
+            "提",
+            "讲",
+            "讨论",
+            "做了什么",
+        )
+        return any(marker in text for marker in trace_markers)
 
     def _build_date_persona_trace_block(
         self,
@@ -6393,6 +6464,7 @@ class GatewayService:
             "bucket_tags": list(meta.get("tags") or []),
             "bucket_domain": list(meta.get("domain") or []),
             "bucket_importance": meta.get("importance"),
+            "bucket_date": meta.get("date"),
             "bucket_created": meta.get("created"),
             "bucket_updated_at": meta.get("updated_at") or meta.get("last_active"),
             "source_record_direct": True,
@@ -7287,6 +7359,13 @@ class GatewayService:
         moment = moment or {}
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
         moment_meta = moment.get("metadata", {}) if isinstance(moment.get("metadata"), dict) else {}
+        event_date = self._date_yyyy_mm_dd(
+            meta.get("date")
+            or moment_meta.get("bucket_date")
+            or moment_meta.get("date")
+        )
+        if event_date:
+            return [f"[date:{event_date}]"]
         created = self._date_yyyy_mm_dd(
             meta.get("created")
             or moment_meta.get("bucket_created")

@@ -1,4 +1,7 @@
-from utils import load_config
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from utils import local_date_key, load_config, parse_human_date_reference, strip_human_date_references
 
 
 def test_load_config_defaults_relationship_weather_off(tmp_path):
@@ -40,3 +43,17 @@ def test_load_config_reads_runtime_config_before_env_override(tmp_path, monkeypa
 
     assert config["dream"]["enabled"] is False
     assert config["dream"]["base_url"] == "https://env.example"
+
+
+def test_parse_human_date_reference_accepts_common_memory_formats():
+    now = datetime(2026, 6, 15, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    assert parse_human_date_reference("2026.06.15", now=now)["date"] == "2026-06-15"
+    assert parse_human_date_reference("2026-06-15", now=now)["date"] == "2026-06-15"
+    assert parse_human_date_reference("2026/6/15", now=now)["date"] == "2026-06-15"
+    assert parse_human_date_reference("2026年6月15日", now=now)["date"] == "2026-06-15"
+    assert parse_human_date_reference("25年6月15日", now=now)["date"] == "2025-06-15"
+    assert parse_human_date_reference("6月15日聊了什么", now=now)["date"] == "2026-06-15"
+    assert local_date_key("2026.06.15") == "2026-06-15"
+    assert local_date_key("2026-06-14T18:30:00+00:00") == "2026-06-15"
+    assert strip_human_date_references("2026.06.15聊求职") == " 聊求职"

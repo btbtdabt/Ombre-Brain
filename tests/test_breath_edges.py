@@ -1212,6 +1212,7 @@ async def test_emotion_state_phrase_is_generated_without_manual_combo_entry(patc
 
     all_buckets = await server.bucket_mgr.list_all(include_archive=False)
     terms = server._breath_lexical_match_terms("今天为什么焦虑哭了吗", all_buckets=all_buckets)
+    assert server._breath_query_requests_date_read("今天为什么焦虑哭了吗") is False
     result = await server.breath(
         query="今天为什么焦虑哭了吗",
         retrieval_mode="bucket",

@@ -16,7 +16,7 @@ import uuid
 import yaml
 import logging
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Any
 
@@ -42,6 +42,99 @@ def parse_first_json_value(raw: str) -> Any:
             continue
         return value
     raise ValueError("no_json_object_or_array_found")
+
+
+def _date_hint(year: int, month: int, day: int, label: str, tz=LOCAL_TZ) -> dict[str, str] | None:
+    try:
+        target = datetime(year, month, day, tzinfo=tz).date()
+    except ValueError:
+        return None
+    return {"date": target.isoformat(), "label": label}
+
+
+def _reference_now(now: datetime | None = None, tz=LOCAL_TZ) -> datetime:
+    if now is None:
+        return datetime.now(tz)
+    if now.tzinfo is None:
+        return now.replace(tzinfo=tz)
+    return now.astimezone(tz)
+
+
+def parse_human_date_reference(text: str, *, now: datetime | None = None, tz=LOCAL_TZ) -> dict[str, str] | None:
+    """Parse common human date references into YYYY-MM-DD."""
+    value = str(text or "").strip()
+    if not value:
+        return None
+    base = _reference_now(now, tz)
+
+    explicit = re.search(
+        r"(?<!\d)(20\d{2})\s*(?:[-/.]|年)\s*(\d{1,2})\s*(?:[-/.]|月)\s*(\d{1,2})\s*(?:日|号)?(?!\d)",
+        value,
+    )
+    if explicit:
+        year, month, day = (int(part) for part in explicit.groups())
+        return _date_hint(year, month, day, explicit.group(0), tz)
+
+    short_year = re.search(
+        r"(?<!\d)(\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*(?:日|号)?",
+        value,
+    )
+    if short_year:
+        year, month, day = (int(part) for part in short_year.groups())
+        return _date_hint(2000 + year, month, day, short_year.group(0), tz)
+
+    month_day = re.search(r"(?<![\d年/-])(\d{1,2})\s*月\s*(\d{1,2})\s*(?:日|号)?", value)
+    if month_day:
+        month, day = (int(part) for part in month_day.groups())
+        return _date_hint(base.year, month, day, month_day.group(0), tz)
+
+    relative_days = [
+        ("大前天", -3),
+        ("前天", -2),
+        ("昨晚", -1),
+        ("昨天", -1),
+        ("昨日", -1),
+        ("今晚", 0),
+        ("今天", 0),
+    ]
+    for label, offset in relative_days:
+        if label in value:
+            return {"date": (base + timedelta(days=offset)).date().isoformat(), "label": label}
+    return None
+
+
+def strip_human_date_references(text: str) -> str:
+    """Remove human date references from a query before topic extraction."""
+    value = str(text or "")
+    patterns = [
+        r"(?<!\d)20\d{2}\s*(?:[-/.]|年)\s*\d{1,2}\s*(?:[-/.]|月)\s*\d{1,2}\s*(?:日|号)?(?!\d)",
+        r"(?<!\d)\d{2}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*(?:日|号)?",
+        r"(?<![\d年/-])\d{1,2}\s*月\s*\d{1,2}\s*(?:日|号)?",
+    ]
+    for pattern in patterns:
+        value = re.sub(pattern, " ", value)
+    for label in ("大前天", "前天", "昨晚", "昨天", "昨日", "今晚", "今天"):
+        value = value.replace(label, " ")
+    return value
+
+
+def local_date_key(value, *, tz=LOCAL_TZ) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        return text
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        explicit_hint = parse_human_date_reference(text, tz=tz)
+        if explicit_hint and not any(label in text for label in ("大前天", "前天", "昨晚", "昨天", "昨日", "今晚", "今天")):
+            return explicit_hint["date"]
+        match = re.match(r"^\d{4}-\d{2}-\d{2}", text)
+        return match.group(0) if match else ""
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(tz)
+    return parsed.date().isoformat()
 
 
 def load_config(config_path: str = None) -> dict:

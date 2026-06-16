@@ -13,7 +13,8 @@
 - 生产部署建议使用源码构建，并同时运行 `ombre-brain` 和 `ombre-gateway` 两个服务；旧 `docker-compose.user.yml` / `docker-compose.yml` 只适合历史参考，不是当前新版入口。
 - bucket 数据和运行状态必须放在持久化目录里；`state` 不建议放进任何双向同步目录。
 - `X-Ombre-Session-Id` 是本 fork 的 Gateway 会话头，不是 OpenAI 标准字段。它像 Persona 的“房间号”：同一个值会共用同一份 persona_state 和召回冷却记录。可以自己起，比如 `my-main`、`chat-main`，不要照抄旧文档里的 `xiaoyu-main`。
-- 给 Operit 或其它聊天平台写工具使用清单时，先区分 MCP 工具模式和 Gateway 自动注入模式，参考 [`docs/Tool Guide.md`](<docs/Tool Guide.md>)。记得重新复制这份 Tool Guide 到客户端；旧工具说明不会知道 `is_session_start`、`mode="handoff"`、query breath、`read_bucket`、`self_anchor`、`darkroom_enter` 和调试工具边界。
+- 给 Operit 或其它聊天平台写工具使用清单时，先区分 MCP 工具模式和 Gateway 自动注入模式，参考 [`docs/Tool Guide.md`](<docs/Tool Guide.md>)。记得重新复制这份 Tool Guide 到客户端；旧工具说明不会知道 `is_session_start`、`mode="handoff"`、query/date breath、`read_bucket`、`self_anchor`、`daily_impression`、`darkroom_enter` 和调试工具边界。
+- [`CLAUDE_PROMPT.md`](CLAUDE_PROMPT.md) 是历史兼容文件名，现在内容按通用 assistant 端编写，不只给 Claude 用。
 
 ## 2026-06-07 主线提醒
 
@@ -22,7 +23,7 @@
 - 新窗口/醒来/换窗：优先 `breath(is_session_start=true)` 或 `breath(mode="handoff")`，返回自我入口、User Portrait、Relationship Portrait、Recent Continuity 和少量 Optional Anchors；具体事件继续用 `breath(query="关键词或原句")` 查。
 - `Recent Continuity` 由按真实日期维护的 handoff recent summary、关系天气和短 trace 组成，不再把初次画像初始化摘要伪装成当天日记。
 - Gateway 会记录轻量 `conversation_turns`。遇到“刚刚/刚才/刚说/上一句/暗号”等短时跨窗口问题时，优先注入 Just Now Chat Context，并跳过默认记忆查询。
-- Gateway 的日期问题会给小段 Date Persona Trace；如果本轮已有 Handoff Context，默认跳过泛泛的 Recent Context，避免 handoff、recent_context 和 query breath 重复塞。
+- Gateway 的日期问题会先解析 `昨天/前天/6月15日/2026.06.15/2026-06-15` 这类日期，按事件日期补 Date Recall；同时可给小段 Date Persona Trace。如果本轮已有 Handoff Context，默认跳过泛泛的 Recent Context，避免 handoff、recent_context 和 query breath 重复塞。
 - Daily Portrait Maintainer 会维护用户画像、Haven persona、关系画像和“最近在做什么”，只写 `state/portrait_state.json`，不直接写长期记忆；Dashboard 可手动生成/刷新。
 - 图结构召回的当前主路是 `retrieval_mode=graph`：先找可靠 direct seed，再沿 moment / bucket 边做短摘要联想；`retrieval_mode=bucket` 只是对照模式。
 - 旧桶格式已经按新版边界迁移过：事实/事件进 `### moment`，Haven 的理解进 `### reflection`，`### affect_anchor` 只留和弦、温度和诗性标记。旧 `### assistant_reflection` heading 仍兼容读取，但新写入统一用 `### reflection`。
@@ -69,7 +70,7 @@
 | Darkroom | 保存未想透、不该给用户看、不该进普通记忆的内在反思；默认只作为私密暗房保留，外部工具清单只开放 `darkroom_enter` | `darkroom.py`、`server.py`、`dashboard.html` |
 | 年轮 comments | 将再次阅读某条记忆时的感受挂到源 bucket 的 `metadata.comments` 下；旧 feel 可迁移成源记忆年轮 | `bucket_manager.py`、`server.py`、`dashboard.html` |
 | whisper | 无源碎碎念/悄悄话独立保存为 `type=feel + whisper` 标签，可用 `breath(domain="whisper")` 单独读取 | `server.py` |
-| Dashboard 编辑 | 支持正文编辑、前端用户年轮写入/删除、桶列表多选删除、日印象月历、Persona 面板、网络图、手动 reflect；日印象页按日期显示完整日印象，不再做情绪天气图 | `dashboard.html`、`server.py` |
+| Dashboard 编辑 | 支持正文编辑、事件日期编辑、前端用户年轮写入/删除、桶列表多选删除、日印象月历、Persona 面板、网络图、手动 reflect；日印象页按日期显示完整日印象，不再做情绪天气图 | `dashboard.html`、`server.py` |
 | 可选 Haven-diary/RiJi 摘记 | 完整日记留在 [Yinglianchun/RiJi](https://github.com/Yinglianchun/RiJi) 这类外部日记系统，Ombre 只提取少量长期有用记忆；不用可关闭 | `reflection_engine.py` |
 | Supabase 同步 | 本地 bucket 与 Supabase memories 表同步，支持 tombstone 删除墓碑 | `scripts/sync_to_supabase.py` |
 | ChatGPT / Claude Connector OAuth | 为 `/ombre/mcp` 提供 OAuth authorize/token 元数据，并允许 Claude hosted callback | `server.py` |
@@ -83,7 +84,7 @@
     -> 按 X-Ombre-Session-Id 读取 gateway_state / persona_state / portrait_state
     -> prepare_payload() 按 turn 类型和配置选择上下文块：
        Core Memory / Portrait Memory
-       Just Now Chat Context / Recent Context / Date Persona Trace
+       Just Now Chat Context / Recent Context / Date Recall / Date Persona Trace
        Recalled Memory / Targeted Memory Detail / Diffused Memory
        Relationship Weather / Favorite Memory / Dream Context
     -> 转发 OpenAI-compatible 或 Anthropic-compatible 上游模型
@@ -179,7 +180,7 @@ darkroom/           # 私密暗房笔记
 - Query 双视图只分开“原句语义”和“主题词锚点”，不绕过准入判断；例如只剩语气或情绪词时，keyword / word_map 不会硬凑 direct seed。
 - `Diffused Memory` 必须从可靠 direct seed 出发；明确主题 query 还要有 topic evidence。联想结果是背景提示，不是当前事实。
 - reranker 仍然是候选重排序层，保留在 raw query 路线上；它不替代 RecallPolicy，也不需要从配置里删掉。
-- `Recent Context`、`Just Now Chat Context`、`Date Persona Trace` 和图扩散是不同层。刚刚/上一句优先走短时 `conversation_turns`，日期问题优先给小段日期 trace。
+- `Recent Context`、`Just Now Chat Context`、`Date Recall`、`Date Persona Trace` 和图扩散是不同层。刚刚/上一句优先走短时 `conversation_turns`；“6月15日聊了什么”这类日期问题优先按事件日期找普通记忆，再补小段日期 trace。
 - `breath(mode="handoff")` / 新窗口 handoff 不跑动态图扩散；它读自我入口、User Portrait、Relationship Portrait、Recent Continuity 和少量 Optional Anchors。
 - Word Map Lite 只是派生词图和诊断视图，默认不参与 Gateway 注入；它不是替代 `memory_edges` 的主图。
 - `retrieval_mode="bucket"` 只保留旧桶召回口感作对照；当前主路是 `retrieval_mode="graph"`。
@@ -283,7 +284,8 @@ cp config.example.yaml /srv/ombre-brain/config.yaml
 - `gateway.recent_context_reentry_idle_hours`：闲置多久算长时间再进入，默认 `24`；设 `0` 可关闭再进入触发。
 - `gateway.recent_context_budget`：`Recent Context` 预算，默认 `300`；设 `0` 可关闭这块自动注入。
 - `gateway.just_now_context_*`：控制“刚刚/刚才/上一句/暗号”这类跨窗口短时上下文，默认开启。
-- `gateway.date_persona_trace_*`：控制“昨天/昨晚/前天/明确日期”这类问题的小段日期 trace，默认开启。
+- `gateway.date_recall_*`：控制“昨天/昨晚/前天/6月15日/2026.06.15”这类问题的按日期普通记忆注入，默认开启。
+- `gateway.date_persona_trace_*`：控制同类问题的小段日期 trace，可带 daily_impression 摘要，默认开启。
 - `gateway.recalled_memory_budget`：`Recalled Memory` 直命中预算，默认 `400`。
 - `gateway.related_memory_budget`：`Diffused Memory` 扩散背景预算，默认 `220`；设 `0` 可关闭 Gateway 扩散注入。
 - `gateway.direct_render_mode` / `retrieval_mode`：控制直命中展示形状和 `graph|bucket` 召回路线；默认 `auto` + `graph`。
@@ -787,14 +789,14 @@ rm /srv/ombre-brain/state/.dashboard_auth.json
 
 | 工具 | 口径 |
 | --- | --- |
-| `breath` | 只读浮现或检索记忆；新窗口用 `mode="handoff"` 或 `is_session_start=true`；具体事件用 `query` 查。 |
+| `breath` | 只读浮现或检索记忆；新窗口用 `mode="handoff"` 或 `is_session_start=true`；具体事件用 `query` 查，明确日期可传 `date` 或在 query 里写日期；`domain="daily_impression"` 才读日印象。 |
 | `read_bucket` | 按 bucket_id 精确读取完整记忆；准备改旧记忆或追细节前使用。 |
 | `comment_bucket` | 给已有记忆追加年轮/评论；适合“读到旧记忆后的新感受或补充”。 |
-| `hold` | 写单条长期记忆；`whisper=True` 写无源悄悄话。 |
+| `hold` | 写单条长期记忆；可传 `date` 记录事件日期；显式 `domain` 会覆盖自动领域；显式 `valence/arousal` 会覆盖自动情绪；`whisper=True` 写无源悄悄话。 |
 | `darkroom_enter` | 写入私密暗房，只返回门口状态，不回显正文。 |
 | `grow` | 长内容摘记；只喂已经筛过的长期记忆点，不要整篇流水账原样写入。 |
 | `profile_fact` | 手动固化带证据的用户画像事实；需要 evidence bucket/moment。 |
-| `trace` | 修改、归档、删除或沉底旧记忆前使用；先 `read_bucket` 再操作。 |
+| `trace` | 修改、归档、删除或沉底旧记忆前使用；先 `read_bucket` 再操作；可用 `date` 单独修正事件日期。 |
 | `pulse` | 查看记忆系统概览和近期状态。 |
 | `introspection` | 清醒回看最近普通记忆；替代旧 `dream()` 自省入口。 |
 
@@ -805,7 +807,7 @@ Favorite Memory 受控触发：新写入推荐 `ai_favorite`；旧 `haven_favori
 - 旧 feel 迁移：已经能把一部分旧独立 feel 接到关联源记忆下面，并保留 `original_feel_id / original_feel_created`。
 - 旧 feel 清理：确认已迁移后，用 `scripts/cleanup_migrated_feel_buckets.py` 清理旧独立 feel 桶，不删除源 bucket 下的 comments。
 - whisper：无源碎碎念/悄悄话，不适合挂到某条源记忆时，用 `hold(whisper=True)` 独立保存；用 `breath(domain="whisper")` 单独读取。
-- 日印象：`type=feel`，tags 包含 `relationship_weather` / `daily_impression`。
+- 日印象：`type=feel`，tags 包含 `relationship_weather` / `daily_impression`；普通 `breath(domain="feel")` 和普通日期查询不会混入日印象，显式 `breath(domain="daily_impression")` 才读。
 - Dashboard 的“日印象”页提供月历和单卡片详情：左侧按日期选 daily impression，右侧显示该日完整日印象；点小铅笔进入原 bucket 详情面板手动编辑。
 - 不生成周印象；需要周视角时，优先做只读聚合视图，不把日印象压缩成周记。
 - 日记原文留在外部日记系统，例如 [Yinglianchun/RiJi](https://github.com/Yinglianchun/RiJi)；不用日记系统时可以关闭 diary 摘记，Ombre 只在有长期价值时提取少量普通记忆。

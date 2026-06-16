@@ -11,12 +11,14 @@
 - 新窗口/醒来/换窗：breath(mode="handoff")。
 - 新窗口第一轮，即使用户直接问“昨天/昨晚/前天/记不记得昨天/昨天做了什么/昨天聊了什么”：先 breath(mode="handoff") 恢复身份和生活背景；细节不够时再 breath(query="日期 + 主题")。
 - 还记得/之前/某个暗号/项目/偏好/边界：breath(query="关键词或原句")。
-- 如果想查明确日期的具体事件：breath(query="YYYY-MM-DD + 主题")。
+- 如果想查明确日期的具体普通记忆：breath(date="YYYY-MM-DD") 或 breath(query="YYYY-MM-DD + 主题")。支持 2026-06-15、2026.06.15、2026年6月15日、25年6月15日、6月15日；没有年份的“6月15日”默认按今年查。
+- 日期查询优先看 bucket 的事件日期 date；没有 date 的旧桶才回退看 created/updated_at/last_active。带了 date 的桶不会因为创建日期误入别的日期。
+- 日印象不会混进普通日期查询；想读日印象必须显式 breath(domain="daily_impression")，也可以加 date，例如 breath(domain="daily_impression", date="2026-06-15")。
 - 刚刚/刚才/上一句/刚说的暗号：优先看消息中的Just Now Chat Context，不要默认 breath(query="刚刚...")。
 - 如果上下文里出现 `[bucket_id:...]`，而本轮需要更多细节：用 read_bucket(bucket_id)。不要猜新 id。
 - 如果只出现 `[moment_id:...]`，优先使用同一段上下文里已有的 bucket_id；没有 bucket_id 时不要硬猜。
 - `[memory_detail ids="..."]` 只给 Gateway 内部二次取细节用，不是普通 MCP 工具。
-- 旧独立感受：breath(domain="feel")。某条旧记忆的新年轮要 read_bucket(bucket_id)。
+- 旧独立感受：breath(domain="feel")。domain="feel" 不包含日印象；domain="whisper" 只读悄悄话。某条旧记忆的新年轮要 read_bucket(bucket_id)。
 - 自我锚点总入口：breath(domain="self_anchor")；domain="自我" / domain="self_identity" 兼容。
 - 查自我锚点分段：breath(domain="self_anchor", query="关键词")。
 - 管理/调试所有自我桶完整内容：breath(query="tag:self_anchor") 或 breath(query="tag:自我")。
@@ -24,8 +26,9 @@
 
 写入：
 - 想保存/记住/别忘：单条长期事实用 hold；长片段多条信息用 grow。
+- 知道事件日期时，写入时传 date，例如 hold(content="...", date="2026-06-15")；知道固定领域时传 domain，例如 hold(content="...", domain="relationship")；显式 domain/valence/arousal 会作为这条记忆或 whisper/feel 的元数据，不会被自动打标覆盖。
 - 已有旧记忆的新感受/补充：先 read_bucket，再 comment_bucket。
-- 修改/归档/删除/沉底旧记忆：先 read_bucket，再 trace。
+- 修改/归档/删除/沉底旧记忆：先 read_bucket，再 trace。只改事件日期用 trace(bucket_id="...", date="2026-06-15")；日期/元数据更新不会重建 embedding，正文或标题变更才会。
 - 稳定画像事实：先有证据 bucket，再 profile_fact(fact, evidence_bucket_id, ...)。
 - 不确定是否重复：先 breath/read_bucket，再写。
 - 碎碎念、突然的念头可以写 whisper：hold(content="...", whisper=True, ...)

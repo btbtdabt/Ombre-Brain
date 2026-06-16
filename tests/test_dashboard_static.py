@@ -46,6 +46,22 @@ def test_dashboard_bucket_detail_loads_moment_diagnostics():
     assert ".moment-edge-list" in html
 
 
+def test_dashboard_bucket_detail_can_edit_event_date_separately():
+    html = Path("dashboard.html").read_text(encoding="utf-8")
+    detail_block = html.split("async function showDetail", 1)[1].split("function loadBucketMoments", 1)[0]
+    date_submit = html.split("async function submitBucketDateEdit", 1)[1].split("async function submitBucketTitleEdit", 1)[0]
+
+    assert 'id="bucket-date-view"' in detail_block
+    assert 'id="bucket-date-edit"' in detail_block
+    assert 'name="date" type="date"' in detail_block
+    assert "startBucketDateEdit()" in detail_block
+    assert "function dateInputValue(value)" in html
+    assert "JSON.stringify({date: newDate})" in date_submit
+    assert "await loadBuckets();" in date_submit
+    assert "JSON.stringify({name:" not in date_submit
+    assert "JSON.stringify({content:" not in date_submit
+
+
 def test_dashboard_bucket_list_has_bulk_delete_controls():
     html = Path("dashboard.html").read_text(encoding="utf-8")
     list_view = html.split('id="list-view"', 1)[1].split('id="breath-view"', 1)[0]
@@ -58,6 +74,16 @@ def test_dashboard_bucket_list_has_bulk_delete_controls():
     assert "confirm: 'DELETE'" in html
     assert "bucketBulkDeleteBlockReason" in html
     assert "受保护记忆不能批量删除" in html
+
+
+def test_dashboard_feel_filter_excludes_daily_impressions():
+    html = Path("dashboard.html").read_text(encoding="utf-8")
+
+    assert "{ key: 'daily_impression', label: '日印象' }" in html
+    assert "currentFilter === 'feel'" in html
+    assert "b.type === 'feel' && !isDailyImpressionBucket(b)" in html
+    assert "currentFilter === 'daily_impression'" in html
+    assert "buckets.filter(isDailyImpressionBucket)" in html
 
 
 def test_dashboard_exposes_darkroom_door_without_release_or_body_fields():
