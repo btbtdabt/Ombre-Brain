@@ -9480,9 +9480,26 @@ class GatewayService:
         required_terms: list[str] | None = None,
         planner_query: dict[str, Any] | None = None,
     ) -> tuple[list[dict], list[dict]]:
+        candidate_started_at = time.perf_counter()
+
+        def log_bucket_candidate_stage(stage: str, **extra: Any) -> None:
+            if session_id != "relay-coordinator":
+                return
+            logger.info(
+                "Gateway coordinator bucket candidate stage | session=%s stage=%s elapsed_ms=%s query_chars=%s extra=%s",
+                session_id,
+                stage,
+                int((time.perf_counter() - candidate_started_at) * 1000),
+                len(str(query or "")),
+                extra,
+            )
+
+        log_bucket_candidate_stage("start", bucket_count=len(all_buckets))
         if not query or self.inject_max_cards <= 0:
+            log_bucket_candidate_stage("skip_empty_or_disabled")
             return [], []
         if self._auto_query_too_vague(query):
+            log_bucket_candidate_stage("skip_auto_vague")
             return [], []
 
         relevance_query = self._query_has_relevance_facet(query)
@@ -9494,6 +9511,7 @@ class GatewayService:
             )
             or (relevance_query and self._is_relevance_candidate_bucket(query, bucket))
         ]
+        log_bucket_candidate_stage("eligible_done", eligible=len(eligible))
         if not eligible:
             return [], []
 
@@ -9502,14 +9520,20 @@ class GatewayService:
         normalized_query = str(search_query or "").strip()
         if not normalized_query:
             normalized_query = self._normalized_recall_query(raw_query)
+        log_bucket_candidate_stage("keyword_candidates_start", normalized_query_chars=len(normalized_query))
         keyword_scores = self._get_keyword_candidates(normalized_query, eligible) if normalized_query else {}
+        log_bucket_candidate_stage("keyword_candidates_done", count=len(keyword_scores))
+        log_bucket_candidate_stage("semantic_candidates_start")
         semantic_scores = await self._get_semantic_candidates(raw_query, set(bucket_map))
+        log_bucket_candidate_stage("semantic_candidates_done", count=len(semantic_scores))
         if normalized_query:
+            log_bucket_candidate_stage("word_map_scores_start")
             word_map_scores, word_map_debug = self._get_word_map_hint_scores(
                 normalized_query,
                 eligible,
                 required_terms=required_terms,
             )
+            log_bucket_candidate_stage("word_map_scores_done", count=len(word_map_scores))
         else:
             word_map_scores, word_map_debug = {}, {}
         lexical_terms = self._planner_lexical_match_terms(required_terms)
@@ -9530,12 +9554,14 @@ class GatewayService:
         }
         diversity_terms = self._query_anchor_terms_for_diversity(normalized_query or raw_query)
         candidate_ids = set(keyword_scores) | set(semantic_scores) | lexical_ids | set(word_map_scores)
+        log_bucket_candidate_stage("candidate_ids_done", count=len(candidate_ids), lexical=len(lexical_ids))
         if not candidate_ids:
             return [], []
 
         now = datetime.now()
         recent_ids = self.state_store.get_recent_bucket_ids(session_id, self.skip_recent_rounds)
         scored_candidates = []
+        log_bucket_candidate_stage("score_candidates_start", candidate_ids=len(candidate_ids))
         for bucket_id in candidate_ids:
             bucket = bucket_map.get(bucket_id)
             if not bucket:
@@ -9597,7 +9623,9 @@ class GatewayService:
                     "matched_query_terms": matched_query_terms,
                 }
             )
+        log_bucket_candidate_stage("score_candidates_done", scored=len(scored_candidates))
 
+        log_bucket_candidate_stage("sort_candidates_start", scored=len(scored_candidates))
         scored_candidates.sort(
             key=lambda item: self._bucket_recall_rank(
                 query,
@@ -9605,7 +9633,11 @@ class GatewayService:
                 item["score"],
             )
         )
+        log_bucket_candidate_stage("sort_candidates_done", scored=len(scored_candidates))
+        log_bucket_candidate_stage("bucket_rerank_start", scored=len(scored_candidates))
         scored_candidates = await self._rerank_scored_bucket_candidates(query, scored_candidates)
+        log_bucket_candidate_stage("bucket_rerank_done", scored=len(scored_candidates))
+        log_bucket_candidate_stage("filter_recent_start", scored=len(scored_candidates), recent=len(recent_ids))
         filtered = [
             item
             for item in scored_candidates
@@ -9617,9 +9649,11 @@ class GatewayService:
             )
         ]
         active_pool = filtered or scored_candidates
+        log_bucket_candidate_stage("filter_recent_done", filtered=len(filtered), active=len(active_pool))
         admitted_pool = []
         suppressed_candidates = []
         required_terms = required_terms or []
+        log_bucket_candidate_stage("bucket_admission_start", active=len(active_pool))
         for item in active_pool:
             if required_terms and not self._bucket_matches_any_planner_term(item.get("bucket") or {}, required_terms):
                 item["admission_reason"] = "planner_must_terms_missing"
@@ -9634,6 +9668,11 @@ class GatewayService:
                 admitted_pool.append(item)
             else:
                 suppressed_candidates.append(item)
+        log_bucket_candidate_stage(
+            "bucket_admission_done",
+            admitted=len(admitted_pool),
+            suppressed=len(suppressed_candidates),
+        )
         return admitted_pool, suppressed_candidates
 
     async def _select_dynamic_buckets(
@@ -9645,32 +9684,63 @@ class GatewayService:
         search_query: str = "",
         include_query_planner_debug: bool = False,
     ) -> tuple[list[dict], list[dict]] | tuple[list[dict], list[dict], dict[str, Any]]:
+        select_started_at = time.perf_counter()
+
+        def log_bucket_select_stage(stage: str, **extra: Any) -> None:
+            if session_id != "relay-coordinator":
+                return
+            logger.info(
+                "Gateway coordinator bucket select stage | session=%s stage=%s elapsed_ms=%s query_chars=%s extra=%s",
+                session_id,
+                stage,
+                int((time.perf_counter() - select_started_at) * 1000),
+                len(str(query or "")),
+                extra,
+            )
+
+        log_bucket_select_stage("start", bucket_count=len(all_buckets))
         planner_debug = self._query_planner_debug_base(query)
         if not query or self.inject_max_cards <= 0:
+            log_bucket_select_stage("skip_empty_or_disabled")
             if include_query_planner_debug:
                 return [], [], planner_debug
             return [], []
         if self._auto_query_too_vague(query):
             planner_debug["skip_reason"] = "auto_vague_query"
+            log_bucket_select_stage("skip_auto_vague")
             if include_query_planner_debug:
                 return [], [], planner_debug
             return [], []
 
+        log_bucket_select_stage("candidate_items_start")
         active_pool, suppressed_candidates = await self._dynamic_bucket_candidate_items(
             query,
             session_id,
             all_buckets,
             search_query=search_query,
         )
+        log_bucket_select_stage(
+            "candidate_items_done",
+            active=len(active_pool),
+            suppressed=len(suppressed_candidates),
+        )
+        log_bucket_select_stage("pick_direct_start", active=len(active_pool))
         self._merge_word_map_hint_debug(planner_debug, active_pool + suppressed_candidates)
         direct_selected = self._pick_dynamic_cards(active_pool, query=query)
+        log_bucket_select_stage("pick_direct_done", selected=len(direct_selected))
         selected_items = list(direct_selected)
 
         trigger_reason = self._query_planner_trigger_reason(query, direct_selected)
         if trigger_reason:
+            log_bucket_select_stage("query_planner_start", trigger_reason=trigger_reason)
             planner_debug["triggered"] = True
             planner_debug["trigger_reason"] = trigger_reason
             plan, error = await self._call_query_planner(query)
+            log_bucket_select_stage(
+                "query_planner_done",
+                has_plan=bool(plan),
+                has_error=bool(error),
+            )
             if error:
                 planner_debug["errors"].append(error)
                 if trigger_reason == "emotional_reason_lookup":
@@ -9686,6 +9756,11 @@ class GatewayService:
                         must_terms = list(planner_query.get("must_terms") or [])
                         if not short_query or not must_terms:
                             continue
+                        log_bucket_select_stage(
+                            "supplemental_candidate_items_start",
+                            short_query_chars=len(short_query),
+                            must_terms=len(must_terms),
+                        )
                         short_search_query = self._normalized_recall_query(short_query)
                         admitted, suppressed = await self._dynamic_bucket_candidate_items(
                             short_query,
@@ -9694,6 +9769,11 @@ class GatewayService:
                             search_query=short_search_query,
                             required_terms=must_terms,
                             planner_query=planner_query,
+                        )
+                        log_bucket_select_stage(
+                            "supplemental_candidate_items_done",
+                            admitted=len(admitted),
+                            suppressed=len(suppressed),
                         )
                         supplemental_items.extend(admitted)
                         suppressed_candidates.extend(suppressed)
@@ -9726,10 +9806,12 @@ class GatewayService:
                             }
                         )
                     if supplemental_items:
+                        log_bucket_select_stage("pick_supplemental_start", supplemental=len(supplemental_items))
                         selected_items = self._pick_dynamic_cards(
                             self._merge_dynamic_bucket_items(selected_items + supplemental_items, query),
                             query=query,
                         )
+                        log_bucket_select_stage("pick_supplemental_done", selected=len(selected_items))
                 else:
                     planner_debug["skip_reason"] = "planner_returned_no_search"
         elif self.query_planner_enabled:
@@ -9741,6 +9823,7 @@ class GatewayService:
             if (item.get("bucket") or {}).get("id")
         ]
         result = ([item["bucket"] for item in selected_items], suppressed_candidates)
+        log_bucket_select_stage("done", selected=len(selected_items), suppressed=len(suppressed_candidates))
         if include_query_planner_debug:
             return (*result, planner_debug)
         return result
