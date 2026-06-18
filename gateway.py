@@ -7071,14 +7071,31 @@ class GatewayService:
     ) -> tuple[list[dict], list[dict], list[dict], list[dict]] | tuple[
         list[dict], list[dict], list[dict], list[dict], dict[str, Any]
     ]:
+        selection_started_at = time.perf_counter()
+
+        def log_selection_stage(stage: str, **extra: Any) -> None:
+            if session_id != "relay-coordinator":
+                return
+            logger.info(
+                "Gateway coordinator dynamic recall stage | session=%s stage=%s elapsed_ms=%s query_chars=%s extra=%s",
+                session_id,
+                stage,
+                int((time.perf_counter() - selection_started_at) * 1000),
+                len(str(query or "")),
+                extra,
+            )
+
+        log_selection_stage("start", bucket_count=len(all_buckets))
         query_planner_debug = self._query_planner_debug_base(query)
         if not query or self.inject_max_cards <= 0:
+            log_selection_stage("skip_empty_or_disabled")
             return self._empty_moment_selection(
                 include_query_planner_debug=include_query_planner_debug,
                 query_planner_debug=query_planner_debug,
             )
         if self._auto_query_too_vague(query):
             query_planner_debug["skip_reason"] = "auto_vague_query"
+            log_selection_stage("skip_auto_vague")
             return self._empty_moment_selection(
                 include_query_planner_debug=include_query_planner_debug,
                 query_planner_debug=query_planner_debug,
@@ -7098,6 +7115,7 @@ class GatewayService:
                 or (relevance_query and self._is_relevance_candidate_bucket(query, bucket))
             )
         }
+        log_selection_stage("eligible_buckets_done", eligible=len(eligible_ids))
         if not eligible_ids:
             query_planner_debug["skip_reason"] = "no_eligible_buckets"
             return self._empty_moment_selection(
@@ -7106,12 +7124,18 @@ class GatewayService:
             )
 
         search_query = self._normalized_recall_query(query)
+        log_selection_stage("select_dynamic_buckets_start", search_query_chars=len(search_query))
         selected_buckets, suppressed_buckets, query_planner_debug = await self._select_dynamic_buckets(
             query,
             session_id,
             all_buckets,
             search_query=search_query,
             include_query_planner_debug=True,
+        )
+        log_selection_stage(
+            "select_dynamic_buckets_done",
+            selected=len(selected_buckets),
+            suppressed=len(suppressed_buckets),
         )
         selected_buckets = self._with_explicit_source_record_buckets(
             query,
@@ -7131,10 +7155,12 @@ class GatewayService:
             if str(bucket.get("id") or "") in eligible_ids
         ]
         if search_query:
+            log_selection_stage("word_map_hint_start", eligible=len(eligible_buckets))
             word_map_boost_scores, word_map_boost_debug = self._get_word_map_hint_scores(
                 search_query,
                 eligible_buckets,
             )
+            log_selection_stage("word_map_hint_done", hints=len(word_map_boost_scores))
         else:
             word_map_boost_scores, word_map_boost_debug = {}, {}
         word_map_hint_bucket_ids = set(word_map_boost_scores)
@@ -7145,6 +7171,7 @@ class GatewayService:
             )
         candidates = []
         if search_query:
+            log_selection_stage("moment_search_start")
             moment_search_queries = [search_query]
             raw_moment_query = str(query or "").strip()
             if raw_moment_query and raw_moment_query != search_query:
@@ -7162,17 +7189,25 @@ class GatewayService:
                     if moment_id:
                         seen_moment_ids.add(moment_id)
                     candidates.append(moment)
+            log_selection_stage("moment_search_done", candidates=len(candidates))
         explicit_lookup = self._query_explicitly_requests_caution_memory(query)
+        log_selection_stage("candidate_filter_start", candidates=len(candidates))
         candidates = [
             moment for moment in candidates
             if str(moment.get("bucket_id") or "") in eligible_ids
             and can_moment_be_direct_seed(moment, explicit_lookup=explicit_lookup)
         ]
+        log_selection_stage("candidate_filter_done", candidates=len(candidates))
+        log_selection_stage("relevance_filter_start", candidates=len(candidates))
         candidates = self._apply_relevance_to_moment_candidates(query, candidates)
+        log_selection_stage("relevance_filter_done", candidates=len(candidates))
+        log_selection_stage("rerank_start", candidates=len(candidates))
         candidates = await self._rerank_moment_candidates(query, candidates)
+        log_selection_stage("rerank_done", candidates=len(candidates))
         admitted_bucket_ids = set(selected_bucket_ids)
         admitted_candidates = []
         suppressed_candidates = []
+        log_selection_stage("admission_start", candidates=len(candidates))
         for moment in candidates:
             item = dict(moment)
             bucket_id = str(item.get("bucket_id") or "")
@@ -7203,6 +7238,11 @@ class GatewayService:
             else:
                 suppressed_candidates.append(item)
         candidates = admitted_candidates
+        log_selection_stage(
+            "admission_done",
+            admitted=len(admitted_candidates),
+            suppressed=len(suppressed_candidates),
+        )
 
         selected: list[dict] = []
         seen_buckets: set[str] = set()
@@ -7246,6 +7286,7 @@ class GatewayService:
                 seen_buckets.add(bucket_id)
 
         if selected:
+            log_selection_stage("selected_from_buckets", selected=len(selected))
             result = (selected[: self.inject_max_cards], candidates, suppressed_candidates, suppressed_buckets)
             if include_query_planner_debug:
                 return (*result, query_planner_debug)
@@ -7266,6 +7307,7 @@ class GatewayService:
             seen_buckets.add(bucket_id)
             if len(selected) >= self.inject_max_cards:
                 break
+        log_selection_stage("done", selected=len(selected))
         result = (selected, candidates, suppressed_candidates, suppressed_buckets)
         if include_query_planner_debug:
             return (*result, query_planner_debug)
