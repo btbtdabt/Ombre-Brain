@@ -4,6 +4,7 @@ from pathlib import Path
 import frontmatter
 
 from bucket_manager import BucketManager
+import memory_moments
 from memory_moments import MemoryMomentStore, parse_bucket_moments
 from source_refs import source_ref_window
 
@@ -331,6 +332,33 @@ def test_search_expands_body_query_to_embodiment_terms(test_config):
     results = store.search_moments("身体", limit=5)
 
     assert [item["bucket_id"] for item in results] == ["embodied"]
+
+
+def test_search_moments_reuses_query_terms_per_search(monkeypatch, test_config):
+    store = MemoryMomentStore(test_config)
+    store.bulk_upsert(
+        [
+            _bucket(f"slow-{index}", f"## moment\n慢查询相关记忆 {index}")
+            for index in range(3)
+        ]
+    )
+    calls = {"terms": 0, "expanded": 0}
+
+    def fake_content_terms(query, options=None):
+        calls["terms"] += 1
+        return ["慢查询"]
+
+    def fake_expanded_terms(query, options=None):
+        calls["expanded"] += 1
+        return []
+
+    monkeypatch.setattr(memory_moments, "content_terms_for_query", fake_content_terms)
+    monkeypatch.setattr(memory_moments, "expanded_terms_for_query", fake_expanded_terms)
+
+    results = store.search_moments("慢查询", limit=5)
+
+    assert len(results) == 3
+    assert calls == {"terms": 1, "expanded": 1}
 
 
 def test_moment_store_builds_context_and_temperature_edges(test_config):
