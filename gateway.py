@@ -96,6 +96,8 @@ FAVORITE_MEMORY_MARKER = "[[ombre:favorite]]"
 RETRYABLE_UPSTREAM_STATUS_CODES = {401, 403, 429, 500, 502, 503, 504}
 CHAT_STREAM_KEEPALIVE_SECONDS = 15.0
 GEMINI_NATIVE_STREAM_KEEPALIVE_SECONDS = 15.0
+GEMINI_NATIVE_JSON_KEEPALIVE_SECONDS = 15.0
+JSON_KEEPALIVE_CHUNK = b" \n"
 QUERY_PLANNER_GENERIC_TERMS = {
     "recent",
     "memory",
@@ -1278,91 +1280,97 @@ class GatewayService:
             trace_id=trace_id,
         )
 
-        try:
-            openai_payload = self._gemini_native_request_to_openai(payload, model)
-            current_query_override = self._current_query_override_from_headers(request.headers)
-            extracted_user_message = self._extract_last_user_query(openai_payload.get("messages", []))
-            persona_user_message = (
-                current_query_override
-                if is_coordinator_request
-                else (extracted_user_message or current_query_override)
-            )
-            is_tool_continuation = self._gemini_native_request_has_function_response(payload)
-            query_override = "" if is_tool_continuation else current_query_override
-            forward_openai_payload, recalled_ids, injection_debug = await self.prepare_payload(
-                openai_payload,
-                session_id,
-                include_debug=True,
-                query_override=query_override,
-            )
-            forward_payload = (
-                self._openai_payload_to_gemini_native_request(payload, forward_openai_payload)
-                if recalled_ids is not None
-                else deepcopy(payload)
-            )
-            self.debug_trace.write(
-                "gateway",
-                "prepared_payload",
-                payload={
-                    "route": "/v1beta/models/:generateContent",
-                    "session_id": session_id,
-                    "client": client_label,
-                    "client_role": client_role,
-                    "recalled_ids": recalled_ids,
-                    "injection_debug": injection_debug,
-                    "body": forward_payload,
-                },
+        async def build_response() -> Response:
+            try:
+                openai_payload = self._gemini_native_request_to_openai(payload, model)
+                current_query_override = self._current_query_override_from_headers(request.headers)
+                extracted_user_message = self._extract_last_user_query(openai_payload.get("messages", []))
+                persona_user_message = (
+                    current_query_override
+                    if is_coordinator_request
+                    else (extracted_user_message or current_query_override)
+                )
+                is_tool_continuation = self._gemini_native_request_has_function_response(payload)
+                query_override = "" if is_tool_continuation else current_query_override
+                forward_openai_payload, recalled_ids, injection_debug = await self.prepare_payload(
+                    openai_payload,
+                    session_id,
+                    include_debug=True,
+                    query_override=query_override,
+                )
+                forward_payload = (
+                    self._openai_payload_to_gemini_native_request(payload, forward_openai_payload)
+                    if recalled_ids is not None
+                    else deepcopy(payload)
+                )
+                self.debug_trace.write(
+                    "gateway",
+                    "prepared_payload",
+                    payload={
+                        "route": "/v1beta/models/:generateContent",
+                        "session_id": session_id,
+                        "client": client_label,
+                        "client_role": client_role,
+                        "recalled_ids": recalled_ids,
+                        "injection_debug": injection_debug,
+                        "body": forward_payload,
+                    },
+                    trace_id=trace_id,
+                )
+            except ValueError as exc:
+                return JSONResponse(
+                    {"error": {"message": str(exc), "type": "invalid_request_error"}},
+                    status_code=400,
+                )
+            except RuntimeError as exc:
+                return JSONResponse(
+                    {"error": {"message": str(exc), "type": "server_error"}},
+                    status_code=503,
+                )
+
+            upstream_response = await self._forward_gemini_native_upstream(
+                forward_payload,
+                model,
                 trace_id=trace_id,
+                gateway_route="/v1beta/models/:generateContent",
             )
-        except ValueError as exc:
-            return JSONResponse(
-                {"error": {"message": str(exc), "type": "invalid_request_error"}},
-                status_code=400,
-            )
-        except RuntimeError as exc:
-            return JSONResponse(
-                {"error": {"message": str(exc), "type": "server_error"}},
-                status_code=503,
-            )
+            if 200 <= upstream_response.status_code < 300:
+                assistant_message = (
+                    None
+                    if is_coordinator_request
+                    else self._extract_assistant_message_from_gemini_native_response(upstream_response)
+                )
+                await self._record_successful_round(
+                    session_id,
+                    recalled_ids,
+                    injection_debug,
+                    user_message="" if is_coordinator_request else persona_user_message,
+                    assistant_message=assistant_message,
+                    model=model,
+                    client=client_label,
+                    route="/v1beta/models/:generateContent",
+                    upstream_usage=self._usage_from_gemini_native_response(upstream_response),
+                )
+                if persona_user_message:
+                    if is_coordinator_request:
+                        logger.info(
+                            "Gateway Gemini native persona post-update deferred | session=%s reason=coordinator_client_role",
+                            session_id,
+                        )
+                    else:
+                        await self._update_persona_after_assistant_message(
+                            session_id,
+                            persona_user_message,
+                            assistant_message,
+                            recalled_ids or [],
+                        )
 
-        upstream_response = await self._forward_gemini_native_upstream(
-            forward_payload,
-            model,
-            trace_id=trace_id,
-            gateway_route="/v1beta/models/:generateContent",
-        )
-        if 200 <= upstream_response.status_code < 300:
-            assistant_message = (
-                None
-                if is_coordinator_request
-                else self._extract_assistant_message_from_gemini_native_response(upstream_response)
-            )
-            await self._record_successful_round(
-                session_id,
-                recalled_ids,
-                injection_debug,
-                user_message="" if is_coordinator_request else persona_user_message,
-                assistant_message=assistant_message,
-                model=model,
-                client=client_label,
-                route="/v1beta/models/:generateContent",
-                upstream_usage=self._usage_from_gemini_native_response(upstream_response),
-            )
-            if persona_user_message:
-                if is_coordinator_request:
-                    logger.info(
-                        "Gateway Gemini native persona post-update deferred | session=%s reason=coordinator_client_role",
-                        session_id,
-                    )
-                else:
-                    await self._update_persona_after_assistant_message(
-                        session_id,
-                        persona_user_message,
-                        assistant_message,
-                        recalled_ids or [],
-                    )
+            return self._proxy_response(upstream_response)
 
-        return self._proxy_response(upstream_response)
+        if is_coordinator_request:
+            return self._json_keepalive_response(build_response())
+
+        return await build_response()
 
     async def handle_gemini_stream_generate_content(self, request: Request) -> Response:
         auth_result = self._authorize(request.headers.get("Authorization", ""))
@@ -4220,6 +4228,58 @@ class GatewayService:
                 status_code=upstream_response.status_code,
                 media_type=content_type,
             )
+
+    def _json_keepalive_response(
+        self,
+        response_coro,
+        *,
+        interval_seconds: float | None = None,
+    ) -> StreamingResponse:
+        keepalive_interval = (
+            GEMINI_NATIVE_JSON_KEEPALIVE_SECONDS
+            if interval_seconds is None
+            else interval_seconds
+        )
+
+        async def body():
+            task = asyncio.create_task(response_coro)
+            try:
+                while True:
+                    done, _ = await asyncio.wait({task}, timeout=keepalive_interval)
+                    if done:
+                        response = task.result()
+                        final_body = getattr(response, "body", b"")
+                        if isinstance(final_body, str):
+                            final_body = final_body.encode("utf-8")
+                        yield final_body
+                        return
+                    yield JSON_KEEPALIVE_CHUNK
+            except Exception as exc:
+                logger.exception("Gateway JSON keepalive response failed: %s", exc)
+                yield json.dumps(
+                    {
+                        "error": {
+                            "message": str(exc),
+                            "type": "server_error",
+                        }
+                    },
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            finally:
+                if not task.done():
+                    task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await task
+
+        return StreamingResponse(
+            body(),
+            status_code=200,
+            media_type="application/json",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     def _anthropic_request_to_openai(self, payload: dict) -> dict:
         messages = payload.get("messages")
