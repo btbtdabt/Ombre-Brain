@@ -1675,6 +1675,30 @@ class GatewayService:
 
         all_buckets = await self.bucket_mgr.list_all(include_archive=False)
         current_user_query = str(query_override or "").strip() or self._extract_current_turn_user_query(messages)
+        prepare_started_at = time.perf_counter()
+
+        def log_prepare_stage(stage: str, **extra: Any) -> None:
+            if session_id != "relay-coordinator":
+                return
+            logger.info(
+                "Gateway coordinator prepare stage | session=%s stage=%s elapsed_ms=%s query_chars=%s extra=%s",
+                session_id,
+                stage,
+                int((time.perf_counter() - prepare_started_at) * 1000),
+                len(current_user_query),
+                extra,
+            )
+
+        log_prepare_stage("start", bucket_count=len(all_buckets))
+
+        def context_length(value: Any) -> int:
+            if isinstance(value, list):
+                return sum(
+                    len(str(item.get("content") if isinstance(item, dict) else item or ""))
+                    for item in value
+                )
+            return len(str(value or ""))
+
         is_new_user_turn = bool(current_user_query)
         has_handoff_context = self._messages_contain_handoff_context(messages)
         is_handoff_trigger_query = self._query_is_handoff_trigger(current_user_query)
@@ -1775,10 +1799,12 @@ class GatewayService:
                 session_id,
                 self.current_inner_state_interval_rounds,
             ):
+                log_prepare_stage("persona_pre_reply_start")
                 persona_state = await self.persona_engine.build_pre_reply_guidance(
                     session_id, current_user_query
                 )
                 persona_block = self.persona_engine.format_state_block(persona_state)
+                log_prepare_stage("persona_pre_reply_done", persona_chars=len(persona_block))
             if self.persona_engine.enabled and persona_state is None:
                 persona_state = self._get_persona_state_for_context_mode(session_id)
             context_mode = self._classify_context_mode(current_user_query, persona_state)
@@ -1807,6 +1833,7 @@ class GatewayService:
                     suppressed_moments = []
                     suppressed_buckets = []
                 elif self.retrieval_mode == "bucket":
+                    log_prepare_stage("dynamic_bucket_recall_start")
                     selected_buckets, suppressed_buckets, query_planner_debug = await self._select_dynamic_buckets(
                         current_user_query,
                         session_id,
@@ -1837,8 +1864,16 @@ class GatewayService:
                         recalled_moments.append(moment)
                     moment_candidates = list(recalled_moments)
                     suppressed_moments = []
+                    log_prepare_stage("dynamic_bucket_recall_done", recalled=len(recalled_moments))
                 else:
+                    log_prepare_stage("moment_graph_refresh_start")
                     all_moments, grouped_moments, moment_edges = self._refresh_moment_graph(all_buckets)
+                    log_prepare_stage(
+                        "moment_graph_refresh_done",
+                        moments=len(all_moments),
+                        edges=len(moment_edges),
+                    )
+                    log_prepare_stage("dynamic_moment_recall_start")
                     (
                         recalled_moments,
                         moment_candidates,
@@ -1852,9 +1887,15 @@ class GatewayService:
                         grouped_moments,
                         include_query_planner_debug=True,
                     )
+                    log_prepare_stage(
+                        "dynamic_moment_recall_done",
+                        recalled=len(recalled_moments),
+                        candidates=len(moment_candidates),
+                    )
             else:
                 suppressed_moments = []
                 suppressed_buckets = []
+            log_prepare_stage("format_recalled_start", recalled=len(recalled_moments))
             recalled_memory = await self._format_recalled_moments(
                 recalled_moments,
                 grouped_moments,
@@ -1862,6 +1903,7 @@ class GatewayService:
                 self.recalled_budget,
                 current_user_query,
             )
+            log_prepare_stage("format_recalled_done", recalled_chars=len(recalled_memory))
             date_persona_trace_requested = (
                 date_recall_requested
                 or self._query_requests_date_persona_trace(current_user_query)
@@ -1884,14 +1926,19 @@ class GatewayService:
                     all_buckets,
                 )
             if self._should_inject_interval(session_id, self.relationship_weather_interval_rounds):
+                log_prepare_stage("relationship_weather_start")
                 relationship_weather = await self._build_relationship_weather_block(all_buckets)
+                log_prepare_stage("relationship_weather_done", chars=len(relationship_weather))
             if (
                 include_favorite_memory
                 or self._query_requests_favorite_memory(current_user_query)
                 or self._should_inject_interval(session_id, self.favorite_memory_interval_rounds)
             ):
+                log_prepare_stage("favorite_memory_start")
                 favorite_memory, favorite_ids = await self._build_favorite_memory_block(all_buckets, session_id)
+                log_prepare_stage("favorite_memory_done", chars=len(favorite_memory), ids=len(favorite_ids))
             if self.retrieval_mode == "graph":
+                log_prepare_stage("diffused_memory_start")
                 related_memory, diffused_moment_debug = self._build_moment_diffused_memory_with_debug(
                     recalled_moments,
                     moment_candidates,
@@ -1900,6 +1947,7 @@ class GatewayService:
                     current_user_query,
                     context_mode=context_mode,
                 )
+                log_prepare_stage("diffused_memory_done", chars=len(related_memory))
             else:
                 related_memory = ""
             current_direct_bucket_ids = [
@@ -1937,6 +1985,11 @@ class GatewayService:
                 current_diffused_moment_ids=current_diffused_moment_ids,
                 recalled_memory=recalled_memory,
             )
+            log_prepare_stage(
+                "targeted_memory_detail_done",
+                chars=len(targeted_memory_detail),
+                accepted=len(targeted_memory_detail_debug.get("accepted_ids", []) or []),
+            )
             can_retry_memory_detail = payload.get("stream") is not True
             if self.memory_detail_recall_enabled and can_retry_memory_detail and (
                 recalled_memory.strip()
@@ -1972,9 +2025,17 @@ class GatewayService:
                         current_user_query,
                         has_reliable_dynamic_context=reliable_dynamic_context,
                     )
+                log_prepare_stage("recent_context_done", chars=len(recent_context))
+            log_prepare_stage("dream_context_start")
             dream_context, dream_context_status = await self._build_dream_context_block(
                 current_user_query,
                 session_id,
+            )
+            log_prepare_stage(
+                "dream_context_done",
+                chars=len(dream_context),
+                status=dream_context_status.get("status"),
+                reason=dream_context_status.get("reason"),
             )
             injected_ids = list(
                 dict.fromkeys(
@@ -2016,6 +2077,11 @@ class GatewayService:
             handoff_tool_hint=handoff_tool_hint,
             context_mode=context_mode,
         )
+        log_prepare_stage(
+            "context_messages_built",
+            stable_chars=context_length(stable_context),
+            dynamic_chars=context_length(dynamic_context),
+        )
 
         forward_payload = deepcopy(payload)
         forward_payload["model"] = model
@@ -2027,6 +2093,7 @@ class GatewayService:
         )
         self._apply_prompt_cache_hints(forward_payload, session_id)
         forward_payload["stream"] = payload.get("stream") is True
+        log_prepare_stage("done", injected=len(injected_ids or []))
         if include_debug:
             return forward_payload, injected_ids, self._build_injection_debug_payload(
                 model=model,
