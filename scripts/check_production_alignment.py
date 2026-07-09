@@ -27,12 +27,19 @@ EXPECTED = {
     "gateway_base": "https://gateway.btombre.men",
     "relay_base": "https://nuojiji-relay.amydong.workers.dev",
     "final_model": "claude-opus-4-8",
+    "native_final_model": "claude-opus-4-8-native",
     "coordinator_model": "gemini-3.5-flash",
     "required_models": [
         "claude-opus-4-6",
         "claude-opus-4-8",
+        "claude-opus-4-8-native",
         "claude-fable-5",
         "gemini-3.5-flash",
+    ],
+    "proxy_claude_models": [
+        "claude-opus-4-6",
+        "claude-opus-4-8",
+        "claude-fable-5",
     ],
 }
 
@@ -117,6 +124,7 @@ def config_gateway_checks(check: Check, config_path: Path) -> None:
     upstreams = gateway.get("upstreams") if isinstance(gateway.get("upstreams"), list) else []
     by_name = {str(item.get("name")): item for item in upstreams if isinstance(item, dict)}
     anthropic = by_name.get("anthropic", {})
+    anthropic_native = by_name.get("anthropic-native", {})
     gemini = by_name.get("gemini", {})
     check.assert_true(
         anthropic.get("base_url") == "https://claude-proxy.amydong.workers.dev/v1",
@@ -127,8 +135,29 @@ def config_gateway_checks(check: Check, config_path: Path) -> None:
         "local anthropic upstream default_model is claude-opus-4-8",
     )
     check.assert_true(
-        set(EXPECTED["required_models"][:3]).issubset(set(anthropic.get("models") or [])),
+        set(EXPECTED["proxy_claude_models"]).issubset(set(anthropic.get("models") or [])),
         "local anthropic upstream exposes expected Claude models",
+    )
+    check.assert_true(
+        anthropic_native.get("protocol") == "anthropic",
+        "local native anthropic upstream uses Anthropic protocol",
+    )
+    check.assert_true(
+        anthropic_native.get("base_url") == "https://api.anthropic.com/v1",
+        "local native anthropic upstream base_url is official Anthropic /v1",
+    )
+    check.assert_true(
+        anthropic_native.get("default_model") == EXPECTED["native_final_model"],
+        "local native anthropic upstream default_model is claude-opus-4-8-native",
+    )
+    check.assert_true(
+        any(
+            isinstance(item, dict)
+            and item.get("id") == EXPECTED["native_final_model"]
+            and item.get("upstream_model") == EXPECTED["final_model"]
+            for item in (anthropic_native.get("models") or [])
+        ),
+        "local native anthropic upstream maps native alias to Claude 4.8",
     )
     check.assert_true(
         gemini.get("base_url") == "https://gemini.amydong.workers.dev/v1",
@@ -258,7 +287,13 @@ def relay_checks(check: Check, relay_env: dict[str, str], relay_base: str) -> No
     )
     coordinator_error = latest.get("coordinator_error")
     coordinator = latest.get("coordinator") or {}
+    final = latest.get("final") or {}
     check.assert_true(status == 200, "relay debug endpoint is reachable")
+    check.assert_true(final.get("apiType") == "claude", "relay final route uses Anthropic API type")
+    check.assert_true(
+        final.get("model") == EXPECTED["native_final_model"],
+        "relay final route uses native Claude 4.8 alias",
+    )
     check.assert_true(not coordinator_error, "relay coordinator has no error")
     check.assert_true(
         int(coordinator.get("tool_count") or 0) >= 10,

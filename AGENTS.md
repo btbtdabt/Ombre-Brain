@@ -115,7 +115,9 @@ Normal final replies:
 
 - Base URL: `https://gateway.btombre.men/v1`
 - Token: `OMBRE_GATEWAY_TOKEN`
-- Default model: `claude-opus-4-8`
+- Relay API type: `claude` / Anthropic Messages
+- Default relay model: `claude-opus-4-8-native`
+- OpenAI-compatible fallback model: `claude-opus-4-8`
 
 Gemini coordinator/native route:
 
@@ -127,6 +129,7 @@ Expected Gateway models:
 
 - `claude-opus-4-6`
 - `claude-opus-4-8`
+- `claude-opus-4-8-native`
 - `claude-fable-5`
 - `gemini-3.5-flash`
 

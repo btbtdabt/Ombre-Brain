@@ -34,14 +34,21 @@ Expected models:
 ```text
 claude-opus-4-6
 claude-opus-4-8
+claude-opus-4-8-native
 claude-fable-5
 gemini-3.5-flash
 ```
 
-Default final model:
+Default OpenAI-compatible Claude model:
 
 ```text
 claude-opus-4-8
+```
+
+Relay final replies use the Anthropic native Gateway route:
+
+```text
+claude-opus-4-8-native
 ```
 
 ## Ombre Runtime Files
@@ -64,6 +71,17 @@ gateway:
         - "claude-opus-4-6"
         - "claude-opus-4-8"
         - "claude-fable-5"
+    - name: "anthropic-native"
+      protocol: "anthropic"
+      base_url: "https://api.anthropic.com/v1"
+      api_key_env: "OMBRE_GATEWAY_ANTHROPIC_API_KEY"
+      anthropic_version: "2023-06-01"
+      prompt_cache: "anthropic_explicit"
+      prompt_cache_retention: "1h"
+      default_model: "claude-opus-4-8-native"
+      models:
+        - id: "claude-opus-4-8-native"
+          upstream_model: "claude-opus-4-8"
     - name: "gemini"
       base_url: "https://gemini.amydong.workers.dev/v1"
       gemini_base_url: "https://gemini.amydong.workers.dev/v1beta"
@@ -90,8 +108,8 @@ OMBRE_GATEWAY_GEMINI_API_KEY=<Gemini upstream/proxy token>
 ```text
 AGENT_FINAL_API_URL=https://gateway.btombre.men/v1
 AGENT_FINAL_API_KEY=<same value as OMBRE_GATEWAY_TOKEN>
-AGENT_FINAL_MODEL=claude-opus-4-8
-AGENT_FINAL_API_TYPE=openai
+AGENT_FINAL_MODEL=claude-opus-4-8-native
+AGENT_FINAL_API_TYPE=claude
 AGENT_FINAL_OMBRE_SESSION_ID=main
 
 AGENT_COORDINATOR_BASE_URL=https://gateway.btombre.men/v1beta
@@ -119,8 +137,9 @@ The check verifies:
 - local `.env` has the required secret names populated;
 - production Gateway exposes the expected models;
 - production Gateway Claude final route works;
+- production Gateway exposes the native Claude alias;
 - production Gateway native Gemini route works with the Gemini token;
-- relay final route works;
+- relay final route works through Anthropic Messages format;
 - relay coordinator reaches Ombre MCP tools without 404.
 
 If the check fails, do not trust the deployment until the failed line is fixed.
