@@ -12,6 +12,7 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import unquote
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -737,6 +738,7 @@ class GatewayService:
         )
         self.upstreams = self._load_upstreams()
         self._refresh_upstream_model_summary()
+        self.gateway_token_routes = self._load_gateway_token_routes()
 
         self.head_recent_hours = int(self.gateway_cfg.get("head_recent_hours", 72))
         self.recent_context_reentry_idle_hours = float(
@@ -2022,6 +2024,76 @@ class GatewayService:
 
         return self._proxy_response(upstream_response)
 
+    async def handle_gemini_native_model(self, request: Request) -> Response:
+        raw_model_path = unquote(str(request.path_params.get("model") or ""))
+        if raw_model_path.endswith(":streamGenerateContent"):
+            model = raw_model_path[: -len(":streamGenerateContent")]
+            return await self._handle_gemini_native_request(request, model=model, stream=True)
+        if raw_model_path.endswith(":generateContent"):
+            model = raw_model_path[: -len(":generateContent")]
+            return await self._handle_gemini_native_request(request, model=model, stream=False)
+        return JSONResponse(
+            {"error": {"message": "Unsupported Gemini native route", "type": "invalid_request_error"}},
+            status_code=404,
+        )
+
+    async def _handle_gemini_native_request(self, request: Request, *, model: str, stream: bool) -> Response:
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+
+        auth_context = self._auth_context_from_headers(request.headers)
+        model = str(model or auth_context.get("default_model") or self.upstream_default_model).strip()
+        if not model:
+            return JSONResponse(
+                {"error": {"message": "model is required", "type": "invalid_request_error"}},
+                status_code=400,
+            )
+
+        try:
+            payload = await request.json()
+        except Exception:
+            return JSONResponse(
+                {"error": {"message": "Request body must be valid JSON", "type": "invalid_request_error"}},
+                status_code=400,
+            )
+        if not isinstance(payload, dict):
+            return JSONResponse(
+                {"error": {"message": "Request body must be a JSON object", "type": "invalid_request_error"}},
+                status_code=400,
+            )
+
+        logger.info(
+            "Gateway incoming Gemini native request | model=%s stream=%s",
+            model,
+            stream,
+        )
+        try:
+            if stream:
+                upstream_response = await self._open_gemini_native_upstream_stream(payload, model)
+                if not 200 <= upstream_response.status_code < 300:
+                    body = await upstream_response.aread()
+                    await upstream_response.aclose()
+                    return Response(
+                        content=body,
+                        status_code=upstream_response.status_code,
+                        media_type=upstream_response.headers.get("content-type", "application/json"),
+                    )
+                return self._proxy_streaming_response(upstream_response)
+            upstream_response = await self._forward_gemini_native_upstream(payload, model)
+        except ValueError as exc:
+            return JSONResponse(
+                {"error": {"message": str(exc), "type": "invalid_request_error"}},
+                status_code=400,
+            )
+        except RuntimeError as exc:
+            return JSONResponse(
+                {"error": {"message": str(exc), "type": "server_error"}},
+                status_code=503,
+            )
+
+        return self._proxy_response(upstream_response)
+
     async def handle_anthropic_messages(self, request: Request) -> Response:
         auth_result = self._authorize_anthropic_request(request)
         if auth_result is not None:
@@ -3115,7 +3187,7 @@ class GatewayService:
         return route
 
     def _authorize(self, auth_header: str) -> JSONResponse | None:
-        if not self.gateway_token:
+        if not self.gateway_token and not self.gateway_token_routes:
             return JSONResponse(
                 {"error": {"message": "Gateway token is not configured", "type": "server_error"}},
                 status_code=503,
@@ -3128,7 +3200,7 @@ class GatewayService:
                 status_code=401,
             )
 
-        if not secrets.compare_digest(token, self.gateway_token):
+        if self._auth_context_from_token(token) is None:
             return JSONResponse(
                 {"error": {"message": "Invalid gateway token", "type": "authentication_error"}},
                 status_code=401,
@@ -3136,7 +3208,7 @@ class GatewayService:
         return None
 
     def _authorize_anthropic_request(self, request: Request) -> JSONResponse | None:
-        if not self.gateway_token:
+        if not self.gateway_token and not self.gateway_token_routes:
             return self._anthropic_error(
                 "Gateway token is not configured",
                 status_code=503,
@@ -3154,7 +3226,7 @@ class GatewayService:
                 error_type="authentication_error",
             )
 
-        if not secrets.compare_digest(token, self.gateway_token):
+        if self._auth_context_from_token(token) is None:
             return self._anthropic_error(
                 "Invalid gateway token",
                 status_code=401,
@@ -3162,6 +3234,258 @@ class GatewayService:
             )
 
         return None
+
+    def _load_gateway_token_routes(self) -> list[dict[str, str]]:
+        routes: list[dict[str, str]] = []
+        raw_routes = self.gateway_cfg.get("token_routes", [])
+        if isinstance(raw_routes, dict):
+            raw_routes = [
+                {"name": name, **value}
+                for name, value in raw_routes.items()
+                if isinstance(value, dict)
+            ]
+        if isinstance(raw_routes, list):
+            for index, raw in enumerate(raw_routes, start=1):
+                if not isinstance(raw, dict):
+                    continue
+                token_env = str(raw.get("token_env") or raw.get("api_key_env") or "").strip()
+                token = os.environ.get(token_env, "") if token_env else str(raw.get("token") or "").strip()
+                if not token:
+                    continue
+                routes.append(
+                    {
+                        "name": str(raw.get("name") or token_env or f"token-route-{index}").strip(),
+                        "token": token,
+                        "default_model": str(raw.get("default_model") or "").strip(),
+                    }
+                )
+
+        gemini_token = os.environ.get("OMBRE_GATEWAY_GEMINI_TOKEN", "").strip()
+        if gemini_token:
+            routes.append(
+                {
+                    "name": "gemini",
+                    "token": gemini_token,
+                    "default_model": os.environ.get(
+                        "OMBRE_GATEWAY_GEMINI_DEFAULT_MODEL",
+                        "gemini-3.5-flash",
+                    ).strip(),
+                }
+            )
+        return routes
+
+    def _auth_context_from_headers(self, headers: Any) -> dict[str, str]:
+        auth_header = str(headers.get("Authorization", "") or "")
+        scheme, _, bearer_token = auth_header.partition(" ")
+        api_key = str(headers.get("x-api-key", "") or "").strip()
+        token = bearer_token.strip() if scheme.lower() == "bearer" else api_key
+        return self._auth_context_from_token(token) or {}
+
+    def _auth_context_from_token(self, token: str) -> dict[str, str] | None:
+        token = str(token or "").strip()
+        if not token:
+            return None
+        if self.gateway_token and secrets.compare_digest(token, self.gateway_token):
+            return {"name": "default", "default_model": ""}
+        for route in self.gateway_token_routes:
+            route_token = str(route.get("token") or "")
+            if route_token and secrets.compare_digest(token, route_token):
+                return {
+                    "name": str(route.get("name") or ""),
+                    "default_model": str(route.get("default_model") or ""),
+                }
+        return None
+
+    def _gemini_native_endpoint(
+        self,
+        upstream: dict[str, Any],
+        upstream_model: str,
+        *,
+        stream: bool = False,
+    ) -> str:
+        base = str(upstream.get("gemini_base_url") or upstream.get("base_url") or "").rstrip("/")
+        if base.lower().endswith("/openai"):
+            base = base[:-7].rstrip("/")
+        suffix = ":streamGenerateContent" if stream else ":generateContent"
+        if re.search(
+            r"/models/[^/]+:(?:generateContent|streamGenerateContent)(?:\?.*)?$",
+            base,
+            flags=re.IGNORECASE,
+        ):
+            endpoint = re.sub(
+                r":(?:generateContent|streamGenerateContent)(?:\?.*)?$",
+                suffix,
+                base,
+                flags=re.IGNORECASE,
+            )
+            return self._ensure_gemini_stream_sse(endpoint) if stream else endpoint
+        model_path = str(upstream_model or "").strip()
+        if not model_path:
+            raise RuntimeError(f'gateway upstream "{upstream["name"]}" model is not configured')
+        if not model_path.startswith("models/"):
+            model_path = f"models/{model_path}"
+        endpoint = f"{base}/{model_path}{suffix}"
+        return self._ensure_gemini_stream_sse(endpoint) if stream else endpoint
+
+    @staticmethod
+    def _ensure_gemini_stream_sse(url: str) -> str:
+        if re.search(r"(?:\?|&)alt=sse(?:&|$)", url, flags=re.IGNORECASE):
+            return url
+        separator = "&" if "?" in url else "?"
+        return f"{url}{separator}alt=sse"
+
+    def _gemini_native_headers(
+        self,
+        upstream: dict[str, Any],
+        key_entry: dict[str, str],
+        url: str,
+    ) -> dict[str, str]:
+        auth_mode = str(upstream.get("gemini_auth") or "").strip().lower()
+        if not auth_mode:
+            auth_mode = "google" if "generativelanguage.googleapis.com" in url else "bearer"
+        headers = {"Content-Type": "application/json"}
+        if auth_mode in {"google", "x-goog-api-key", "api-key", "api_key"}:
+            headers["x-goog-api-key"] = key_entry["value"]
+        elif auth_mode == "both":
+            headers["Authorization"] = f"Bearer {key_entry['value']}"
+            headers["x-goog-api-key"] = key_entry["value"]
+        else:
+            headers["Authorization"] = f"Bearer {key_entry['value']}"
+        return headers
+
+    async def _forward_gemini_native_upstream(self, payload: dict, model: str) -> httpx.Response:
+        route = self._resolve_upstream_for_model(model)
+        upstream = route["upstream"]
+        upstream_model = route["upstream_model"]
+        url = self._gemini_native_endpoint(upstream, upstream_model)
+        key_entries = self._available_upstream_api_keys(upstream)
+        last_error: Exception | None = None
+        last_response: httpx.Response | None = None
+
+        for attempt, key_entry in enumerate(key_entries, start=1):
+            started_at = time.perf_counter()
+            try:
+                response = await self.http_client.post(
+                    url,
+                    headers=self._gemini_native_headers(upstream, key_entry, url),
+                    json=payload,
+                )
+            except httpx.RequestError as exc:
+                latency_ms = int((time.perf_counter() - started_at) * 1000)
+                last_error = exc
+                self._cool_down_upstream_key(upstream, key_entry)
+                logger.warning(
+                    "Gateway Gemini native upstream request failed | upstream=%s key=%s "
+                    "model=%s upstream_model=%s attempt=%s/%s latency_ms=%s error=%s",
+                    upstream["name"],
+                    key_entry["label"],
+                    model,
+                    upstream_model,
+                    attempt,
+                    len(key_entries),
+                    latency_ms,
+                    exc,
+                )
+                continue
+
+            latency_ms = int((time.perf_counter() - started_at) * 1000)
+            last_response = response
+            logger.info(
+                "Gateway Gemini native upstream response | upstream=%s key=%s model=%s "
+                "upstream_model=%s status=%s attempt=%s/%s latency_ms=%s",
+                upstream["name"],
+                key_entry["label"],
+                model,
+                upstream_model,
+                response.status_code,
+                attempt,
+                len(key_entries),
+                latency_ms,
+            )
+            if 200 <= response.status_code < 300:
+                self._clear_upstream_key_cooldown(upstream, key_entry)
+                return response
+            if not self._should_retry_upstream_status(response.status_code):
+                return response
+            self._cool_down_upstream_key(upstream, key_entry)
+            if attempt < len(key_entries):
+                continue
+            return response
+
+        if last_response is not None:
+            return last_response
+        return self._upstream_request_error_response(upstream, model, last_error)
+
+    async def _open_gemini_native_upstream_stream(self, payload: dict, model: str) -> httpx.Response:
+        route = self._resolve_upstream_for_model(model)
+        upstream = route["upstream"]
+        upstream_model = route["upstream_model"]
+        url = self._gemini_native_endpoint(upstream, upstream_model, stream=True)
+        key_entries = self._available_upstream_api_keys(upstream)
+        last_error: Exception | None = None
+        last_response: httpx.Response | None = None
+
+        for attempt, key_entry in enumerate(key_entries, start=1):
+            started_at = time.perf_counter()
+            try:
+                request = self.http_client.build_request(
+                    "POST",
+                    url,
+                    headers=self._gemini_native_headers(upstream, key_entry, url),
+                    json=payload,
+                )
+                response = await self.http_client.send(request, stream=True)
+            except httpx.RequestError as exc:
+                latency_ms = int((time.perf_counter() - started_at) * 1000)
+                last_error = exc
+                self._cool_down_upstream_key(upstream, key_entry)
+                logger.warning(
+                    "Gateway Gemini native stream failed | upstream=%s key=%s model=%s "
+                    "upstream_model=%s attempt=%s/%s latency_ms=%s error=%s",
+                    upstream["name"],
+                    key_entry["label"],
+                    model,
+                    upstream_model,
+                    attempt,
+                    len(key_entries),
+                    latency_ms,
+                    exc,
+                )
+                continue
+
+            latency_ms = int((time.perf_counter() - started_at) * 1000)
+            last_response = response
+            logger.info(
+                "Gateway Gemini native stream response | upstream=%s key=%s model=%s "
+                "upstream_model=%s status=%s attempt=%s/%s latency_ms=%s",
+                upstream["name"],
+                key_entry["label"],
+                model,
+                upstream_model,
+                response.status_code,
+                attempt,
+                len(key_entries),
+                latency_ms,
+            )
+            if 200 <= response.status_code < 300:
+                self._clear_upstream_key_cooldown(upstream, key_entry)
+                return response
+            body = await response.aread()
+            await response.aclose()
+            buffered = httpx.Response(
+                status_code=response.status_code,
+                content=body,
+                headers=response.headers,
+            )
+            if not self._should_retry_upstream_status(response.status_code):
+                return buffered
+            self._cool_down_upstream_key(upstream, key_entry)
+            if attempt >= len(key_entries):
+                return buffered
+
+        if last_response is not None:
+            return last_response
+        return self._upstream_request_error_response(upstream, model, last_error)
 
     async def _forward_upstream(self, payload: dict) -> httpx.Response:
         model = str(payload.get("model") or "").strip()
@@ -4781,6 +5105,25 @@ class GatewayService:
                 status_code=upstream_response.status_code,
                 media_type=content_type,
             )
+
+    def _proxy_streaming_response(self, upstream_response: httpx.Response) -> StreamingResponse:
+        async def body_iterator():
+            try:
+                async for chunk in upstream_response.aiter_bytes():
+                    if chunk:
+                        yield chunk
+            finally:
+                await upstream_response.aclose()
+
+        return StreamingResponse(
+            body_iterator(),
+            status_code=upstream_response.status_code,
+            media_type=upstream_response.headers.get("content-type", "text/event-stream"),
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     def _anthropic_request_to_openai(self, payload: dict) -> dict:
         messages = payload.get("messages")
@@ -16503,10 +16846,19 @@ class GatewayService:
                 prompt_cache_retention = str(raw.get("prompt_cache_retention") or "").strip()
                 anthropic_version = str(raw.get("anthropic_version") or "2023-06-01").strip()
                 anthropic_beta = str(raw.get("anthropic_beta") or "").strip()
+                gemini_base_url = str(
+                    raw.get("gemini_base_url")
+                    or raw.get("native_base_url")
+                    or raw.get("gemini_native_base_url")
+                    or ""
+                ).rstrip("/")
+                gemini_auth = str(raw.get("gemini_auth") or "").strip().lower()
                 upstreams.append(
                     {
                         "name": name,
                         "base_url": base_url,
+                        "gemini_base_url": gemini_base_url,
+                        "gemini_auth": gemini_auth,
                         "protocol": protocol,
                         "api_key": api_keys[0]["value"] if api_keys else "",
                         "api_keys": api_keys,
@@ -16530,6 +16882,13 @@ class GatewayService:
             {
                 "name": "default",
                 "base_url": self.upstream_base_url,
+                "gemini_base_url": str(
+                    self.gateway_cfg.get("gemini_base_url")
+                    or self.gateway_cfg.get("native_base_url")
+                    or self.gateway_cfg.get("gemini_native_base_url")
+                    or ""
+                ).rstrip("/"),
+                "gemini_auth": str(self.gateway_cfg.get("gemini_auth") or "").strip().lower(),
                 "protocol": self._normalize_upstream_protocol(self.gateway_cfg.get("upstream_protocol")),
                 "api_key": self.upstream_api_key,
                 "api_keys": self._api_key_entries_from_config(
@@ -16660,6 +17019,9 @@ def create_gateway_app(
     async def chat_completions(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_chat(request)
 
+    async def gemini_native_model(request: Request) -> Response:
+        return await request.app.state.gateway_service.handle_gemini_native_model(request)
+
     async def anthropic_messages(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_anthropic_messages(request)
 
@@ -16692,6 +17054,8 @@ def create_gateway_app(
             Route("/api/debug/upstream-usage", upstream_usage_debug, methods=["GET"]),
             Route("/v1/models", models, methods=["GET"]),
             Route("/v1/chat/completions", chat_completions, methods=["POST"]),
+            Route("/v1beta/models/{model:path}", gemini_native_model, methods=["POST"]),
+            Route("/models/{model:path}", gemini_native_model, methods=["POST"]),
             Route("/v1/messages", anthropic_messages, methods=["POST"]),
         ],
         lifespan=lifespan,
