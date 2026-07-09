@@ -118,8 +118,9 @@ Normal final replies:
 - Relay API type: `claude` / Anthropic Messages
 - Default relay model: `claude-opus-4-8-native`
 - OpenAI-compatible fallback model: `claude-opus-4-8`
+- Relay exposes Ombre MCP tools directly to the native Claude final model; there is no separate relay coordinator in the main chat path.
 
-Gemini coordinator/native route:
+Gemini native route:
 
 - Base URL: `https://gateway.btombre.men/v1beta`
 - Token: `OMBRE_GATEWAY_GEMINI_TOKEN`

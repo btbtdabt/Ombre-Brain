@@ -23,7 +23,7 @@ OpenAI-compatible final chat base:
 https://gateway.btombre.men/v1
 ```
 
-Native Gemini coordinator base:
+Native Gemini auxiliary base:
 
 ```text
 https://gateway.btombre.men/v1beta
@@ -96,7 +96,7 @@ gateway:
 
 ```text
 OMBRE_GATEWAY_TOKEN=<normal Claude gateway token>
-OMBRE_GATEWAY_GEMINI_TOKEN=<Gemini coordinator gateway token>
+OMBRE_GATEWAY_GEMINI_TOKEN=<Gemini gateway token>
 OMBRE_GATEWAY_ANTHROPIC_API_KEY=<Claude upstream access token>
 OMBRE_GATEWAY_GEMINI_API_KEY=<Gemini upstream/proxy token>
 ```
@@ -112,14 +112,10 @@ AGENT_FINAL_MODEL=claude-opus-4-8-native
 AGENT_FINAL_API_TYPE=claude
 AGENT_FINAL_OMBRE_SESSION_ID=main
 
-AGENT_COORDINATOR_BASE_URL=https://gateway.btombre.men/v1beta
-AGENT_COORDINATOR_API_KEY=<same value as OMBRE_GATEWAY_GEMINI_TOKEN>
-AGENT_COORDINATOR_AUTH_TYPE=bearer
-AGENT_COORDINATOR_MODEL=gemini-3.5-flash
-AGENT_COORDINATOR_SESSION_ID=relay-coordinator
-
 AGENT_MCP_URL=https://brain.btombre.men/mcp
 AGENT_MCP_BEARER_TOKEN=<same value as OMBRE_CHATGPT_OAUTH_ACCESS_TOKEN or configured MCP bearer>
+AGENT_FINAL_MAX_TOOL_ROUNDS=8
+AGENT_FINAL_MCP_TIMEOUT_MS=600000
 ```
 
 ## Required Check
@@ -140,6 +136,6 @@ The check verifies:
 - production Gateway exposes the native Claude alias;
 - production Gateway native Gemini route works with the Gemini token;
 - relay final route works through Anthropic Messages format;
-- relay coordinator reaches Ombre MCP tools without 404.
+- relay native Claude final tool loop reaches Ombre MCP tools without 404.
 
 If the check fails, do not trust the deployment until the failed line is fixed.

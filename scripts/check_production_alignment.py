@@ -285,19 +285,19 @@ def relay_checks(check: Check, relay_env: dict[str, str], relay_base: str) -> No
         ),
         items[0] if items else {},
     )
-    coordinator_error = latest.get("coordinator_error")
-    coordinator = latest.get("coordinator") or {}
     final = latest.get("final") or {}
+    final_mcp = latest.get("final_mcp") or {}
     check.assert_true(status == 200, "relay debug endpoint is reachable")
     check.assert_true(final.get("apiType") == "claude", "relay final route uses Anthropic API type")
     check.assert_true(
         final.get("model") == EXPECTED["native_final_model"],
         "relay final route uses native Claude 4.8 alias",
     )
-    check.assert_true(not coordinator_error, "relay coordinator has no error")
+    check.assert_true(not latest.get("coordinator"), "relay main route has no coordinator debug block")
+    check.assert_true(final.get("toolLoop") is True, "relay final route uses native Claude MCP tool loop")
     check.assert_true(
-        int(coordinator.get("tool_count") or 0) >= 10,
-        "relay coordinator sees Ombre MCP tools",
+        int(final_mcp.get("tool_count") or 0) >= 10,
+        "relay native Claude final tool loop sees Ombre MCP tools",
     )
 
 
