@@ -9,6 +9,8 @@ from typing import Any
 import jieba
 import jieba.analyse
 
+from favorite_tags import favorite_memory_aliases
+from identity import identity_names
 from utils import now_iso, strip_affect_anchor, strip_wikilinks
 
 
@@ -57,7 +59,6 @@ DEFAULT_WORD_MAP_STOPWORDS = {
     "event",
     "favorite",
     "feel",
-    "haven_favorite",
     "memory",
     "moment",
     "original",
@@ -163,14 +164,23 @@ DEFAULT_OVERVIEW_PRIORITY_TERMS = {
 }
 DEFAULT_OVERVIEW_HUB_TERMS = {
     "ombre-brain",
-    "haven",
-    "小雨",
 }
 DEFAULT_WEAK_HINT_TERMS = {
     "人机恋",
     "恋爱",
 }
 DEFAULT_WEAK_HINT_WEIGHT = 0.25
+DEFAULT_RARE_NAME_MAX_BUCKET_COUNT = 3
+RARE_NAME_CARD_SOURCES = {
+    "name",
+    "subject",
+    "title_keyword",
+    "tag:axis",
+    "tag:content",
+    "tag:entity",
+    "tag:topic",
+}
+RECALL_TAG_PREFIXES = {"axis", "content", "entity", "topic"}
 
 
 @dataclass(frozen=True)
@@ -198,11 +208,22 @@ class WordMapStore:
             1.0,
         )
         self.db_path = str(cfg.get("db_path") or os.path.join(state_dir, "word_map.sqlite"))
+        self.identity_stopwords = {
+            _normalize_term(item)
+            for item in _identity_stopwords(config)
+            if _normalize_term(item)
+        }
+        self.identity_stopword_keys = {
+            _compact_term(item)
+            for item in self.identity_stopwords
+            if _compact_term(item)
+        }
         self.stopwords = {
             _normalize_term(item)
             for item in itertools.chain(
                 DEFAULT_WORD_MAP_STOPWORDS,
-                _identity_stopwords(config),
+                self.identity_stopwords,
+                _favorite_tag_stopwords(config),
                 cfg.get("stopwords", []) or [],
             )
             if _normalize_term(item)
@@ -243,7 +264,11 @@ class WordMapStore:
         }
         self.overview_hub_terms = {
             _normalize_term(item)
-            for item in itertools.chain(DEFAULT_OVERVIEW_HUB_TERMS, cfg.get("overview_hub_terms", []) or [])
+            for item in itertools.chain(
+                DEFAULT_OVERVIEW_HUB_TERMS,
+                self.identity_stopwords,
+                cfg.get("overview_hub_terms", []) or [],
+            )
             if _normalize_term(item)
         }
         self.weak_hint_terms = {
@@ -251,6 +276,12 @@ class WordMapStore:
             for item in itertools.chain(DEFAULT_WEAK_HINT_TERMS, cfg.get("weak_hint_terms", []) or [])
             if _normalize_term(item)
         }
+        self.rare_name_max_bucket_count = _int_between(
+            cfg.get("rare_name_max_bucket_count"),
+            DEFAULT_RARE_NAME_MAX_BUCKET_COUNT,
+            1,
+            20,
+        )
         self.private_terms = {
             _normalize_term(item)
             for item in itertools.chain(
@@ -334,7 +365,7 @@ class WordMapStore:
 
     def extract_bucket_terms(self, bucket: dict[str, Any]) -> list[WordMapTerm]:
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
-        text = _bucket_text(bucket)
+        text = _bucket_text_for_tfidf(bucket)
         terms: dict[str, WordMapTerm] = {}
 
         def add(raw: Any, source: str, kind: str, weight: float) -> None:
@@ -359,8 +390,11 @@ class WordMapStore:
             add(raw, "keyword", "keyword", 0.86)
             jieba.add_word(str(raw), freq=20000)
         for raw in _list_text(meta.get("tags")):
-            add(raw, "tag", "keyword", 0.78)
-            jieba.add_word(str(raw), freq=16000)
+            if self._tag_is_identity_address(raw):
+                continue
+            tag_term, tag_source = self._tag_recall_term_and_source(raw)
+            add(tag_term, tag_source, "keyword", 0.78)
+            jieba.add_word(str(tag_term), freq=16000)
         for raw in _list_text(meta.get("domain")):
             add(raw, "domain", "keyword", 0.62)
             jieba.add_word(str(raw), freq=12000)
@@ -540,6 +574,7 @@ class WordMapStore:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
+            variant_scores = self._hint_variant_terms(conn, cleaned_terms)
             neighbor_terms = [term for term in cleaned_terms if term not in self.weak_hint_terms]
             neighbor_scores = self._hint_neighbor_terms(conn, neighbor_terms, neighbor_limit)
             term_sources = {
@@ -550,6 +585,8 @@ class WordMapStore:
                 }
                 for term in cleaned_terms
             }
+            for term, info in variant_scores.items():
+                term_sources[term] = info
             for term, info in neighbor_scores.items():
                 term_sources[term] = info
 
@@ -559,10 +596,18 @@ class WordMapStore:
             placeholders = ",".join("?" for _ in card_terms)
             rows = conn.execute(
                 f"""
-                SELECT bucket_id, term, source, kind, weight, updated_at
-                FROM word_card_nodes
-                WHERE term IN ({placeholders})
-                ORDER BY weight DESC, bucket_id ASC
+                SELECT
+                    c.bucket_id,
+                    c.term,
+                    c.source,
+                    c.kind,
+                    c.weight,
+                    c.updated_at,
+                    COALESCE(n.bucket_count, 1) AS bucket_count
+                FROM word_card_nodes c
+                LEFT JOIN word_nodes n ON n.term = c.term
+                WHERE c.term IN ({placeholders})
+                ORDER BY c.weight DESC, c.bucket_id ASC
                 """,
                 tuple(card_terms),
             ).fetchall()
@@ -591,8 +636,11 @@ class WordMapStore:
                 {
                     "terms": [],
                     "direct_terms": [],
+                    "variant_terms": [],
                     "neighbor_terms": [],
                     "anchor_terms": [],
+                    "rare_name_terms": [],
+                    "rare_name_sources": [],
                 },
             )
             source_terms = [
@@ -606,10 +654,29 @@ class WordMapStore:
                 "score": round(contribution, 4),
                 "source_terms": list(source_terms),
                 "card_source": str(row["source"] or ""),
+                "bucket_count": int(row["bucket_count"] or 1),
                 "weak_hint": term in self.weak_hint_terms,
             }
+            if self._is_rare_name_match(
+                term,
+                source_kind=str(source_info.get("kind") or ""),
+                card_source=str(row["source"] or ""),
+                bucket_count=int(row["bucket_count"] or 1),
+            ):
+                row_payload["rare_name_match"] = True
+                if term not in bucket_evidence["rare_name_terms"]:
+                    bucket_evidence["rare_name_terms"].append(term)
+                card_source = str(row["source"] or "")
+                if card_source and card_source not in bucket_evidence["rare_name_sources"]:
+                    bucket_evidence["rare_name_sources"].append(card_source)
             bucket_evidence["terms"].append(row_payload)
-            target_key = "direct_terms" if source_info.get("kind") == "direct" else "neighbor_terms"
+            source_kind = str(source_info.get("kind") or "")
+            if source_kind == "direct":
+                target_key = "direct_terms"
+            elif source_kind == "variant":
+                target_key = "variant_terms"
+            else:
+                target_key = "neighbor_terms"
             if term not in bucket_evidence[target_key]:
                 bucket_evidence[target_key].append(term)
             for source_term in source_terms:
@@ -653,10 +720,82 @@ class WordMapStore:
                 }
                 for term, info in neighbor_scores.items()
             ],
+            "variants": [
+                {
+                    "term": term,
+                    "score": round(float(info.get("weight", 0.0)), 4),
+                    "source_terms": list(info.get("sources") or []),
+                }
+                for term, info in variant_scores.items()
+            ],
             "bucket_scores": {bucket_id: round(scores[bucket_id], 4) for bucket_id in returned_ids},
             "anchor_bucket_scores": anchor_bucket_scores,
             "evidence": {bucket_id: evidence[bucket_id] for bucket_id in returned_ids},
         }
+
+    def _hint_variant_terms(
+        self,
+        conn: sqlite3.Connection,
+        source_terms: list[str],
+    ) -> dict[str, dict[str, Any]]:
+        variants: dict[str, dict[str, Any]] = {}
+        for source_term in source_terms:
+            source_key = _compact_term(source_term)
+            if (
+                not source_key
+                or len(source_key) < 3
+                or source_term in self.weak_hint_terms
+            ):
+                continue
+            rows = conn.execute(
+                """
+                SELECT term, kind, bucket_count, weight
+                FROM word_nodes
+                WHERE bucket_count <= ? AND term LIKE ?
+                ORDER BY bucket_count ASC, LENGTH(term) ASC, weight DESC, term ASC
+                LIMIT 80
+                """,
+                (self.rare_name_max_bucket_count, f"%{source_term}%"),
+            ).fetchall()
+            for row in rows:
+                term = self._clean_term(row["term"])
+                term_key = _compact_term(term)
+                if (
+                    not term
+                    or term == source_term
+                    or not term_key
+                    or len(term_key) <= len(source_key)
+                    or source_key not in term_key
+                    or len(term_key) - len(source_key) > 8
+                    or term in self.weak_hint_terms
+                    or term in self.overview_stopwords
+                ):
+                    continue
+                try:
+                    bucket_count = max(1, int(row["bucket_count"] or 1))
+                    node_weight = float(row["weight"] or 0.0)
+                except (TypeError, ValueError):
+                    bucket_count = 1
+                    node_weight = 0.0
+                proximity = len(source_key) / max(len(term_key), 1)
+                weight = min(0.82, max(0.35, proximity * 0.82))
+                if bucket_count > 1:
+                    weight *= 1.0 / bucket_count
+                if node_weight <= 0:
+                    weight *= 0.7
+                info = variants.setdefault(
+                    term,
+                    {"kind": "variant", "weight": 0.0, "sources": []},
+                )
+                info["weight"] = max(float(info.get("weight", 0.0)), weight)
+                if source_term not in info["sources"]:
+                    info["sources"].append(source_term)
+        return dict(
+            sorted(
+                variants.items(),
+                key=lambda item: (-float(item[1].get("weight", 0.0)), item[0]),
+            )[:12]
+        )
 
     def _hint_neighbor_terms(
         self,
@@ -782,6 +921,74 @@ class WordMapStore:
             return ""
         return term
 
+    def _tag_is_identity_address(self, value: Any) -> bool:
+        term = _normalize_term(value)
+        if not term:
+            return False
+        if self._identity_term_key(term) in self.identity_stopword_keys:
+            return True
+        parts = [
+            part.strip()
+            for part in re.split(r"[:：/#|,，;；]+", term)
+            if part.strip()
+        ]
+        if len(parts) <= 1:
+            return False
+        identity_parts = [part for part in parts if self._identity_term_key(part) in self.identity_stopword_keys]
+        return bool(identity_parts)
+
+    def _tag_recall_term_and_source(self, value: Any) -> tuple[str, str]:
+        term = _normalize_term(value)
+        if not term:
+            return "", "tag"
+        match = re.match(r"^([A-Za-z_][A-Za-z0-9_-]*)\s*[:：]\s*(.+)$", term)
+        if not match:
+            return term, "tag"
+        prefix = match.group(1).strip().lower()
+        body = match.group(2).strip()
+        if prefix not in RECALL_TAG_PREFIXES:
+            return term, "tag"
+        return body, f"tag:{prefix}"
+
+    @staticmethod
+    def _identity_term_key(value: Any) -> str:
+        term = _normalize_term(value)
+        if len(term) <= 1 and not re.fullmatch(r"[A-Za-z0-9_.:/ -]+", term):
+            return term
+        return _compact_term(term)
+
+    def _is_rare_name_match(
+        self,
+        term: str,
+        *,
+        source_kind: str,
+        card_source: str,
+        bucket_count: int,
+    ) -> bool:
+        if source_kind != "direct":
+            return False
+        source = str(card_source or "").strip()
+        if source not in RARE_NAME_CARD_SOURCES:
+            return False
+        if bucket_count > self.rare_name_max_bucket_count:
+            return False
+        normalized = _normalize_term(term)
+        if (
+            not normalized
+            or normalized in self.weak_hint_terms
+            or normalized in self.stopwords
+            or normalized in self.private_terms
+            or normalized in self.overview_stopwords
+        ):
+            return False
+        if re.fullmatch(r"[a-f0-9]{8,40}", normalized):
+            return False
+        if re.fullmatch(r"[\d.:-]+", normalized):
+            return False
+        if source == "title_keyword" and re.fullmatch(r"[\u4e00-\u9fff]{1,2}", normalized):
+            return False
+        return True
+
     def _hint_term_weight(self, term: str) -> float:
         if term in self.weak_hint_terms:
             return self.weak_hint_weight
@@ -805,6 +1012,7 @@ class WordMapStore:
             terms.append(term)
 
         normalized_title = _normalize_term(title).lower()
+        add_term(_compact_title_recall_term(title), forced=True)
         alias_candidates = set(self.overview_priority_terms) | set(self.overview_aliases) | {
             _normalize_term(value) for value in self.overview_aliases.values()
         }
@@ -1055,11 +1263,10 @@ class WordMapStore:
         return False
 
 
-def _bucket_text(bucket: dict[str, Any]) -> str:
+def _bucket_text_for_tfidf(bucket: dict[str, Any]) -> str:
     meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
     parts = [
         str(meta.get("name") or ""),
-        " ".join(_list_text(meta.get("tags"))),
         " ".join(_list_text(meta.get("domain"))),
         strip_wikilinks(strip_affect_anchor(str(bucket.get("content") or ""))),
     ]
@@ -1081,6 +1288,21 @@ def _normalize_term(value: Any) -> str:
     text = re.sub(r"\s+", " ", text)
     text = text.strip("\"'`“”‘’[]【】()（）")
     return text.lower() if re.fullmatch(r"[A-Za-z0-9_.:/ -]+", text) else text
+
+
+def _compact_term(value: Any) -> str:
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff_.:-]+", "", str(value or "").strip().lower())
+
+
+def _compact_title_recall_term(value: Any) -> str:
+    text = _normalize_term(value)
+    if not text:
+        return ""
+    compact = re.sub(r"[\s，。！？、,.!?:：;；~～♡❤♥（）()\[\]【】「」『』“”\"'`-]+", "", text)
+    compact = re.sub(r"(?<=[\u4e00-\u9fff])[的与和及之个](?=[\u4e00-\u9fff])", "", compact)
+    if compact == text:
+        return ""
+    return compact if len(re.findall(r"[\u4e00-\u9fff]", compact)) >= 3 else ""
 
 
 def _unique_terms(terms: Any) -> list[str]:
@@ -1106,14 +1328,21 @@ def _empty_hint_payload(terms: list[str] | None = None) -> dict[str, Any]:
 
 
 def _identity_stopwords(config: dict[str, Any]) -> list[str]:
-    identity = config.get("identity", {}) if isinstance(config.get("identity", {}), dict) else {}
+    identity = identity_names(config if isinstance(config, dict) else None)
     values = [
         identity.get("ai_name"),
         identity.get("user_name"),
         identity.get("user_display_name"),
     ]
-    values.extend(identity.get("user_aliases") or [])
+    values.extend(identity.get("relationship_terms") or [])
     return [str(item).strip() for item in values if str(item).strip()]
+
+
+def _favorite_tag_stopwords(config: dict[str, Any]) -> list[str]:
+    identity = identity_names(config if isinstance(config, dict) else None)
+    aliases = favorite_memory_aliases(identity.get("ai_name"))
+    aliases.add("favorite_memory")
+    return sorted(aliases)
 
 
 def reflection_identity_terms(config: dict[str, Any]) -> list[str]:

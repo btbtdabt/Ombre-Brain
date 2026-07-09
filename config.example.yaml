@@ -26,20 +26,6 @@ log_level: "INFO"
 # 保存 Persona State 等运行时 SQLite 状态，建议放在 buckets 同步目录外。
 # state_dir: "/path/to/ombre-brain/state"
 
-# --- Debug trace / 调试追踪 ---
-# Temporary prompt/tool tracing for deployment debugging. Keep disabled unless
-# you are diagnosing Gateway or MCP payload issues; logs may contain private
-# chat content after secret redaction.
-# 临时追踪 Gateway/MCP 输入输出。只在排查问题时开启；脱敏后仍可能包含私密聊天内容。
-debug_trace:
-  enabled: false
-  gateway_payloads: true
-  mcp_http: true
-  max_value_chars: 12000
-  max_body_chars: 20000
-  max_files: 7
-  dir: ""  # empty = state_dir/debug_traces
-
 # --- Identity / 名字口径 ---
 # These names are used in prompts and comment authors. Change this block first
 # when adapting the fork for another person/persona.
@@ -55,7 +41,7 @@ identity:
 # When storing a new memory, if similarity with an existing bucket exceeds
 # this value (0-100), merge instead of creating a new one
 # 存新记忆时，如果与已有桶的相似度超过此值（0-100），则合并而非新建
-merge_threshold: 75
+merge_threshold: 90
 
 # --- Import safety / 大文件导入安全 ---
 # Conversation-history import defaults to smaller chunks and no automatic merge.
@@ -68,7 +54,7 @@ import:
   max_tag_chars: 12
   auto_merge_enabled: false          # exact/safe duplicate skip still runs
   merge_threshold: 90
-  merge_min_content_similarity: 92
+  merge_min_content_similarity: 99
   merge_require_domain_overlap: true
   merge_require_source_match: true
   merge_block_disjoint_dates: true
@@ -125,7 +111,7 @@ dehydration:
   #   OMBRE_DEHYDRATION_BASE_URL
   #   OMBRE_DEHYDRATION_MODEL
   #   OMBRE_MODEL
-  max_tokens: 64000
+  max_tokens: 1024
   temperature: 0.1
 
 # --- Anchor / 长期锚点 ---
@@ -163,6 +149,7 @@ embedding:
   model: "Qwen/Qwen3-Embedding-4B"  # Embedding model / 向量化模型
   base_url: "https://api.siliconflow.cn/v1"
   max_chars: 6000                 # Max chars sent per embedding request / 单次向量化最多字符数
+  query_timeout_seconds: 3         # Gateway recall query timeout / Gateway 召回查询向量超时秒数
   query_instruction: "Given a memory search query, retrieve relevant long-term memory passages."
   document_instruction: ""
   # api_key: ""                   # Use env var OMBRE_EMBEDDING_API_KEY / 请使用环境变量
@@ -186,7 +173,7 @@ reranker:
   model: "Qwen/Qwen3-Reranker-4B"
   base_url: ""
   # api_key: ""                   # Use OMBRE_RERANKER_API_KEY or reuse embedding key
-  candidate_limit: 20
+  candidate_limit: 30
   score_weight: 0.65
   timeout_seconds: 12
   # Env vars / 环境变量:
@@ -226,12 +213,29 @@ recall_thresholds:
 recall:
   query_resurface_enabled: false      # true allows query breath() to append a random dormant memory when direct/related recall is sparse
 
+# --- Canonical domains / 主域表 ---
+# Store the key in bucket metadata; Dashboard displays label_zh.
+# 桶里存 key，Dashboard 显示中文名。
+domain_taxonomy:
+  display_language: zh
+  domains:
+    - { key: "relationship", label_zh: "关系" }
+    - { key: "intimacy", label_zh: "亲密" }
+    - { key: "life", label_zh: "生活" }
+    - { key: "project", label_zh: "项目" }
+    - { key: "general", label_zh: "通用" }
+
 # --- Word Map Lite / 派生词图 ---
 # Derived keyword/co-occurrence index for diagnostics and future recall hints.
 # It is rebuilt manually from buckets and does not inject anything into Gateway by itself.
 # 派生的关键词/共现索引，用于诊断和后续召回提示；手动从桶重建，本身不注入 Gateway。
 word_map:
   enabled: false
+  daily_rebuild_enabled: true          # When word_map.enabled=true, rebuild derived index once per day
+  daily_rebuild_hour: 4                # Local hour for nightly rebuild
+  daily_rebuild_minute: 30             # Local minute for nightly rebuild
+  daily_rebuild_include_archive: false # Keep nightly index focused on active buckets by default
+  daily_rebuild_check_interval_minutes: 15
   max_terms_per_bucket: 16
   edge_top_k: 10
   min_term_len: 2
@@ -245,6 +249,13 @@ word_map:
   overview_hub_terms: []              # Extra broad entity hubs to keep but lightly saturate in overview ranking
   weak_hint_terms: []                  # Extra broad terms whose word-map hints should not one-hop expand
   weak_hint_weight: 0.25               # Direct hint weight for weak terms; keyword recall is unaffected
+
+# --- Raw Events Archive / 原文保险箱 ---
+# Stores only original user/assistant text pushed through /api/ingest-raw.
+# Does not replace curated Ombre buckets or short-term Gateway conversation_turns.
+raw_events:
+  db_path: ""                          # empty = state_dir/raw_events.sqlite
+  max_ingest_batch: 1000
 
 # --- Private identity semantics / 私有身份语义 ---
 # Optional private canonical alias overlay. Do not put personal canonical nodes
@@ -268,9 +279,11 @@ moment_annotations:
   max_evidence_chars: 120
 
 # --- Gateway / 网关注入配置 ---
-# Exposes an OpenAI-compatible /v1/chat/completions endpoint that injects
-# Core Memory + Recent Context + Recalled Memory before forwarding upstream
-# 暴露 OpenAI 兼容的 /v1/chat/completions 网关，在转发上游模型前自动注入
+# Exposes OpenAI-compatible /v1/chat/completions and Anthropic-compatible
+# /v1/messages endpoints that inject Core Memory + Recent Context + Recalled Memory
+# before forwarding upstream.
+# 暴露 OpenAI 兼容的 /v1/chat/completions 和 Anthropic 兼容的 /v1/messages 网关，
+# 在转发上游模型前自动注入
 # 核心记忆 + 最近上下文 + 动态召回记忆
 gateway:
   host: "0.0.0.0"
@@ -283,18 +296,13 @@ gateway:
     - "gpt-4.1"
   # Optional prompt cache hints / 可选提示缓存参数
   # openai: send prompt_cache_key using X-Ombre-Session-Id; leave empty for other providers.
-  # openai: 使用 X-Ombre-Session-Id 发送 prompt_cache_key；其他供应商保持空值。
+  # anthropic: send top-level cache_control for proxies that require it.
+  # anthropic_explicit: put cache_control on system/tools/prior assistant history.
+  # openai: 使用 X-Ombre-Session-Id 发送 prompt_cache_key；
+  # anthropic: 给只认顶层 cache_control 的中转站使用；
+  # anthropic_explicit: 在 system/tools/上一条 assistant 历史上显式打断点。
   prompt_cache: "openai"
   # prompt_cache_retention: "24h"  # Optional for supported OpenAI models / 支持模型可选
-  # Optional token-specific defaults. Requests using OMBRE_GATEWAY_TOKEN use
-  # upstream_default_model; requests using one of these token routes use its
-  # default_model when the client omits model.
-  # 可选：按 token 指定默认模型。OMBRE_GATEWAY_TOKEN 使用 upstream_default_model；
-  # token_routes 里的 token 在客户端不传 model 时使用对应 default_model。
-  # token_routes:
-  #   - name: "gemini"
-  #     token_env: "OMBRE_GATEWAY_GEMINI_TOKEN"
-  #     default_model: "gemini-3.5-flash"
   # Optional multi-upstream mode / 可选多上游模式
   # When upstreams is set, the gateway aggregates all listed models and routes
   # each request by model name to the matching upstream.
@@ -304,11 +312,8 @@ gateway:
   # models 可用字典写别名：id 是客户端看到的名字，upstream_model 是发给上游的真实名字。
   # upstreams:
   #   - name: "deepseek"
+  #     protocol: "openai"  # default; forwards to /chat/completions
   #     base_url: "https://api.deepseek.com/v1"
-  #     # Optional: native Gemini generateContent route uses this instead of base_url.
-  #     # 可选：原生 Gemini generateContent 路由使用这个地址，而不是 base_url。
-  #     # gemini_base_url: "https://generativelanguage.googleapis.com/v1beta"
-  #     # gemini_auth: "google"  # google = x-goog-api-key; bearer = Authorization: Bearer
   #     api_key_env: "OMBRE_GATEWAY_DEEPSEEK_API_KEY"
   #     # Optional fallback keys. Retryable errors switch to the next key.
   #     # 可选备用 key。遇到可重试错误时自动换下一个 key。
@@ -323,11 +328,24 @@ gateway:
   #       - id: "deepseek-a/deepseek-v4"
   #         upstream_model: "deepseek-v4"
   #   - name: "siliconflow"
+  #     protocol: "openai"
   #     base_url: "https://api.siliconflow.cn/v1"
   #     api_key_env: "OMBRE_GATEWAY_SILICONFLOW_API_KEY"
   #     models:
   #       - "Qwen/Qwen3-32B"
   #       - "THUDM/GLM-4-32B"
+  #   - name: "anthropic"
+  #     protocol: "anthropic"  # forwards /v1/messages to upstream /messages
+  #     base_url: "https://api.anthropic.com/v1"
+  #     api_key_env: "OMBRE_GATEWAY_ANTHROPIC_API_KEY"
+  #     anthropic_version: "2023-06-01"
+  #     prompt_cache: "anthropic_explicit"  # recommended for official Claude / most Anthropic-compatible proxies
+  #     # prompt_cache: "anthropic"  # compatibility mode for proxies that require top-level cache_control
+  #     # prompt_cache_retention: "1h"  # optional; default cache TTL is 5 minutes
+  #     default_model: "claude-sonnet"
+  #     models:
+  #       - id: "claude-sonnet"
+  #         upstream_model: "claude-sonnet-4-6"
   head_recent_hours: 72
   recent_context_reentry_idle_hours: 24
   recent_context_cooldown_hours: 6
@@ -336,7 +354,10 @@ gateway:
   skip_recent_rounds: 5
   cooldown_hours: 6
   cooldown_floor: 0.3
-  inject_total_budget: 1200
+  semantic_session_dedupe_enabled: true
+  semantic_session_dedupe_threshold: 0.90
+  semantic_session_dedupe_lexical_threshold: 0.82
+  inject_total_budget: 1800
   core_memory_budget: 0
   recent_context_budget: 300
   just_now_context_enabled: true     # 刚刚/刚才/上一句: use short-term conversation_turns, not long-term memory
@@ -344,13 +365,25 @@ gateway:
   just_now_context_max_turns: 5
   just_now_context_budget: 420
   conversation_turns_max_entries: 500
+  memory_sentinel_enabled: true     # grey-zone routing: search | tone_only | skip; hard recall signals bypass it
+  memory_sentinel_llm_enabled: false # false = keep rule sentinel/searchable residue, skip the LLM grey-zone call
+  memory_sentinel_model: ""         # empty = use dehydration.model via dehydration API
+  memory_sentinel_context_turns: 3   # recent same-session turns for vague followups
+  domain_sentinel_enabled: true      # only opens likely domains + query; never decides should_recall
+  domain_sentinel_model: "Qwen/Qwen3-8B" # fast classifier; thinking is always disabled
+  domain_sentinel_base_url: ""       # empty = reuse embedding.base_url
+  # domain_sentinel_api_key: ""      # empty = OMBRE_DOMAIN_SENTINEL_API_KEY or embedding.api_key
+  domain_sentinel_enable_thinking: false   # forced false
+  domain_sentinel_max_tokens: 260
   date_persona_trace_enabled: true   # date words like 昨天/昨晚 add small same-day persona/original-turn trace
   date_persona_trace_budget: 220
   date_persona_trace_max_events: 5
   date_persona_trace_include_daily: true
-  recalled_memory_budget: 400
+  recalled_memory_budget: 900
   direct_render_mode: auto   # auto | compact | full; direct/recalled display shape
   retrieval_mode: graph       # graph | bucket; bucket skips moment graph diffusion
+  operit_context_rewrite_enabled: false # Operit-only text turn cleanup: split stable/activity attachment context before forwarding
+  bucket_list_cache_ttl_seconds: 300 # cache active bucket list inside Gateway; 0 disables
   portrait_memory_enabled: true  # read-only stable portrait cache from profile_fact by default
   portrait_memory_budget: 360
   portrait_memory_max_sources: 8
@@ -359,7 +392,8 @@ gateway:
   query_planner_model: ""      # empty = use dehydration.model via dehydration API
   query_planner_min_chars: 16  # also catches short emotional reason lookups like "今天为什么激动哭"
   query_planner_max_queries: 3
-  query_planner_max_tokens: 64000
+  query_planner_max_tokens: 360
+  query_planner_supplemental_semantic: false # planner short queries use keyword/exact by default; avoids repeated embedding calls
   memory_detail_recall_enabled: false # optional internal [memory_detail ids="..."] retry for admitted bucket ids
   memory_detail_recall_max_ids: 3
   memory_detail_recall_budget: 1200
@@ -369,7 +403,7 @@ gateway:
   favorite_memory_max_cards: 1
   related_memory_budget: 220
   core_memory_interval_rounds: 0
-  current_inner_state_interval_rounds: 15
+  current_inner_state_interval_rounds: 0
   relationship_weather_interval_rounds: 0
   favorite_memory_interval_rounds: 0
   word_map_hint_enabled: false       # true lets derived Word Map add weak recall candidates; still gated by RecallPolicy
@@ -377,10 +411,61 @@ gateway:
   word_map_hint_moment_boost: 0.25   # weak moment-search boost for hinted buckets in graph retrieval mode
   word_map_hint_neighbor_limit: 6
   word_map_hint_bucket_limit: 12
+  axis_lite:
+    # Technical-axis guardrail terms. If these keys exist, they replace the built-in defaults.
+    # Used only to reject off-domain memories after recall candidates already exist.
+    technical_axis_terms:
+      - esp32
+      - mpr121
+      - sqlite
+      - 模块
+      - 硬件
+      - 接口
+      - 端点
+      - api
+      - gateway
+      - bridge
+      - mcp
+      - embedding
+      - rerank
+      - 代码
+      - 开源项目
+    technical_database_terms:
+      - schema
+      - 端点
+      - 接口
+      - 代码
+      - 实现
+      - 导入
+      - 索引
+      - 查询
+      - 字段
+      - 表结构
+      - 迁移
+      - sqlite
+      - sql
+    technical_domain_terms:
+      - projectcode
+      - hardwareprotocol
+      - hardware
+      - code
+      - debug
+      - 技术
+      - 技术计划
+      - 项目
+      - 工程
+      - 代码
+      - 硬件
+      - 协议
+      - 数据库
+      - 开发
+  semantic_candidate_top_k: 50       # internal embedding candidate pool; visible injection stays gated
+  moment_search_limit: 50            # internal moment candidate pool for graph retrieval
+  recall_fusion_mode: dynamic        # dynamic | legacy; legacy uses the weights below as the main score
   semantic_weight: 0.45
   keyword_weight: 0.35
-  importance_weight: 0.10
-  freshness_weight: 0.10
+  importance_weight: 0.03            # legacy main score only; dynamic caps it as a tiny adjustment
+  freshness_weight: 0.03             # legacy main score only; dynamic caps it as a tiny adjustment
   first_card_min_score: 0.55
   second_card_min_score: 0.50
   second_card_relative_score: 0.85
@@ -397,10 +482,12 @@ gateway:
   #   OMBRE_GATEWAY_UPSTREAM_BASE_URL
   #   OMBRE_GATEWAY_UPSTREAM_MODEL
   #   OMBRE_GATEWAY_UPSTREAM_MODELS   # comma-separated model list for /v1/models
+  #   OMBRE_DOMAIN_SENTINEL_MODEL
   #   OMBRE_GATEWAY_DEEPSEEK_API_KEY  # example for gateway.upstreams[*].api_key_env
   #   OMBRE_GATEWAY_DEEPSEEK_API_KEY_1
   #   OMBRE_GATEWAY_DEEPSEEK_API_KEY_2
   #   OMBRE_GATEWAY_SILICONFLOW_API_KEY
+  #   OMBRE_GATEWAY_ANTHROPIC_API_KEY
 
 memory_diffusion:
   enabled: true
@@ -476,7 +563,7 @@ memory_relevance:
 # 追踪缓慢人格变化、关系状态，以及按会话保存的短期情绪。
 persona:
   enabled: true
-  profile_id: "haven_xiaoyu"
+  profile_id: "main_profile"
   mode: "llm"
   base_url: "https://api.deepseek.com/v1"
   model: "deepseek-chat"
@@ -485,7 +572,7 @@ persona:
   thinking_mode: ""
   # api_key: ""                  # Use OMBRE_PERSONA_API_KEY; falls back to OMBRE_API_KEY
   temperature: 0.1
-  max_tokens: 64000
+  max_tokens: 500
   global_decay_hours: 168
   session_mood_half_life_minutes: 90
   max_personality_delta: 0.01
@@ -501,6 +588,7 @@ persona:
   event_similarity_threshold: 0.82
   event_force_after_minutes: 30
   event_excerpt_chars: 220          # short evidence snippets for future date traces, not full transcripts
+  evaluation_context_turns: 3       # previous same-session turns sent to the post-reply Persona evaluator
   initial_personality:
     openness: 0.56
     conscientiousness: 0.50
@@ -530,7 +618,7 @@ persona:
   #   OMBRE_PERSONA_MODEL
 
 # --- Reflection worker / 关系天气与记忆关系 ---
-# Defaults to persona model config. Set these only when reflection should use a separate model/key.
+# Defaults to embedding model config, then persona/dehydration. Set these only when reflection should use a separate model/key.
 reflection:
   enabled: true
   auto_enabled: true
@@ -541,14 +629,20 @@ reflection:
   enrich_backfill_enabled: true      # hourly scheduler backfills missing tags/confidence/edges
   enrich_backfill_limit: 5           # max buckets to backfill per scheduler tick
   edge_backfill_limit: 5             # default limit for manual edge_backfill; only writes memory_edges
-  base_url: ""                    # empty = persona.base_url
-  model: ""                       # empty = persona.model
-  thinking_mode: ""               # empty = persona.thinking_mode
-  # api_key: ""                   # empty = persona.api_key; OMBRE_REFLECTION_API_KEY overrides
+  base_url: ""                    # empty = embedding.base_url
+  model: ""                       # empty = persona/dehydration model
+  thinking_mode: ""               # empty = model default; disabled/enabled can force Qwen-style thinking
+  # api_key: ""                   # empty = OMBRE_REFLECTION_API_KEY or embedding.api_key
   temperature: 0.1
-  max_tokens: 64000
+  max_tokens: 700
   timezone: "Asia/Shanghai"
   daily_hour: 4                   # generate daily impression after this local hour
+  daily_min_memory_items: 5        # ordinary memory/update items required before daily impression writes
+  daily_conversation_turn_limit: 0 # 0 = do not include short-term conversation_turns in daily impression material
+  daily_chat_memory_mode: auto     # auto = write selected Gateway chat memories; review = pending candidates; off = disabled
+  daily_chat_memory_hour: 0        # organize the previous day's Gateway chats after local midnight
+  daily_chat_memory_turn_limit: 0  # 0 = use all raw_events for that date; >0 caps restored turns
+  daily_chat_memory_max_per_day: 3 # conservative cap for selected long-term memory candidates
   persona_events_limit: 12         # selected and deduped; persona events supplement daily weather only
   persona_events_scan_limit: 80
   weekly_enabled: false            # weekly impressions are off by default; daily impressions remain
@@ -574,6 +668,7 @@ reflection:
   #   OMBRE_REFLECTION_API_KEY
   #   OMBRE_REFLECTION_BASE_URL
   #   OMBRE_REFLECTION_MODEL
+  #   OMBRE_REFLECTION_CANDIDATE_MODEL
   #   OMBRE_DIARY_MCP_URL
   #   OMBRE_DIARY_MCP_TOKEN_ENV
 
@@ -595,7 +690,7 @@ portrait:
   # api_key: ""                     # OMBRE_PORTRAIT_API_KEY overrides
   thinking_mode: ""
   temperature: 0.1
-  max_tokens: 64000
+  max_tokens: 3200
   json_response_format: true
   material_limit: 18
   first_run_material_limit: 160
@@ -623,7 +718,7 @@ dream:
   # api_key: ""                   # OMBRE_DREAM_API_KEY overrides
   thinking_mode: "disabled"
   temperature: 0.85
-  max_tokens: 64000
+  max_tokens: 900
   timezone: "Asia/Shanghai"
   daily_hour: 3
   run_window_hours: 3

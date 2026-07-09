@@ -327,7 +327,7 @@
 | `transport` | `"stdio"` | 传输模式 |
 | `log_level` | `"INFO"` | 日志级别 |
 | `buckets_dir` | `"./buckets"` | 记忆桶目录 |
-| `merge_threshold` | `75` | 合并相似度阈值 (0-100) |
+| `merge_threshold` | `90` | 合并相似度阈值 (0-100) |
 | `dehydration.model` | `"deepseek-chat"` | 脱水用 LLM 模型 |
 | `dehydration.base_url` | `"https://api.deepseek.com/v1"` | API 地址 |
 | `dehydration.api_key` | `""` | API 密钥 |

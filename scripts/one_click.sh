@@ -427,7 +427,7 @@ dehydration:
   model: $(yaml_quote "${dehy_model}")
   base_url: $(yaml_quote "${dehy_base_url}")
   thinking_mode: ""
-  max_tokens: 64000
+  max_tokens: 1024
   temperature: 0.1
 
 embedding:
@@ -480,6 +480,10 @@ word_map:
   weak_hint_terms: []
   weak_hint_weight: 0.25
 
+raw_events:
+  db_path: ""
+  max_ingest_batch: 1000
+
 identity_semantics:
   enabled: false
   private_config_path: ""
@@ -529,7 +533,7 @@ gateway:
   query_planner_model: ""
   query_planner_min_chars: 16
   query_planner_max_queries: 3
-  query_planner_max_tokens: 64000
+  query_planner_max_tokens: 360
   memory_detail_recall_enabled: false
   memory_detail_recall_max_ids: 3
   memory_detail_recall_budget: 1200
@@ -583,7 +587,7 @@ persona:
   model: $(yaml_quote "${dehy_model}")
   thinking_mode: ""
   temperature: 0.1
-  max_tokens: 64000
+  max_tokens: 500
 
 portrait:
   enabled: true
@@ -598,7 +602,7 @@ portrait:
   model: ""
   thinking_mode: ""
   temperature: 0.1
-  max_tokens: 64000
+  max_tokens: 3200
   json_response_format: true
   material_limit: 18
   first_run_material_limit: 160
@@ -618,9 +622,10 @@ reflection:
   base_url: $(yaml_quote "${dehy_base_url}")
   model: $(yaml_quote "${dehy_model}")
   thinking_mode: ""
-  max_tokens: 64000
   timezone: "Asia/Shanghai"
   daily_hour: 4
+  daily_min_memory_items: 5
+  daily_conversation_turn_limit: 0
   check_interval_minutes: 60
 
 dream:
@@ -633,7 +638,7 @@ dream:
   model: $(yaml_quote "${dream_model}")
   thinking_mode: "disabled"
   temperature: 0.85
-  max_tokens: 64000
+  max_tokens: 900
   timezone: "Asia/Shanghai"
   daily_hour: 3
   run_window_hours: 3
@@ -844,7 +849,7 @@ print_client_guide() {
   fi
   printf '自我锚点用 breath(domain="self_anchor")，分段查用 breath(domain="self_anchor", query="关键词")。\n'
   printf '画像在 Dashboard 的 Persona/画像面板手动生成/刷新；profile_fact 需要证据 bucket/moment 后再确认。\n'
-  printf '暗房外部只暴露 darkroom_enter(note=..., visibility="active")，不会回显正文。\n'
+  printf '暗房默认读写同一个 active 房间草稿，new_room=true 才新开；darkroom_view 只有 completeness>=1 且解锁后才回显房间 revisions。\n'
   printf '完整工具说明见 docs/Tool Guide.md；Dashboard 桶列表可批量选择并删除普通记忆桶。\n'
 
   case "${DEPLOY_TARGET}" in
@@ -926,9 +931,12 @@ EOF
     Gateway portrait memory reads profile_fact by default and does not include ordinary anchors unless explicitly enabled.
 
   Darkroom:
-    External client tool lists should expose only darkroom_enter(note=..., visibility="active").
+    Use darkroom_continue_context(limit=3) only to read the current active room draft, continue private reflection, and judge completeness.
+    darkroom_enter note should default to first person; do not use third-person self-reference unless quoting external facts or Xiaoyu.
+    darkroom_enter updates the current active room draft by default; pass new_room=true to open a separate room.
+    External client tool lists should expose darkroom_enter(note=..., visibility="active", lock_for="6h", new_room=false) and read-only darkroom_view.
     visibility can be active / archived / retracted.
-    It does not echo note bodies; handoff shows only Darkroom Door status.
+    darkroom_view returns room revision contents only when visibility is active, completeness is 1, and the lock has expired.
 
   Dream Context:
     dream.surface_enabled controls breath() dream surfacing.
@@ -2001,6 +2009,24 @@ migration_bucket_files_apply() {
   migration_bucket_files_prompt "迁移 buckets/comments 应用"
 }
 
+migration_darkroom_merge_active_once() {
+  migration_prepare_target "合并旧 darkroom active 条目为一个 room（建议只用一次）" || return 1
+  printf '这一步只处理 visibility=active 且没有 room_id 的旧 darkroom 条目。\n'
+  printf '已经有 room_id 的条目、archived、retracted 都不会改。\n'
+  printf '脚本会先备份 state/darkroom/entries.jsonl，再写入同一个 room_id 和 revision=1..n。\n'
+  if ! prompt_yes_no '确认执行这个一次性合并吗' 'n'; then
+    return 0
+  fi
+  if [[ "${DEPLOY_TARGET}" == "python" ]]; then
+    local python_cmd
+    python_cmd="$(detect_python_cmd)" || return 1
+    load_python_direct_env
+    PYTHONIOENCODING=utf-8 "${python_cmd}" scripts/migrate_darkroom_active_room.py --apply --yes
+  else
+    run_target_shell "PYTHONIOENCODING=utf-8 python scripts/migrate_darkroom_active_room.py --apply --yes"
+  fi
+}
+
 migration_menu() {
   local choice
   while true; do
@@ -2019,8 +2045,9 @@ migration_menu() {
     printf '11. 删除已迁移旧 feel\n'
     printf '12. 预演迁移 buckets/comments 到当前 v2\n'
     printf '13. 应用迁移 buckets/comments 到当前 v2\n'
+    printf '14. 合并旧 darkroom active 条目为一个 room（建议只用一次）\n'
     printf '0. 返回上一级\n'
-    if ! read -r -p '输入（0-13）：' choice; then
+    if ! read -r -p '输入（0-14）：' choice; then
       printf '\n'
       return 0
     fi
@@ -2038,8 +2065,9 @@ migration_menu() {
       11) migration_cleanup_feels_apply; pause ;;
       12) migration_bucket_files_plan; pause ;;
       13) migration_bucket_files_apply; pause ;;
+      14) migration_darkroom_merge_active_once; pause ;;
       0) return 0 ;;
-      *) printf '请输入 0-13。\n' ;;
+      *) printf '请输入 0-14。\n' ;;
     esac
   done
 }

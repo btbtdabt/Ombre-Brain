@@ -67,6 +67,12 @@ _MARKDOWN_ASSISTANT_LABELS = {
     "模型",
     "ai助手",
 }
+_CHATGPT_IMPORT_ROLES = {"user", "assistant"}
+
+
+def _clean_chatgpt_role(role: object) -> str:
+    normalized = str(role or "user").strip().lower()
+    return normalized if normalized in _CHATGPT_IMPORT_ROLES else ""
 
 
 def _detect_markdown_role_line(line: str) -> tuple[str, str] | None:
@@ -136,6 +142,11 @@ def _parse_chatgpt_json(data: list | dict) -> list[dict]:
                 msg = node.get("message")
                 if not msg or not isinstance(msg, dict):
                     continue
+                author = msg.get("author", {})
+                raw_role = author.get("role", "user") if isinstance(author, dict) else "user"
+                role = _clean_chatgpt_role(raw_role)
+                if not role:
+                    continue
                 content_obj = msg.get("content", {})
                 if isinstance(content_obj, dict):
                     content_parts = content_obj.get("parts", [])
@@ -148,8 +159,6 @@ def _parse_chatgpt_json(data: list | dict) -> list[dict]:
                     content = str(content)
                 if not content.strip():
                     continue
-                author = msg.get("author", {})
-                role = author.get("role", "user") if isinstance(author, dict) else "user"
                 ts = msg.get("create_time", "")
                 if isinstance(ts, (int, float)):
                     ts = datetime.fromtimestamp(ts).isoformat()
@@ -161,6 +170,11 @@ def _parse_chatgpt_json(data: list | dict) -> list[dict]:
                 continue
             for msg in messages:
                 if not isinstance(msg, dict):
+                    continue
+                author = msg.get("author", {})
+                raw_role = msg.get("role") or (author.get("role") if isinstance(author, dict) else None) or "user"
+                role = _clean_chatgpt_role(raw_role)
+                if not role:
                     continue
                 content = msg.get("content", msg.get("text", ""))
                 if isinstance(content, dict):
@@ -175,8 +189,6 @@ def _parse_chatgpt_json(data: list | dict) -> list[dict]:
                     content = str(content)
                 if not content or not content.strip():
                     continue
-                author = msg.get("author", {})
-                role = msg.get("role") or (author.get("role") if isinstance(author, dict) else None) or "user"
                 ts = msg.get("timestamp", msg.get("create_time", ""))
                 turns.append({"role": role, "content": content.strip(), "timestamp": str(ts)})
     return turns
@@ -265,7 +277,7 @@ _CURRENT_SEGMENT_NOTICE = "[本段内容]"
 DEFAULT_IMPORT_CHUNK_TOKENS = 3500
 _IMPORT_DUPLICATE_SIMILARITY = 88.0
 _IMPORT_DEFAULT_MERGE_THRESHOLD = 90.0
-_IMPORT_DEFAULT_MERGE_CONTENT_SIMILARITY = 92.0
+_IMPORT_DEFAULT_MERGE_CONTENT_SIMILARITY = 99.0
 
 
 def _normalize_import_text(text: str) -> str:
@@ -879,13 +891,6 @@ class ImportEngine:
         if not self.dehydrator.api_available:
             raise RuntimeError("API not available")
 
-        max_tokens = int(getattr(self.dehydrator, "max_tokens", 64000))
-        completion_options = getattr(self.dehydrator, "_completion_options", None)
-        if callable(completion_options):
-            options = completion_options(max_tokens=max_tokens, temperature=0.0)
-        else:
-            options = {"max_tokens": max_tokens, "temperature": 0.0}
-
         user_content = chunk_content
         if self.extract_max_input_chars > 0:
             user_content = chunk_content[: self.extract_max_input_chars]
@@ -895,7 +900,8 @@ class ImportEngine:
                 {"role": "system", "content": IMPORT_EXTRACT_PROMPT},
                 {"role": "user", "content": user_content},
             ],
-            **options,
+            max_tokens=4096,
+            temperature=0.0,
         )
 
         if not response.choices:

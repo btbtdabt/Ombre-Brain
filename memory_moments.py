@@ -44,8 +44,13 @@ SECTION_ALIASES = {
     "haven reflection": "reflection",
     "followup": "followup",
     "follow-up": "followup",
+    "followup_log": "followup_log",
+    "followup log": "followup_log",
+    "follow-up log": "followup_log",
     "next": "followup",
     "todo": "followup",
+    "todo_log": "followup_log",
+    "todo log": "followup_log",
     "affect_anchor": "affect_anchor",
     "affect anchor": "affect_anchor",
     "favorite_reason": "favorite_reason",
@@ -66,7 +71,9 @@ SECTION_ALIASES = {
     "\u60c5\u7eea": "feeling",
     "\u53cd\u601d": "reflection",
     "\u540e\u7eed": "followup",
+    "\u540e\u7eed\u8bb0\u5f55": "followup_log",
     "\u5f85\u529e": "followup",
+    "\u5f85\u529e\u8bb0\u5f55": "followup_log",
     "\u559c\u6b22\u5b83\u7684\u539f\u56e0": "favorite_reason",
     "\u559c\u6b22\u7684\u539f\u56e0": "favorite_reason",
 }
@@ -320,21 +327,49 @@ class MemoryMomentStore:
         *,
         limit: int = 20,
         bucket_boosts: dict[str, float] | None = None,
+        include_sections: set[str] | list[str] | tuple[str, ...] | None = None,
+        exclude_sections: set[str] | list[str] | tuple[str, ...] | None = None,
+    ) -> list[dict]:
+        return self.search_moment_items(
+            query,
+            self.list_all(),
+            limit=limit,
+            bucket_boosts=bucket_boosts,
+            include_sections=include_sections,
+            exclude_sections=exclude_sections,
+        )
+
+    def search_moment_items(
+        self,
+        query: str,
+        moments: list[dict],
+        *,
+        limit: int = 20,
+        bucket_boosts: dict[str, float] | None = None,
+        include_sections: set[str] | list[str] | tuple[str, ...] | None = None,
+        exclude_sections: set[str] | list[str] | tuple[str, ...] | None = None,
     ) -> list[dict]:
         query = str(query or "").strip()
         if not query:
             return []
         bucket_boosts = bucket_boosts or {}
-        terms = content_terms_for_query(query, self.relevance_options)
-        expanded_terms = _expanded_query_terms(query, self.relevance_options)
+        included = {str(section or "") for section in (include_sections or []) if str(section or "")}
+        excluded = {str(section or "") for section in (exclude_sections or []) if str(section or "")}
+        query_terms = content_terms_for_query(query, self.relevance_options)
+        expanded_query_terms = _expanded_query_terms(query, self.relevance_options)
         scored = []
-        for moment in self.list_all():
+        for moment in moments or []:
+            section = str(moment.get("section") or "")
+            if included and section not in included:
+                continue
+            if excluded and section in excluded:
+                continue
             score = _moment_query_score(
                 moment,
                 query,
                 self.relevance_options,
-                terms=terms,
-                expanded_terms=expanded_terms,
+                query_terms=query_terms,
+                expanded_query_terms=expanded_query_terms,
             )
             bucket_id = str(moment.get("bucket_id") or "")
             try:
@@ -1059,8 +1094,8 @@ def _moment_query_score(
     query: str,
     relevance_options: MemoryRelevanceOptions | None = None,
     *,
-    terms: list[str] | None = None,
-    expanded_terms: list[str] | None = None,
+    query_terms: list[str] | None = None,
+    expanded_query_terms: list[str] | None = None,
 ) -> float:
     query = str(query or "").strip()
     if not query:
@@ -1084,13 +1119,15 @@ def _moment_query_score(
     score = 0.0
     if _term_matches_fields(query_lower, fields):
         score += 0.65
-    if terms is None:
-        terms = content_terms_for_query(query, relevance_options)
+    terms = query_terms if query_terms is not None else content_terms_for_query(query, relevance_options)
     if terms:
         matched = sum(1 for term in terms if _term_matches_fields(term.lower(), fields))
         score += min(0.5, matched / max(1, len(terms)) * 0.5)
-    if expanded_terms is None:
-        expanded_terms = _expanded_query_terms(query, relevance_options)
+    expanded_terms = (
+        expanded_query_terms
+        if expanded_query_terms is not None
+        else _expanded_query_terms(query, relevance_options)
+    )
     if expanded_terms:
         matched_expanded = sum(
             1 for term in expanded_terms
@@ -1150,6 +1187,7 @@ def _moment_section_weight(section: Any) -> float:
         "reflection": 0.9,
         "feeling": 0.9,
         "followup": 0.88,
+        "followup_log": 0.6,
         "affect_anchor": 0.82,
         "favorite_reason": 0.82,
         "comment": 0.78,

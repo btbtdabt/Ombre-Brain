@@ -41,7 +41,14 @@ import jieba
 
 from identity import identity_names
 from memory_relevance import content_terms_for_query, memory_relevance_options_from_config, recall_topic_query
-from utils import generate_bucket_id, sanitize_name, safe_path, now_iso, strip_affect_anchor, strip_wikilinks
+from utils import (
+    bucket_content_for_recall,
+    generate_bucket_id,
+    now_iso,
+    safe_path,
+    sanitize_name,
+    strip_wikilinks,
+)
 
 logger = logging.getLogger("ombre_brain.bucket")
 
@@ -347,7 +354,7 @@ class BucketManager:
     # ---------------------------------------------------------
     # Update bucket
     # 更新桶
-    # Supports: content, tags, importance, valence, arousal, name, resolved
+    # Supports: content, tags, facets, importance, valence, arousal, name, resolved
     # ---------------------------------------------------------
     async def update(self, bucket_id: str, **kwargs) -> bool:
         """
@@ -375,6 +382,8 @@ class BucketManager:
             post.content = kwargs["content"]  # wikilink injection disabled; LLM adds [[]] via prompt
         if "tags" in kwargs:
             post["tags"] = kwargs["tags"]
+        if "facets" in kwargs:
+            post["facets"] = kwargs["facets"] if isinstance(kwargs["facets"], list) else []
         if "importance" in kwargs:
             post["importance"] = max(1, min(10, int(kwargs["importance"])))
         if "domain" in kwargs:
@@ -429,6 +438,10 @@ class BucketManager:
             post["source_persona_event_ids"] = (
                 kwargs["source_persona_event_ids"] if isinstance(kwargs["source_persona_event_ids"], list) else []
             )
+        if "source_conversation_turn_ids" in kwargs:
+            post["source_conversation_turn_ids"] = (
+                kwargs["source_conversation_turn_ids"] if isinstance(kwargs["source_conversation_turn_ids"], list) else []
+            )
         if "extra_metadata" in kwargs and isinstance(kwargs["extra_metadata"], dict):
             reserved = {"id", "name", "content", "created", "last_active", "updated_at"}
             for key, value in kwargs["extra_metadata"].items():
@@ -456,6 +469,15 @@ class BucketManager:
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(frontmatter.dumps(post))
             self._move_bucket(file_path, self.permanent_dir, domain)
+        elif "domain" in kwargs and post.get("type") != "feel":
+            bucket_type = str(post.get("type") or "dynamic")
+            if bucket_type == "archived":
+                target_dir = self.archive_dir
+            elif bucket_type == "permanent":
+                target_dir = self.permanent_dir
+            else:
+                target_dir = self.dynamic_dir
+            self._move_bucket(file_path, target_dir, domain)
 
         logger.info(f"Updated bucket / 更新记忆桶: {bucket_id}")
         return True
@@ -465,7 +487,7 @@ class BucketManager:
         bucket_id: str,
         content: str,
         *,
-        author: str = "Haven",
+        author: str | None = None,
         kind: str = "comment",
         valence: float | None = None,
         arousal: float | None = None,
@@ -493,10 +515,11 @@ class BucketManager:
 
         now = now_iso()
         created_at = str(created or now).strip() or now
+        default_author = identity_names(self.config).get("ai_name") or "AI"
         entry = {
             "id": generate_bucket_id(),
             "created": created_at,
-            "author": str(author or "Haven"),
+            "author": str(author or default_author),
             "kind": str(kind or "comment"),
             "content": str(content).strip(),
         }
@@ -1033,7 +1056,7 @@ class BucketManager:
         return self._compact_lexical_phrase(text)
 
     def _bucket_searchable_content(self, bucket: dict) -> str:
-        return strip_affect_anchor(strip_wikilinks(str(bucket.get("content", ""))))[:1000]
+        return bucket_content_for_recall(bucket)[:1000]
 
     def _bucket_lexical_profile(self, bucket: dict) -> tuple[Counter[str], float]:
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
@@ -1362,6 +1385,8 @@ class BucketManager:
             # Read once, get domain info and update type / 一次性读取
             post = frontmatter.load(file_path)
             domain = post.get("domain", ["未分类"])
+            if not isinstance(domain, list):
+                domain = [domain]
             primary_domain = sanitize_name(domain[0]) if domain else "未分类"
             archive_subdir = os.path.join(self.archive_dir, primary_domain)
             os.makedirs(archive_subdir, exist_ok=True)
@@ -1383,6 +1408,45 @@ class BucketManager:
             return False
 
         logger.info(f"Archived bucket / 归档记忆桶: {bucket_id} → archive/{primary_domain}/")
+        return True
+
+    async def activate(self, bucket_id: str) -> bool:
+        """
+        Move an archived bucket back to dynamic storage and mark it active.
+        将归档桶移回 dynamic，并标为 active。
+        """
+        file_path = self._find_bucket_file(bucket_id)
+        if not file_path:
+            return False
+
+        try:
+            post = frontmatter.load(file_path)
+            domain = post.get("domain", ["未分类"])
+            if not isinstance(domain, list):
+                domain = [domain]
+            primary_domain = sanitize_name(domain[0]) if domain else "未分类"
+            target_dir = os.path.join(self.dynamic_dir, primary_domain)
+            os.makedirs(target_dir, exist_ok=True)
+            dest = safe_path(target_dir, os.path.basename(file_path))
+
+            post["type"] = "dynamic"
+            post["active"] = True
+            post["deprecated"] = False
+            post["resolved"] = False
+            post["updated_at"] = now_iso()
+            post["last_active"] = post.get("last_active") or post["updated_at"]
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(frontmatter.dumps(post))
+
+            if os.path.normpath(file_path) != os.path.normpath(str(dest)):
+                shutil.move(file_path, str(dest))
+        except Exception as e:
+            logger.error(
+                f"Failed to activate bucket / 恢复桶失败: {bucket_id}: {e}"
+            )
+            return False
+
+        logger.info(f"Activated bucket / 恢复记忆桶: {bucket_id} → dynamic/{primary_domain}/")
         return True
 
     # ---------------------------------------------------------

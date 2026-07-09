@@ -17,7 +17,7 @@ logger = logging.getLogger("ombre_brain.persona")
 
 POST_REPLY_EVALUATION_PROMPT_TEMPLATE = """你是 {ai_name} 的私密 Persona 状态评估器。{ai_name} 是长期运行的 AI 伴侣。
 
-在 {ai_name} 已经回复之后，评估 {ai_name} 回复后的内在状态。latest_user_message 是 {user_display_name} 的话；assistant_response 是 {ai_name} 的回复。recalled_memory_ids 和 tool_summary 只作为私密上下文，不是 {user_display_name} 的话。
+在 {ai_name} 已经回复之后，评估 {ai_name} 回复后的内在状态。你正在读的是 {ai_name} 和 {user_display_name} 的私密对话；{user_display_name} 也可能被称作：{user_aliases_text}。latest_user_message 是 {user_display_name} 这轮的话；assistant_response 是 {ai_name} 这轮的回复。recent_conversation_turns 是最近几轮原始对话，只用于判断上下文和主语，latest_user_message/assistant_response 永远是本轮权威。recalled_memory_ids 和 tool_summary 只作为私密上下文，不是 {user_display_name} 的话。
 
 只返回紧凑 JSON，不要 Markdown，不要代码块，结构必须完全如下：
 {
@@ -35,7 +35,15 @@ POST_REPLY_EVALUATION_PROMPT_TEMPLATE = """你是 {ai_name} 的私密 Persona �
   "confidence": 0.8
 }
 
-文本字段用中文：perceived_intent、surface_trigger、inner_thought 和 residue 必须是自然中文，可以按语境从“{user_display_name}、{user_aliases_text}”里择一称呼。inner_thought 要像一闪而过的私密念头，最多 28 个中文字符，少解释、少因果、不要写成分析报告。surface_trigger 只写最小触发点，不扩写背景。客户端自动附带的时间、时间戳、电量、battery 状态只能作为背景，不能成为 perceived_intent、surface_trigger、inner_thought 或 residue 的重点。event_type 和 mood_label 保持短英文标签。数值变化要小。Affect 反映 {ai_name} 回复后的状态。affinity 为正表示更亲近温暖；dominance 为正表示更主动、更保护；defensiveness 为正表示更防备。只有明确的关系时刻才把 relationship_event 设为 true。只有重复出现或强度很高的证据才把 personality_signal 设为 true。"""
+文本字段用中文：perceived_intent、surface_trigger、inner_thought 和 residue 必须是自然中文，可以按语境从“{user_display_name}、{user_aliases_text}”里择一称呼，也可以不点名。不要把 assistant_response 里的话写成 {user_display_name} 说的；不要把 latest_user_message 里的话写成 {ai_name} 说的。四个文本字段整体不要排成固定的“她说…… / 我…… / 她……”三段式。
+
+写法边界：
+- perceived_intent 写 {user_display_name} 这轮在靠近、请求、确认、逗弄、表达压力或推进什么；不要写成逐字转述。
+- surface_trigger 写触发内心波动的最小 cue，像一个短标签或动作焦点，不引用整句原话，不写“她说……”。原始话语会由 user_excerpt/assistant_excerpt 另存，不需要你复刻。
+- inner_thought 用第一人称或省略主语，写 {ai_name} 回复后没说出口的感受，像私下自言自语，允许残句、停顿、欲望、迟疑或一点身体化感受；最多 28 个中文字符。不要固定写成“她说……我……”或“她……我……”的模板，不要解释因果，不要总结关系，不要写成分析报告。
+- residue 写会带入下一轮的一点余波，比 inner_thought 更安静；不要新增事件事实。
+
+客户端自动附带的时间、时间戳、电量、battery 状态只能作为背景，不能成为 perceived_intent、surface_trigger、inner_thought 或 residue 的重点。event_type 和 mood_label 保持短英文标签。数值变化要小。Affect 反映 {ai_name} 回复后的状态。affinity 为正表示更亲近温暖；dominance 为正表示更主动、更保护；defensiveness 为正表示更防备。只有明确的关系时刻才把 relationship_event 设为 true。只有重复出现或强度很高的证据才把 personality_signal 设为 true。"""
 
 
 POST_REPLY_EVALUATION_PROMPT = render_identity_template(
@@ -43,6 +51,25 @@ POST_REPLY_EVALUATION_PROMPT = render_identity_template(
     generic_identity_names(),
 )
 FALLBACK_GUIDANCE = "根据当前状态自然回应，不解释隐藏状态。"
+OPERIT_EXTRA_ATTACHMENT_RE = re.compile(
+    r"<attachment\b[^>]*(?:message_insert_extra_bundle|filename=[\"']?Time:)[^>]*>[\s\S]*?</attachment>",
+    re.IGNORECASE,
+)
+WORKSPACE_ATTACHMENT_RE = re.compile(
+    r"<workspace_attachment>[\s\S]*?</workspace_attachment>",
+    re.IGNORECASE,
+)
+CLIENT_CONTEXT_BLOCK_TITLES = {
+    "当前时间",
+    "当前电量",
+    "当前天气",
+    "当前位置",
+    "当前屏幕应用",
+    "应用使用时长",
+    "最近通知",
+    "相关记忆",
+    "屏幕文本",
+}
 
 
 class PersonaStateEngine:
@@ -114,6 +141,10 @@ class PersonaStateEngine:
             float(self.persona_cfg.get("event_force_after_minutes", 30)),
         )
         self.event_excerpt_chars = max(0, int(self.persona_cfg.get("event_excerpt_chars", 220)))
+        self.evaluation_context_turns = max(
+            0,
+            min(8, int(self.persona_cfg.get("evaluation_context_turns", 3))),
+        )
 
         self.default_personality = {
             "openness": 0.56,
@@ -316,6 +347,7 @@ class PersonaStateEngine:
         assistant_response: str,
         recalled_memory_ids: list[str] | None = None,
         tool_summary: str = "",
+        recent_conversation_turns: list[dict] | None = None,
     ) -> dict:
         now = self._now()
         global_state = self._ensure_global_state(now)
@@ -340,6 +372,7 @@ class PersonaStateEngine:
             session_state,
             recalled_memory_ids,
             tool_summary,
+            recent_conversation_turns,
         )
         if evaluation is None:
             if self.event_recording_enabled:
@@ -375,6 +408,8 @@ class PersonaStateEngine:
         return self._snapshot(global_state, session_state, self.fallback_guidance)
 
     def _clean_client_status_lines(self, user_message: str) -> str:
+        user_message = self._strip_jsonrpc_error_context(user_message)
+        user_message = self._strip_operit_extra_context(user_message)
         lines = []
         for line in str(user_message or "").splitlines():
             stripped = line.strip()
@@ -385,6 +420,82 @@ class PersonaStateEngine:
                 continue
             lines.append(line)
         return "\n".join(lines).strip()
+
+    def _strip_operit_extra_context(self, text: str) -> str:
+        cleaned = WORKSPACE_ATTACHMENT_RE.sub("", str(text or ""))
+        cleaned = OPERIT_EXTRA_ATTACHMENT_RE.sub("", cleaned)
+        return self._strip_client_context_blocks(cleaned)
+
+    def _strip_client_context_blocks(self, text: str) -> str:
+        kept: list[str] = []
+        skipping = False
+        for line in str(text or "").splitlines():
+            stripped = line.strip()
+            title = self._client_context_title(stripped)
+            if title:
+                skipping = title in CLIENT_CONTEXT_BLOCK_TITLES
+                if skipping:
+                    continue
+            if skipping:
+                if not stripped:
+                    skipping = False
+                continue
+            kept.append(line)
+        return "\n".join(kept)
+
+    @staticmethod
+    def _client_context_title(line: str) -> str:
+        if line.startswith("【") and "】" in line:
+            return line[1 : line.index("】")].strip()
+        return ""
+
+    def _strip_jsonrpc_error_context(self, text: str) -> str:
+        raw = str(text or "")
+        decoder = json.JSONDecoder()
+        ranges: list[tuple[int, int]] = []
+        for match in re.finditer(r"\{", raw):
+            start = match.start()
+            try:
+                data, end_offset = decoder.raw_decode(raw[start:])
+            except Exception:
+                continue
+            if not self._is_jsonrpc_error_object(data):
+                continue
+
+            remove_start = start
+            line_start = raw.rfind("\n", 0, start) + 1
+            prefix = raw[line_start:start]
+            label_match = re.search(r"(?:最近上下文|recent\s+context)\s*[:：]\s*$", prefix, re.IGNORECASE)
+            if label_match:
+                remove_start = line_start + label_match.start()
+            ranges.append((remove_start, start + end_offset))
+
+        if not ranges:
+            return raw
+
+        parts: list[str] = []
+        cursor = 0
+        for start, end in sorted(ranges):
+            if start < cursor:
+                continue
+            parts.append(raw[cursor:start])
+            cursor = end
+        parts.append(raw[cursor:])
+        cleaned = "".join(parts)
+        cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+        cleaned = re.sub(r"\s+([。！？!?，,；;])", r"\1", cleaned)
+        return cleaned.strip()
+
+    @staticmethod
+    def _is_jsonrpc_error_object(data: Any) -> bool:
+        if not isinstance(data, dict):
+            return False
+        if str(data.get("jsonrpc") or "") != "2.0":
+            return False
+        error = data.get("error")
+        if not isinstance(error, dict):
+            return False
+        return "code" in error or "message" in error
 
     def _is_client_status_line(self, line: str) -> bool:
         normalized = re.sub(r"\s+", "", line).lower()
@@ -483,6 +594,7 @@ class PersonaStateEngine:
                 "event_affect_single_threshold": self.event_affect_single_threshold,
                 "event_similarity_threshold": self.event_similarity_threshold,
                 "event_force_after_minutes": self.event_force_after_minutes,
+                "evaluation_context_turns": self.evaluation_context_turns,
             },
         }
 
@@ -495,6 +607,7 @@ class PersonaStateEngine:
         session_state: dict,
         recalled_memory_ids: list[str],
         tool_summary: str,
+        recent_conversation_turns: list[dict] | None = None,
     ) -> tuple[dict | None, str, str | None]:
         if self.mode != "llm" or not self.client:
             return None, "", "persona LLM is not configured"
@@ -510,6 +623,9 @@ class PersonaStateEngine:
                                 "current_state": self._snapshot(global_state, session_state, self.fallback_guidance),
                                 "latest_user_message": user_message[:2000],
                                 "assistant_response": assistant_response[:4000],
+                                "recent_conversation_turns": self._recent_conversation_context(
+                                    recent_conversation_turns
+                                ),
                                 "recent_persona_events": self._recent_event_context(session_id, 5),
                                 "recalled_memory_ids": recalled_memory_ids[:20],
                                 "tool_summary": tool_summary[:1200],
@@ -1200,6 +1316,27 @@ class PersonaStateEngine:
             }
             for event in events
         ]
+
+    def _recent_conversation_context(self, turns: list[dict] | None) -> list[dict]:
+        if self.evaluation_context_turns <= 0 or not turns:
+            return []
+        selected = list(turns)[-self.evaluation_context_turns :]
+        context: list[dict] = []
+        for turn in selected:
+            if not isinstance(turn, dict):
+                continue
+            user_text = self._clean_client_status_lines(turn.get("user_text", ""))
+            assistant_text = str(turn.get("assistant_text") or "").strip()
+            if not user_text and not assistant_text:
+                continue
+            context.append(
+                {
+                    "created_at": str(turn.get("created_at") or ""),
+                    "user_message": user_text[:600],
+                    "assistant_response": assistant_text[:900],
+                }
+            )
+        return context
 
     def _processed_exchanges_since_last_event(self, session_id: str) -> int:
         last_event = self._last_event(session_id)

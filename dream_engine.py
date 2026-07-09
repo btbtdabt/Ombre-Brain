@@ -714,13 +714,41 @@ class DreamEngine:
         da = _clamp(affect.get("arousal", 0.3), 0.3) - arousal
         return max(0.0, 1.0 - math.sqrt((dv * dv + da * da) / 2))
 
-    async def _cue_score(self, record: DreamRecord, query_embedding: list[float] | None, embedding_engine) -> float:
-        if not query_embedding or embedding_engine is None or not getattr(embedding_engine, "enabled", False):
+    @staticmethod
+    def _compact_recall_text(text: str) -> str:
+        return re.sub(r"\W+", "", str(text or ""), flags=re.UNICODE).replace("_", "").lower()
+
+    @classmethod
+    def _cue_text_score(cls, record: DreamRecord, query: str) -> float:
+        query_text = cls._compact_recall_text(query)
+        if len(query_text) < 5:
             return 0.0
+        raw_cues = record.metadata.get("recall_cues")
+        cues = raw_cues if isinstance(raw_cues, list) else []
+        for cue in cues:
+            cue_text = cls._compact_recall_text(str(cue or ""))
+            if cue_text in {"梦里突然断掉的画面", "醒来前留下的细节"}:
+                continue
+            if len(cue_text) < 5:
+                continue
+            if cue_text in query_text or query_text in cue_text:
+                return 0.96
+        return 0.0
+
+    async def _cue_score(
+        self,
+        record: DreamRecord,
+        query: str,
+        query_embedding: list[float] | None,
+        embedding_engine,
+    ) -> float:
+        text_score = self._cue_text_score(record, query)
+        if not query_embedding or embedding_engine is None or not getattr(embedding_engine, "enabled", False):
+            return text_score
         stored = await embedding_engine.get_embedding(record.dream_id)
         if not stored:
-            return 0.0
-        return self._cosine(query_embedding, stored)
+            return text_score
+        return max(text_score, self._cosine(query_embedding, stored))
 
     def _format_surface(self, record: DreamRecord) -> str:
         generated = record.generated_at.astimezone(self.tz)
@@ -774,7 +802,7 @@ class DreamEngine:
         evaluated = []
         for record in pending:
             affect = self._affect_score(record, valence, arousal)
-            cue = await self._cue_score(record, query_embedding, embedding_engine)
+            cue = await self._cue_score(record, query, query_embedding, embedding_engine)
             score = max(affect, cue) + self.alpha_subordinate * min(affect, cue)
             evaluated.append({"record": record, "affect": affect, "cue": cue, "score": score, "top": max(affect, cue)})
 
@@ -827,6 +855,8 @@ class DreamEngine:
                 text = self._format_surface(surfaced_record)
                 if not retain_after_surface:
                     self._delete_record(surfaced_record, "surfaced_one_shot", embedding_engine)
+                raw_source_bucket_ids = surfaced_record.metadata.get("source_bucket_ids")
+                source_bucket_ids = raw_source_bucket_ids if isinstance(raw_source_bucket_ids, list) else []
                 return {
                     "status": "injected",
                     "reason": "resonant",
@@ -835,6 +865,11 @@ class DreamEngine:
                     "dream_id": surfaced_record.dream_id,
                     "generated_at": surfaced_record.metadata.get("generated_at"),
                     "surfaced_at": surfaced_at,
+                    "source_bucket_ids": [
+                        str(bucket_id)
+                        for bucket_id in source_bucket_ids
+                        if str(bucket_id or "").strip()
+                    ][:5],
                 }
             finally:
                 try:

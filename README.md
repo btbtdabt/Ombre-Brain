@@ -1,6 +1,6 @@
 # Ombre Brain - Haven/Rain Fork
 
-这是 [P0luz/Ombre-Brain](https://github.com/P0luz/Ombre-Brain) 的二次开发版本。原版是一套给 Claude 使用的长期情绪记忆 MCP；这个 fork 在原版的 Markdown bucket、情绪坐标、遗忘曲线、MCP 工具、Dashboard、向量检索基础上，增加了 Gateway 自动注入、Memory Moment/Edge 图召回、Word Map Lite、Persona State、Portrait/Handoff、Haven 自我入口、profile_fact 事实画像、长期锚点、关系天气、年轮评论、whisper、Darkroom、跨窗口短时上下文、Night Dream / Dream Context、自动写入门卫、Supabase 同步和 ChatGPT / Claude Connector OAuth。
+这是 [P0luz/Ombre-Brain](https://github.com/P0luz/Ombre-Brain) 的二次开发版本。原版是一套给 Claude 使用的长期情绪记忆 MCP；这个 fork 在原版的 Markdown bucket、情绪坐标、遗忘曲线、MCP 工具、Dashboard、向量检索基础上，增加了 Gateway 自动注入、Memory Moment/Edge 图召回、Word Map Lite、Persona State、Portrait/Handoff、Haven 自我入口、profile_fact 事实画像、长期锚点、关系天气、年轮评论、whisper、Darkroom、跨窗口短时上下文、原文保险箱、Night Dream / Dream Context、自动写入门卫、Supabase 同步和 ChatGPT / Claude Connector OAuth。
 
 本 README 以本 fork 的运行方式为准。原版 Docker Hub 预构建镜像、`docker-compose.user.yml`、Render / Zeabur 快速部署方式不包含这些 fork 能力，因此这里不再保留原版快速部署教程。
 
@@ -13,7 +13,8 @@
 - 生产部署建议使用源码构建，并同时运行 `ombre-brain` 和 `ombre-gateway` 两个服务；旧 `docker-compose.user.yml` / `docker-compose.yml` 只适合历史参考，不是当前新版入口。
 - bucket 数据和运行状态必须放在持久化目录里；`state` 不建议放进任何双向同步目录。
 - `X-Ombre-Session-Id` 是本 fork 的 Gateway 会话头，不是 OpenAI 标准字段。它像 Persona 的“房间号”：同一个值会共用同一份 persona_state 和召回冷却记录。可以自己起，比如 `my-main`、`chat-main`，不要照抄旧文档里的 `xiaoyu-main`。
-- 给 Operit 或其它聊天平台写工具使用清单时，先区分 MCP 工具模式和 Gateway 自动注入模式，参考 [`docs/Tool Guide.md`](<docs/Tool Guide.md>)。记得重新复制这份 Tool Guide 到客户端；旧工具说明不会知道 `is_session_start`、`mode="handoff"`、query/date breath、`read_bucket`、`self_anchor`、`daily_impression`、`darkroom_enter` 和调试工具边界。
+- 入口分层：稳定后端能力优先做成 HTTP API，MCP 只做薄适配层；能用 Gateway 自动注入、脚本或函数读端点时，不必把所有能力都塞进外部 MCP 工具说明。当前 `conversation_turns` 是短期缓存；长期原文留给 `raw_events.sqlite`，Gateway 成功对话会自动镜像 user/assistant 原文，脚本可走 `/api/ingest-raw` 追加原文，再用 `/api/search-raw` 做兜底检索。
+- 给 Operit 或其它聊天平台写工具使用清单时，先区分 MCP 工具模式和 Gateway 自动注入模式，参考 [`docs/Tool Guide.md`](<docs/Tool Guide.md>)。记得重新复制这份 Tool Guide 到客户端；旧工具说明不会知道 `is_session_start`、`mode="handoff"`、query/date breath、`read_bucket`、`self_anchor`、`daily_impression`、`darkroom_enter`、`darkroom_rooms` 和调试工具边界。
 - [`CLAUDE_PROMPT.md`](CLAUDE_PROMPT.md) 是历史兼容文件名，现在内容按通用 assistant 端编写，不只给 Claude 用。
 
 ## 2026-06-07 主线提醒
@@ -22,12 +23,12 @@
 
 - 新窗口/醒来/换窗：优先 `breath(is_session_start=true)` 或 `breath(mode="handoff")`，返回自我入口、User Portrait、Relationship Portrait、Recent Continuity 和少量 Optional Anchors；具体事件继续用 `breath(query="关键词或原句")` 查。
 - `Recent Continuity` 由按真实日期维护的 handoff recent summary、关系天气和短 trace 组成，不再把初次画像初始化摘要伪装成当天日记。
-- Gateway 会记录轻量 `conversation_turns`。遇到“刚刚/刚才/刚说/上一句/暗号”等短时跨窗口问题时，优先注入 Just Now Chat Context，并跳过默认记忆查询。
+- Gateway 会记录轻量 `conversation_turns`，写入前会跳过明确的记忆注入块，并剥掉客户端自动塞入的时间/天气/屏幕等附件块。遇到“刚刚/刚才/刚说/上一句/暗号”等短时跨窗口问题时，优先注入 Just Now Chat Context，并跳过默认记忆查询。
 - Gateway 的日期问题会先解析 `昨天/前天/6月15日/2026.06.15/2026-06-15` 这类日期，按事件日期补 Date Recall；同时可给小段 Date Persona Trace。如果本轮已有 Handoff Context，默认跳过泛泛的 Recent Context，避免 handoff、recent_context 和 query breath 重复塞。
 - Daily Portrait Maintainer 会维护用户画像、Haven persona、关系画像和“最近在做什么”，只写 `state/portrait_state.json`，不直接写长期记忆；Dashboard 可手动生成/刷新。
 - 图结构召回的当前主路是 `retrieval_mode=graph`：先找可靠 direct seed，再沿 moment / bucket 边做短摘要联想；`retrieval_mode=bucket` 只是对照模式。
 - 旧桶格式已经按新版边界迁移过：事实/事件进 `### moment`，Haven 的理解进 `### reflection`，`### affect_anchor` 只留和弦、温度和诗性标记。旧 `### assistant_reflection` heading 仍兼容读取，但新写入统一用 `### reflection`。
-- Darkroom 用来放未想透、不该给用户看、不该进普通记忆的内在反思；外部工具清单只暴露 `darkroom_enter`。
+- Darkroom 用来放未想透、不该给用户看、不该进普通记忆的内在反思；默认每次写入新房间，`new_room=false` 才手动续写当前 active 房间；给用户查看的 `darkroom_view` 必须等锁门到期。
 - Dream surfacing 和 Gateway Dream Context 是两层开关：`surface_enabled` 控制 `breath()` 梦境浮现，`inject_enabled` 控制 Gateway 隐藏注入，默认不注入。
 - 外部 MCP 工具清单已收窄：日常只保留使用者该调用的工具，`enrich_backfill`、`edge_backfill`、`inspect_diffusion`、`inspect_moments` 等调试/维修入口不放进日常外部工具清单。
 - embedding 推荐用 `OMBRE_EMBEDDING_*` 环境变量。不要把 `embedding.api_key_env` 当成推荐写法；`api_key_env` 是 `gateway.upstreams[*]` 引用上游模型 key 的字段。
@@ -41,7 +42,7 @@
 | Markdown bucket | 每条记忆是 Obsidian 友好的 Markdown + YAML frontmatter |
 | Russell 情绪坐标 | `valence / arousal` 情绪打标 |
 | 遗忘曲线与归档 | inactive 记忆会衰减、归档，feel 不参与普通浮现 |
-| MCP 工具 | 原版已有 `breath / hold / grow / trace / pulse` 和旧 `dream` 自省入口；本 fork 对外推荐 `introspection` 替代旧 `dream`，并新增 `read_bucket / comment_bucket / darkroom_enter / profile_fact` 等日常工具 |
+| MCP 工具 | 原版已有 `breath / hold / grow / trace / pulse` 和旧 `dream` 自省入口；本 fork 对外推荐 `introspection` 替代旧 `dream`，并新增 `read_bucket / comment_bucket / darkroom_enter / darkroom_rooms / darkroom_view / profile_fact` 等日常工具 |
 | Dashboard | 原版已有桶列表、详情页、记忆网络、导入面板 |
 | 双通道检索 | fuzzy 关键词 + embedding 语义检索 |
 | 脱水与打标 | LLM 生成压缩正文、domain/tags/情绪等元数据 |
@@ -51,13 +52,14 @@
 
 | 能力 | 说明 | 主要文件 |
 | --- | --- | --- |
-| OpenAI / Anthropic-compatible Gateway | 提供 `/v1/chat/completions`、`/v1/messages`、`/v1/models`，聊天客户端可直接接入 | `gateway.py` |
+| OpenAI / Anthropic-compatible Gateway | 提供 `/v1/chat/completions`、`/v1/messages`、`/v1/models`，聊天客户端可直接接入；Anthropic upstream 可走原生 `/messages` | `gateway.py` |
 | 自动记忆注入 | 请求转发前按策略注入 Recent Context、Recalled Memory、Diffused Memory；Long-term State Summary 按间隔出现 | `gateway.py` |
 | Persona State Engine | 保存 AI 回复后的全局人格、关系状态、每个 session 的短期心情 | `persona_engine.py` |
 | Portrait / Handoff | 每日维护 Persona、用户画像、关系画像和近期状态；新窗口用 `is_session_start=true` 或 `mode="handoff"` 恢复自我入口、身份与生活背景 | `portrait_engine.py`、`server.py`、`dashboard.html` |
 | 召回冷却 | 按 `X-Ombre-Session-Id` 记录轮次和最近注入，避免同一条记忆反复贴脸 | `gateway_state.py` |
 | 跨窗口短时上下文 | Gateway 记录成功聊天轮次；遇到“刚刚/刚才/上一句/暗号”等短时问题时注入 Just Now Chat Context，优先回答最近几轮而不是查长期记忆 | `gateway.py`、`gateway_state.py` |
-| 多上游模型路由和备用 key | `gateway.upstreams` 可配置多个 OpenAI-compatible provider，按请求里的 `model` 路由；同一上游可配置多个 key，失败时自动尝试下一个 | `gateway.py`、`config.example.yaml` |
+| 原文保险箱 | `raw_events.sqlite` 只收 user/assistant 原始对话或导入原文，拒收 tool/system/developer、工具结果、记忆注入块和客户端自动上下文附件；Gateway 自动镜像成功对话，脚本也可通过后台 HTTP 端点写入/检索，不占 MCP 工具说明 | `raw_events.py`、`gateway.py`、`server.py` |
+| 多上游模型路由和备用 key | `gateway.upstreams` 可配置多个 OpenAI-compatible 或 Anthropic-native provider，按请求里的 `model` 路由；同一上游可配置多个 key，失败时自动尝试下一个 | `gateway.py`、`config.example.yaml` |
 | 工具调用和流式兼容 | 透传 `tools / tool_choice / tool_calls`，支持 SSE 流式响应，兼容部分 reasoning_content 场景；Persona post-reply 评估会跳过带 `tool_calls` 的 assistant 中间态，只评估最终自然语言回复 | `gateway.py` |
 | Memory Edge / Node | 自动生成显式记忆关系边；`memory_nodes.sqlite` 为 bucket 生成 salience 与 facets，Gateway 和 `breath()` 可沿边做多跳联想浮现 | `memory_edges.py`、`memory_nodes.py`、`memory_diffusion.py`、`reflection_engine.py` |
 | Memory Moment | 将 Markdown bucket 解析成 `body / moment / fact / original / context / evidence_context / reflection / feeling / followup / affect_anchor / favorite_reason / comment` 等片段，写入 `memory_moments.sqlite`，并生成同桶前后文边、年轮/情绪温度边；`breath(query=...)` 以 moment 为单位召回和扩散 | `memory_moments.py`、`server.py` |
@@ -67,7 +69,7 @@
 | 长期锚点 Anchor | 介于普通浮现和 pinned/permanent 之间的长期记忆位。`anchor=true` 的普通 bucket 不混入普通权重池，`breath()` 会用独立槽位少量带出，适合经过时间验证、未来仍需要被想起的关系锚点或项目锚点 | `server.py`、`dashboard.html` |
 | Relationship Weather | 日印象保存为 `type=feel`，默认不单独注入，可在面板观察或按配置开启注入 | `reflection_engine.py` |
 | Night Dream / Dream Context | 后台夜里用小模型生成潜伏梦；`breath()` 可共振浮现一次，Gateway 也可在 `dream.inject_enabled=true` 时注入一条 Dream Context | `dream_engine.py`、`gateway.py`、`server.py`、`dashboard.html` |
-| Darkroom | 保存未想透、不该给用户看、不该进普通记忆的内在反思；默认只作为私密暗房保留，外部工具清单只开放 `darkroom_enter` | `darkroom.py`、`server.py`、`dashboard.html` |
+| Darkroom | 保存未想透、不该给用户看、不该进普通记忆的内在反思；默认每次写入新房间，`new_room=false` 才手动续写当前 active 房间；`darkroom_rooms` 只列门牌，`darkroom_view` 只有已解锁时才返回正文 | `darkroom.py`、`server.py`、`dashboard.html` |
 | 年轮 comments | 将再次阅读某条记忆时的感受挂到源 bucket 的 `metadata.comments` 下；旧 feel 可迁移成源记忆年轮 | `bucket_manager.py`、`server.py`、`dashboard.html` |
 | whisper | 无源碎碎念/悄悄话独立保存为 `type=feel + whisper` 标签，可用 `breath(domain="whisper")` 单独读取 | `server.py` |
 | Dashboard 编辑 | 支持正文编辑、事件日期编辑、前端用户年轮写入/删除、桶列表多选删除、日印象月历、Persona 面板、网络图、手动 reflect；日印象页按日期显示完整日印象，不再做情绪天气图 | `dashboard.html`、`server.py` |
@@ -94,6 +96,7 @@
 MCP / Dashboard / 写入 API
   -> Ombre-Brain server :18001
     -> breath/read_bucket/comment_bucket/hold/grow/trace/profile_fact 等 MCP 工具
+    -> /api/ingest-raw 和 /api/search-raw 供脚本保存/检索原文
     -> 写 Markdown bucket、metadata.comments、profile_fact、darkroom
     -> 刷新 embeddings.db / memory_moments.sqlite / memory_nodes.sqlite / memory_edges.jsonl
     -> 维护 portrait_state、dreams、relationship_weather 和 Dashboard runtime config
@@ -122,6 +125,7 @@ bucket 是 Markdown 文件，正文保存记忆内容，frontmatter 保存元数
 ```text
 embeddings.db       # 向量语义检索
 gateway_state.db    # 每个 session 的轮次、最近注入、冷却、轻量 conversation_turns、近期 upstream usage debug
+raw_events.sqlite   # 原文保险箱；只存 user/assistant 原文，不存工具结果或注入记忆
 persona_state.db    # Persona 全局状态、关系状态、会话心情
 portrait_state.json # 每日维护的 Persona/User/Relationship/Recent portrait
 memory_edges.jsonl  # 显式记忆关系边
@@ -222,8 +226,6 @@ README.md               # 示例文本
 
 当前推荐方式：先走一键脚本。它会按 `VPS / Windows / Python 直跑` 引导首次部署、更新、备份、排查、迁移和模型配置；熟悉目录挂载和 Docker Compose 后，再看下面的手动配置说明。
 
-如果目标是“远程可用、电脑不用 24/7 开机”，推荐把 Ombre 跑在 VPS/云主机上，再用 Cloudflare Tunnel 提供 HTTPS 域名。Cloudflare Tunnel 不是托管运行环境，仍需要一台持续在线的 origin 服务器。当前仓库提供了 `compose.cloudflare.yml` 和 [`docs/cloudflare-remote-deploy.md`](docs/cloudflare-remote-deploy.md)。
-
 ### 推荐入口：脚本
 
 首次部署或日常更新，优先从仓库根目录进入菜单：
@@ -276,7 +278,7 @@ cp config.example.yaml /srv/ombre-brain/config.yaml
 
 编辑 `/srv/ombre-brain/config.yaml`：
 
-- `gateway.upstreams`：配置上游 OpenAI-compatible provider；同一上游多个 key 用 `api_key_envs`。
+- `gateway.upstreams`：配置上游 provider；默认 `protocol: "openai"`，原生 Anthropic 上游写 `protocol: "anthropic"`；同一上游多个 key 用 `api_key_envs`。
 - `gateway.default_session_id`：少数兼容路由没传 `X-Ombre-Session-Id` 时的默认房间名，通用部署不要照抄旧示例名。
 - `gateway.cooldown_hours`：动态记忆再次出现的冷却小时，默认 `6`。
 - `gateway.skip_recent_rounds`：最近几轮里已经注入过的记忆优先避开，默认 `5`。
@@ -298,6 +300,7 @@ cp config.example.yaml /srv/ombre-brain/config.yaml
 - `recall.query_resurface_enabled`：是否允许有 query 的 `breath()` 在低命中时追加 `[surface_type: resurface]` 的久未触碰旧记忆，默认 `false`。
 - `memory_diffusion.*`：控制图扩散、链式扩散、hop 衰减和关系权重；默认启用普通短扩散，可靠链式扩散默认关闭。
 - `word_map.*`：派生词图诊断，默认关闭，不自动注入 Gateway。
+- `raw_events.*`：原文保险箱配置。默认写 `${state_dir}/raw_events.sqlite`，`max_ingest_batch` 控制单次 `/api/ingest-raw` 最大批量；只接收 `role=user|assistant` 的原文，`tool/system/developer`、工具结果和注入记忆会被拒收。
 - `embedding.model/base_url`：embedding 模型和地址；key 推荐放 `.env` 的 `OMBRE_EMBEDDING_API_KEY`。
 - `reranker.model/base_url`：召回候选重排序模型；默认 `Qwen/Qwen3-Reranker-4B`，`base_url` 留空时复用 embedding 地址，key 优先读 `OMBRE_RERANKER_API_KEY`，未填则复用 `OMBRE_EMBEDDING_API_KEY`。双视图召回后它仍用于 raw query 候选重排；暂时不用时设 `reranker.enabled=false` 或 `OMBRE_RERANKER_ENABLED=false`，不要删除配置键。
 - `write_path.semantic_search_timeout_seconds`：写入时找“只读相关旧记忆”的语义检索最多等待几秒，默认 `3`。网络慢时会跳过语义部分，不影响写入成功。
@@ -308,6 +311,8 @@ cp config.example.yaml /srv/ombre-brain/config.yaml
 - `persona.*`：改成自己的 Persona 模型和关系默认值。
 - `portrait.*`：每日维护 Persona/User/Relationship/Recent portrait；默认不开自动初次全库初始化，第一次建议在 Dashboard 手动生成。
 - `reflection.timezone`：默认 `Asia/Shanghai`。
+- `reflection.daily_min_memory_items`：日印象生成前要求当天普通记忆/更新项至少多少条，默认 `5`；Persona events 不计入门槛。
+- `reflection.daily_conversation_turn_limit`：日印象读取当天短期对话原文的轮数，默认 `0` 关闭；开启后优先用 `conversation_turns` 作补充材料，Persona events 退为兜底。
 - `reflection.enrich_backfill_enabled/enrich_backfill_limit`：默认每次反思定时器顺手补少量缺失 enrich 的普通 bucket，用来恢复 tags/confidence/memory_edges。
 - `reflection.diary_mcp_url` / `diary_mcp_token_env`：只有接 Haven-diary/RiJi 时再启用；不使用日记系统就留空，并关闭 `reflection.diary_memory_extract_enabled`。
 
@@ -347,12 +352,6 @@ OMBRE_CHATGPT_OAUTH_REDIRECT_URIS=https://claude.ai/api/mcp/auth_callback
 
 `MCP_BEARER_TOKEN` 只在接 RiJi/Haven-diary 摘记时需要；不接外部日记系统就不要配置 diary URL/token。
 
-Cloudflare Tunnel token 不放在 `.env`，避免被 `ombre-brain` / `ombre-gateway` 容器读到。使用 `compose.cloudflare.yml` 时，复制 `cloudflare.env.example` 为 `cloudflare.env`，然后只写：
-
-```text
-TUNNEL_TOKEN=
-```
-
 `OMBRE_DREAM_API_KEY` 默认按 DeepSeek 官方 OpenAI-compatible API 使用；如果换别的服务，可再加：
 
 ```text
@@ -389,9 +388,11 @@ embedding:
 `gateway.upstreams` 可以配多个站点，也可以给同一个站点配多个 key。常用字段如下：
 
 - `name`：上游站点的内部名字，可以继续用 `provider-a` / `provider-b` / `provider-c`；不一定要和模型别名一致。
-- `base_url`：模型站 OpenAI-compatible 地址，通常以 `/v1` 结尾。
+- `protocol`：默认 `openai`，转发到上游 `/chat/completions`；写 `anthropic` 时，`/v1/messages` 会原生转发到上游 `/messages`。
+- `base_url`：模型站 API 地址，通常以 `/v1` 结尾。
 - `api_key_env`：单个 key 时继续用这个。
 - `api_key_envs`：多个备用 key 时用这个列表。
+- `anthropic_version`：仅 `protocol: "anthropic"` 使用，默认 `2023-06-01`。
 - `models`：客户端可选择的模型列表；字符串写法会原样转发，字典写法可设置别名。
 
 单个站点、单个 key、模型名不会重复时，保持最简单写法就行：
@@ -400,6 +401,7 @@ embedding:
 gateway:
   upstreams:
     - name: "provider-c"
+      protocol: "openai"
       base_url: "https://c.example.com/v1"
       api_key_env: "OMBRE_GATEWAY_PROVIDER_C_API_KEY"
       models:
@@ -415,6 +417,7 @@ gateway:
 gateway:
   upstreams:
     - name: "provider-a"
+      protocol: "openai"
       base_url: "https://api.example.com/v1"
       default_model: "model-a"
       api_key_envs:
@@ -432,12 +435,14 @@ gateway:
   upstream_default_model: "site-a/deepseek-v4"
   upstreams:
     - name: "site-a"
+      protocol: "openai"
       base_url: "https://a.example.com/v1"
       api_key_env: "OMBRE_GATEWAY_SITE_A_API_KEY"
       models:
         - id: "site-a/deepseek-v4"
           upstream_model: "deepseek-v4"
     - name: "site-b"
+      protocol: "openai"
       base_url: "https://b.example.com/v1"
       api_key_env: "OMBRE_GATEWAY_SITE_B_API_KEY"
       models:
@@ -466,7 +471,51 @@ gateway:
 
 Gateway 会按请求里的 `model` 找上游。遇到 `401/403/429/500/502/503/504` 或网络错误，会临时冷却当前 key，并尝试同上游的下一个 key。`400`、模型名错误、上下文太长这类请求本身的问题不会换 key。冷却时间由 `gateway.upstream_key_cooldown_seconds` 控制，默认 300 秒。
 
-`prompt_cache: "openai"` 和 `prompt_cache_retention: "24h"` 是 OpenAI prompt cache 提示。Gateway 会给上游请求加 `prompt_cache_key` 和 `prompt_cache_retention`，只适合确认支持这些字段的上游；不确定时保持关闭：
+Anthropic 原生上游要同时注意 `protocol`、`base_url` 和缓存模式：
+
+```yaml
+gateway:
+  upstream_default_model: "claude-sonnet"
+  upstreams:
+    - name: "anthropic"
+      protocol: "anthropic"
+      base_url: "https://api.anthropic.com/v1"
+      api_key_env: "OMBRE_GATEWAY_ANTHROPIC_API_KEY"
+      anthropic_version: "2023-06-01"
+      prompt_cache: "anthropic"
+      # prompt_cache_retention: "1h"  # 不写时走 Anthropic 默认 5 分钟 TTL
+      default_model: "claude-sonnet"
+      models:
+        - id: "claude-sonnet"
+          upstream_model: "claude-sonnet-4-6"
+```
+
+`protocol: "anthropic"` 只影响 Anthropic-compatible 客户端打来的 `/v1/messages`：Gateway 仍会先注入记忆，再用 `x-api-key` 和 `anthropic-version` 转发到上游 `/messages`。这样 prompt cache、`cache_read_input_tokens` / `cache_creation_input_tokens` 这类 Anthropic 原生字段会保留下来。普通 OpenAI-compatible 客户端继续走 `/v1/chat/completions`。
+
+`base_url` 写到站点的 API 根路径即可，通常是 `.../v1`，不要写成 `.../v1/messages`。Gateway 会自己补 `/messages`。如果把 `/messages` 写进 `base_url`，最终请求会变成 `/v1/messages/messages`。如果漏掉 `protocol: "anthropic"`，Gateway 会按默认 OpenAI 协议去请求 `/chat/completions`，也不是 Claude 原生 Messages 接口。
+
+缓存模式按上游能力选：
+
+- `prompt_cache: "openai"` 和 `prompt_cache_retention: "24h"`：OpenAI prompt cache 提示。Gateway 会给上游请求加 `prompt_cache_key` 和 `prompt_cache_retention`。
+- `prompt_cache: "anthropic"`：只在 `protocol: "anthropic"` 上游生效，会给原生 Messages 请求加顶层 `cache_control: {"type": "ephemeral"}`；`prompt_cache_retention: "1h"` 会改成 1 小时 TTL。官方 Anthropic 或支持顶层 `cache_control` 的中转站用这个。
+- `prompt_cache: "anthropic_explicit"`：给只认旧式显式缓存断点的中转站用。这个模式不会加顶层 `cache_control`，而是优先把 `cache_control` 挂到 `system` 的最后一个 content block 上；历史对话只有在稳定前缀达到模型最低缓存阈值，且当前尾部仍保留约 4000 token 时，才把断点挂到当前最新 user message 之前的 assistant 消息上。
+
+中转站如果要求 Anthropic 原生协议、但只支持显式断点，可以这样写：
+
+```yaml
+gateway:
+  upstreams:
+    - name: provider-e
+      protocol: "anthropic"
+      base_url: "http://cc.v587xh.com/v1"
+      api_key_env: OMBRE_GATEWAY_PROVIDER_E_API_KEY
+      prompt_cache: "anthropic_explicit"
+      models:
+        - id: provider-e/claude-opus-4-6
+          upstream_model: claude-opus-4-6
+```
+
+如果这个站点其实是 OpenAI-compatible，不要写 `protocol: "anthropic"`，保持默认 OpenAI 协议，`base_url` 同样写到 `/v1`。不确定上游是否支持 prompt cache 时保持关闭：
 
 ```yaml
 prompt_cache: ""
@@ -495,15 +544,6 @@ ombre-gateway
 ```
 
 新机器可以复制 `compose.hk.yml` 再按自己的路径、端口和镜像策略调整。
-
-如果通过 Cloudflare Tunnel 对外提供 HTTPS，使用 `compose.cloudflare.yml`。它和 `compose.hk.yml` 一样启动 `ombre-brain` / `ombre-gateway`，但端口只绑定到 `127.0.0.1` 用于本机健康检查，并额外启动 `cloudflared`。Cloudflare 里配置两个 hostname：
-
-```text
-brain.example.com   -> http://ombre-brain:8000
-gateway.example.com -> http://ombre-gateway:8010
-```
-
-完整步骤见 [`docs/cloudflare-remote-deploy.md`](docs/cloudflare-remote-deploy.md)。
 
 `OMBRE_GATEWAY_ADMIN_URL` 用来让 Dashboard 改“记忆浮现”里的参数后，现场通知 `ombre-gateway`。目前会热更新冷却时间/轮数、直命中展示形状、召回模式，以及 `memory_diffusion` 的扩散和链式扩散参数。不加这条也能跑；Dashboard 仍会更新 `ombre-brain` 运行时和 yaml，但 Gateway 要重启后才读到这些值。
 
@@ -580,6 +620,8 @@ Endpoint: http://<host>:18002/v1/messages
 API Key:  OMBRE_GATEWAY_TOKEN 的值，可用 x-api-key
 Header:   X-Ombre-Session-Id: my-main
 ```
+
+模型列表走 `GET http://<host>:18002/v1/models`，带 `x-api-key` 或 `anthropic-version` 时返回 Anthropic 形状；带 `Authorization: Bearer ...` 时返回 OpenAI 形状。
 
 即使某些兼容路径有历史 fallback，也建议总是显式传 `X-Ombre-Session-Id`。
 
@@ -793,7 +835,9 @@ rm /srv/ombre-brain/state/.dashboard_auth.json
 | `read_bucket` | 按 bucket_id 精确读取完整记忆；准备改旧记忆或追细节前使用。 |
 | `comment_bucket` | 给已有记忆追加年轮/评论；适合“读到旧记忆后的新感受或补充”。 |
 | `hold` | 写单条长期记忆；可传 `date` 记录事件日期；显式 `domain` 会覆盖自动领域；显式 `valence/arousal` 会覆盖自动情绪；`whisper=True` 写无源悄悄话。 |
-| `darkroom_enter` | 写入私密暗房，只返回门口状态，不回显正文。 |
+| `darkroom_enter` | 写入私密暗房；note 默认第一人称，不用第三人称称呼自己；默认新开房间，可传 `new_room=false` 手动续写当前 active 房间，可传 `lock_for="6h"` / `"3d"`；写错要撤回已有 active 房间时传 `new_room=false, visibility="retracted"`，否则会新开一间 retracted 房；只返回门口状态，不回显正文。 |
+| `darkroom_rooms` | 只读列出暗房门牌，不返回正文；默认列 active 房间，可传 `visibility="all"` 看全部门牌；拿到 `room_id` 后再调用 `darkroom_view(room_id)`。 |
+| `darkroom_view` | 只读查看已解锁的暗房内容；可按 room_id 返回该房间全部 revisions 和每次写入时间；未到锁门时间只返回 `unlock_at`，不返回正文。 |
 | `grow` | 长内容摘记；只喂已经筛过的长期记忆点，不要整篇流水账原样写入。 |
 | `profile_fact` | 手动固化带证据的用户画像事实；需要 evidence bucket/moment。 |
 | `trace` | 修改、归档、删除或沉底旧记忆前使用；先 `read_bucket` 再操作；可用 `date` 单独修正事件日期。 |

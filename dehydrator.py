@@ -35,9 +35,44 @@ from openai import AsyncOpenAI
 
 from identity import generic_identity_names, identity_names, render_identity_template
 from memory_layers import normalize_write_classification
-from utils import count_tokens_approx, parse_first_json_value
+from memory_metadata import domain_prompt_options_text, normalize_domain_key
+from utils import count_tokens_approx
 
 logger = logging.getLogger("ombre_brain.dehydrator")
+
+
+RESERVED_SELF_ANCHOR_TAGS = {
+    "self_anchor",
+    "selfanchor",
+    "selfidentity",
+    "self_identity",
+    "self-identity",
+    "first_person_anchor",
+    "first-person-anchor",
+    "firstpersonanchor",
+    "自我",
+}
+
+
+def _tag_key(value: object) -> str:
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff_]+", "", str(value or "").strip().lower())
+
+
+def _sanitize_generated_tags(tags: object) -> list[str]:
+    if isinstance(tags, str):
+        raw = [part.strip() for part in tags.split(",")]
+    elif isinstance(tags, (list, tuple, set)):
+        raw = list(tags)
+    else:
+        raw = []
+    clean: list[str] = []
+    for tag in raw:
+        text = str(tag or "").strip()
+        if not text or _tag_key(text) in RESERVED_SELF_ANCHOR_TAGS:
+            continue
+        if text not in clean:
+            clean.append(text)
+    return clean[:15]
 
 
 # --- Dehydration prompt: instructs cheap LLM to compress information ---
@@ -80,6 +115,11 @@ DIRECT_BUCKET_CAPSULE_PROMPT = """你是长期记忆证据压缩器。请把一�
 # --- 长内容摘记提示词：把筛选后的长期记忆片段拆成多个独立条目 ---
 DIGEST_PROMPT_TEMPLATE = """你是一个长期记忆摘记专家。用户会发送一段已经筛选过、适合进入长期记忆的文本。请将其中真正值得长期召回的内容拆分成多个独立记忆条目。
 
+当前身份口径来自配置：
+- 当前用户显示名：{user_display_name}
+- 当前 AI 名：{ai_name}
+- 用户别名：{user_aliases_text}
+
 重要边界：
 1. 不要把整篇日终日记、一天流水或完整情绪过程当作默认输入。
 2. 如果输入更像日记原文，只提取少量长期有用的事实、偏好、承诺、关系锚点或当前项目状态。
@@ -94,18 +134,24 @@ DIGEST_PROMPT_TEMPLATE = """你是一个长期记忆摘记专家。用户会发�
 6. 单个条目内容不少于50字，过短的零碎信息合并到最相关的条目中
 7. 总条目数控制在 1~4 个，避免过度碎片化
 8. 在 content 中对人名、地名、专有名词用 [[双链]] 标记（如 [[婷易]]、[[Obsidian]]），普通词汇不要加
-9. 整理后的 content 使用当前身份名：当前用户写作 {user_display_name}，当前回应者写作 {ai_name}；### original 中的证据称呼按原文保留。
-10. 每个条目必须回答它属于哪类长期记忆：
+9. 如果原文里的 user / 用户 / 用户消息指的是这段关系里的当前用户，请在 content 中写作 {user_display_name}；如果 assistant / AI / 模型 / 助手消息指的是这段关系里的当前回应者，请写作 {ai_name}。不要写成泛称 user、AI、assistant 或模型。
+10. 原文里的具体称呼、昵称、互称、自称和亲密称谓必须原样保留，例如“老公”“哥哥”“宝宝”“老婆”等；不要把这些称呼改写成 {user_display_name}、{ai_name}、用户、AI、assistant 或模型。
+11. 称呼本身只是原话或互动语气，不能自动推断成稳定画像事实；只有原文明确表达长期关系定位、稳定偏好或明确约定时，才写入 stable_boundary / relationship_lesson。
+12. 每个条目必须回答它属于哪类长期记忆：
    - memory_subject 只能是 user / relationship / event
    - memory_layer 只能是 stable_boundary / short_state / process_event / relationship_lesson
    user: {user_display_name} 的状态、偏好、边界、习惯、困扰。
    relationship: {ai_name} 应该如何承接、回应、记住约定，或这段关系形成的默契。
    event: 一段带过程的事件、项目状态、承诺进展或背景事实。
    stable_boundary: 长期稳定偏好/边界/身份事实；short_state: 只影响近期的状态；process_event: 带过程的事件/项目状态；relationship_lesson: {ai_name} 以后应该怎么接住这件事。
-11. content 分段时使用：### moment 写真实发生的事件/经历；### original 写当时原话或证据文本；### reflection 写 {ai_name} 的理解、确认、偏爱原因或以后如何回应；### followup 写后续承诺、待办、选择或状态变化；### affect_anchor 只写和弦、bpm、力度等温度线，不写事件正文、含义解释或反思。不是每个条目都需要全部 section，没有的不写。
-12. ### moment 可以用第三人称客观记录；### reflection 必须保留为 {ai_name} 的第一人称反思，使用“我记得 / 我明白 / 我以后 / 我喜欢 / 我会”等表达。
+13. content 最少要有正文。section 按需写，没必要就省略：
+   - 正文：自然语言总结或直接事件描述。
+   - ### moment：长期有用的事实、事件、偏好、约定，只写短短一句。
+   - ### original：只放必须保留原味的短原话；不要复制长段原文，不要为了“有证据”而写。
+   - ### reflection：{ai_name} 对这件事的理解、以后该怎么回应、哪里需要克制或记住。
+14. ### moment 可以用第三人称客观记录；### reflection 必须保留为 {ai_name} 的第一人称反思，使用“我记得 / 我明白 / 我以后 / 我喜欢 / 我会”等表达，不要改写成“{ai_name} 应记住 / {ai_name} 需要 / 关于 {ai_name} 的说明”。
 
-输出格式（必须按照此格式输出）：
+输出格式（纯 JSON 数组，无其他内容）：
 [
   {
     "name": "条目标题（10字以内）",
@@ -121,28 +167,33 @@ DIGEST_PROMPT_TEMPLATE = """你是一个长期记忆摘记专家。用户会发�
 ]
 
 tags 生成规则：先从原文精准提取 3~5 个核心词，再引申扩展 5~8 个语义相关词（近义词、上位词、关联场景词），合并为一个数组。
+禁止生成系统边界标签：self_anchor、self_identity、self-identity、first_person_anchor、first-person-anchor、自我；这些只能由上游显式写入，不能由自动整理/打标模型补。
 
-主题域可选（选最精确的 1~2 个，只选真正相关的）：
-  日常: ["饮食", "穿搭", "出行", "居家", "购物"]
-  人际: ["家庭", "恋爱", "友谊", "社交"]
-  成长: ["工作", "学习", "考试", "求职"]
-  身心: ["健康", "心理", "睡眠", "运动"]
-  兴趣: ["游戏", "影视", "音乐", "阅读", "创作", "手工"]
-  数字: ["编程", "AI", "硬件", "网络"]
-  事务: ["财务", "计划", "待办"]
-  内心: ["情绪", "回忆", "梦境", "自省"]
+domain 必须从下面的新主域里选最精确的 1 个；只有确实横跨两个主域时才输出 2 个。不要输出旧的“日常/人际/数字/内心/未分类”：
+{domain_options_text}
 importance: 1-10，根据内容重要程度判断
 valence: 0~1（0=消极, 0.5=中性, 1=积极）
-arousal: 0~1（0=平静, 0.5=普通, 1=激动）
+arousal: 0~1（0=平静, 0.5=普通, 1=激动）"""
 
-输出必须是一个合法 JSON array。"""
 
-DIGEST_PROMPT = render_identity_template(DIGEST_PROMPT_TEMPLATE, generic_identity_names())
+def _render_dehydrator_template(template: str, names: dict) -> str:
+    return render_identity_template(
+        template.replace("{domain_options_text}", domain_prompt_options_text()),
+        names,
+    )
+
+
+DIGEST_PROMPT = _render_dehydrator_template(DIGEST_PROMPT_TEMPLATE, generic_identity_names())
 
 
 # --- Merge prompt: instruct LLM to blend old and new memories ---
 # --- 合并提示词：指导 LLM 揉合新旧记忆 ---
 MERGE_PROMPT_TEMPLATE = """你是一个信息合并专家。请将旧记忆与新内容合并为一份统一的简洁记录。
+
+当前身份口径来自配置：
+- 当前用户显示名：{user_display_name}
+- 当前 AI 名：{ai_name}
+- 用户别名：{user_aliases_text}
 
 合并规则：
 1. 新内容与旧记忆冲突时，以新内容为准
@@ -150,8 +201,10 @@ MERGE_PROMPT_TEMPLATE = """你是一个信息合并专家。请将旧记忆与�
 3. 保留所有重要事实
 4. 总长度尽量不超过旧记忆的 120%
 5. 对出现的人名、地名、专有名词用 [[双链]] 标记（如 [[婷易]]、[[Obsidian]]），普通词汇不要加
-6. 如果输出中包含分段，使用 ### moment / ### original / ### reflection / ### followup / ### affect_anchor；affect_anchor 只保留和弦、bpm、力度等温度线，不要放事件描述。
-7. 保留旧记忆和新内容已有的 section 语义与人称。### moment 可以客观第三人称；### reflection 是 {ai_name} 的第一人称反思。如果原 reflection 已经是第一人称，必须继续第一人称。
+6. 原文里的具体称呼、昵称、互称、自称和亲密称谓必须原样保留，例如“老公”“哥哥”“宝宝”“老婆”等；不要把这些称呼改写成 {user_display_name}、{ai_name}、用户、AI、assistant 或模型。
+7. 称呼本身只是原话或互动语气，不能自动推断成稳定画像事实；只有原文明确表达长期关系定位、稳定偏好或明确约定时，才写入稳定事实或回应规则。
+8. 合并后的 content 最少要有正文。section 按需写，没必要就省略：### moment 只放一条长期有用的短事实；### original 只放必须保留原味的短原话，不要复制长段原文，不要为了“有证据”而写；### reflection 放 {ai_name} 的理解、以后该怎么回应、哪里需要克制或记住。
+9. 保留旧记忆和新内容已有的 section 语义与人称。### moment 可以客观第三人称；### reflection 是 {ai_name} 的第一人称反思，合并时不要把“我”改写成“{ai_name} 应记住 / {ai_name} 需要 / 关于 {ai_name} 的说明”。如果原 reflection 已经是第一人称，必须继续第一人称。
 
 直接输出合并后的文本，不要加额外说明。"""
 
@@ -160,18 +213,11 @@ MERGE_PROMPT = render_identity_template(MERGE_PROMPT_TEMPLATE, generic_identity_
 
 # --- Auto-tagging prompt: analyze content for domain and emotion coords ---
 # --- 自动打标提示词：分析内容的主题域和情感坐标 ---
-ANALYZE_PROMPT = """你是一个内容分析器。请分析以下文本，输出结构化的元数据。
+ANALYZE_PROMPT_TEMPLATE = """你是一个内容分析器。请分析以下文本，输出结构化的元数据。
 
 分析规则：
-1. domain（主题域）：选最精确的 1~2 个，只选真正相关的
-   日常: ["饮食", "穿搭", "出行", "居家", "购物"]
-   人际: ["家庭", "恋爱", "友谊", "社交"]
-   成长: ["工作", "学习", "考试", "求职"]
-   身心: ["健康", "心理", "睡眠", "运动"]
-   兴趣: ["游戏", "影视", "音乐", "阅读", "创作", "手工"]
-   数字: ["编程", "AI", "硬件", "网络"]
-   事务: ["财务", "计划", "待办"]
-   内心: ["情绪", "回忆", "梦境", "自省"]
+1. domain（主题域）：必须从下面的新主域里选最精确的 1 个；只有确实横跨两个主域时才输出 2 个。不要输出旧的“日常/人际/数字/内心/未分类”：
+{domain_options_text}
 2. valence（情感效价）：0.0~1.0，0=极度消极 → 0.5=中性 → 1.0=极度积极
 3. arousal（情感唤醒度）：0.0~1.0，0=非常平静 → 0.5=普通 → 1.0=非常激动
 4. tags（关键词标签）：分两步生成，合并为一个数组：
@@ -189,8 +235,9 @@ ANALYZE_PROMPT = """你是一个内容分析器。请分析以下文本，输出
    process_event=带过程的事件或项目状态
    relationship_lesson=以后应该如何回应/承接这件事
 8. 在 tags 和 suggested_name 中不要使用 [[]] 双链标记
+9. 禁止生成系统边界标签：self_anchor、self_identity、self-identity、first_person_anchor、first-person-anchor、自我；这些只能由上游显式写入，不能由自动打标模型补。
 
-输出格式（必须按照此格式输出）：
+输出格式（纯 JSON，无其他内容）：
 {
   "domain": ["主题域1", "主题域2"],
   "valence": 0.7,
@@ -199,9 +246,9 @@ ANALYZE_PROMPT = """你是一个内容分析器。请分析以下文本，输出
   "suggested_name": "简短标题",
   "memory_subject": "event",
   "memory_layer": "process_event"
-}
+}"""
 
-输出必须是一个合法 JSON object。"""
+ANALYZE_PROMPT = ANALYZE_PROMPT_TEMPLATE.replace("{domain_options_text}", domain_prompt_options_text())
 
 
 class Dehydrator:
@@ -530,7 +577,7 @@ class Dehydrator:
                 {"role": "user", "content": content[:2000]},
             ],
             **self._completion_options(
-                max_tokens=self.max_tokens,
+                max_tokens=256,
                 temperature=0.1,
             ),
         )
@@ -552,8 +599,13 @@ class Dehydrator:
         解析并校验 API 返回的打标结果。
         """
         try:
-            result = parse_first_json_value(raw)
-        except (ValueError, TypeError):
+            # Handle potential markdown code block wrapping
+            # 处理可能的 markdown 代码块包裹
+            cleaned = raw.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0]
+            result = json.loads(cleaned)
+        except (json.JSONDecodeError, IndexError, ValueError):
             logger.warning(f"API tagging JSON parse failed / JSON 解析失败: {raw[:200]}")
             return self._default_analysis()
 
@@ -567,18 +619,19 @@ class Dehydrator:
         except (ValueError, TypeError):
             valence, arousal = 0.5, 0.3
 
+        tags = _sanitize_generated_tags(result.get("tags", []))
         classification = normalize_write_classification(
             memory_subject=result.get("memory_subject", ""),
             memory_layer=result.get("memory_layer", ""),
-            tags=result.get("tags", []),
+            tags=tags,
             content=content,
         )
 
         return {
-            "domain": result.get("domain", ["未分类"])[:3],
+            "domain": self._normalize_domains(result.get("domain", ["general"])),
             "valence": valence,
             "arousal": arousal,
-            "tags": result.get("tags", [])[:15],
+            "tags": tags,
             "suggested_name": str(result.get("suggested_name", ""))[:20],
             **classification,
         }
@@ -593,7 +646,7 @@ class Dehydrator:
         返回默认的中性分析结果。
         """
         return {
-            "domain": ["未分类"],
+            "domain": ["general"],
             "valence": 0.5,
             "arousal": 0.3,
             "tags": [],
@@ -628,7 +681,7 @@ class Dehydrator:
                     )},
                     {"role": "user", "content": body[:1500]},
                 ],
-                **self._completion_options(max_tokens=self.max_tokens, temperature=0.0),
+                **self._completion_options(max_tokens=64, temperature=0.0),
             )
             raw = response.choices[0].message.content if response.choices else ""
             text = raw.strip().strip('"').strip("'").strip()
@@ -682,11 +735,11 @@ class Dehydrator:
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=[
-                {"role": "system", "content": render_identity_template(DIGEST_PROMPT_TEMPLATE, self.identity)},
+                {"role": "system", "content": _render_dehydrator_template(DIGEST_PROMPT_TEMPLATE, self.identity)},
                 {"role": "user", "content": content[:5000]},
             ],
             **self._completion_options(
-                max_tokens=self.max_tokens,
+                max_tokens=2048,
                 temperature=0.0,
             ),
         )
@@ -707,8 +760,11 @@ class Dehydrator:
         解析并校验 API 返回的日记整理结果。
         """
         try:
-            items = parse_first_json_value(raw)
-        except (ValueError, TypeError):
+            cleaned = raw.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0]
+            items = json.loads(cleaned)
+        except (json.JSONDecodeError, IndexError, ValueError):
             logger.warning(f"Memory digest JSON parse failed / JSON 解析失败: {raw[:200]}")
             return []
 
@@ -729,7 +785,7 @@ class Dehydrator:
             except (ValueError, TypeError):
                 valence, arousal = 0.5, 0.3
 
-            tags = item.get("tags", [])[:15]
+            tags = _sanitize_generated_tags(item.get("tags", []))
             content = str(item.get("content", ""))
             classification = normalize_write_classification(
                 memory_subject=item.get("memory_subject", ""),
@@ -741,7 +797,7 @@ class Dehydrator:
             validated.append({
                 "name": str(item.get("name", ""))[:20],
                 "content": content,
-                "domain": item.get("domain", ["未分类"])[:3],
+                "domain": self._normalize_domains(item.get("domain", ["general"])),
                 "valence": valence,
                 "arousal": arousal,
                 "tags": tags,
@@ -749,6 +805,23 @@ class Dehydrator:
                 **classification,
             })
         return validated
+
+    @staticmethod
+    def _normalize_domains(value: Any) -> list[str]:
+        if value is None:
+            raw = []
+        elif isinstance(value, str):
+            raw = [item.strip() for item in value.split(",")]
+        elif isinstance(value, (list, tuple, set)):
+            raw = list(value)
+        else:
+            raw = [value]
+        domains: list[str] = []
+        for item in raw:
+            domain = normalize_domain_key(item)
+            if domain and domain not in domains:
+                domains.append(domain)
+        return domains[:2] or ["general"]
 
     def _completion_options(self, *, max_tokens: int, temperature: float) -> dict[str, Any]:
         options: dict[str, Any] = {

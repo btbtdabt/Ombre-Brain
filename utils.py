@@ -11,37 +11,15 @@
 
 import os
 import re
-import json
 import uuid
 import yaml
 import logging
 from pathlib import Path
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from typing import Any
 
 
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
-
-
-def parse_first_json_value(raw: str) -> Any:
-    """
-    Parse the first JSON object or array in an LLM response.
-    解析 LLM 返回里第一个 JSON object 或 array。
-    """
-    text = str(raw or "").strip()
-    if not text:
-        raise ValueError("empty_json_response")
-    decoder = json.JSONDecoder()
-    for index, char in enumerate(text):
-        if char not in "{[":
-            continue
-        try:
-            value, _ = decoder.raw_decode(text[index:])
-        except json.JSONDecodeError:
-            continue
-        return value
-    raise ValueError("no_json_object_or_array_found")
 
 
 def _date_hint(year: int, month: int, day: int, label: str, tz=LOCAL_TZ) -> dict[str, str] | None:
@@ -152,7 +130,7 @@ def load_config(config_path: str = None) -> dict:
         "log_level": "INFO",
         "buckets_dir": os.path.join(os.path.dirname(os.path.abspath(__file__)), "buckets"),
         "state_dir": "",
-        "merge_threshold": 75,
+        "merge_threshold": 90,
         "import": {
             "chunk_target_tokens": 3500,
             "extract_max_input_chars": 0,
@@ -161,7 +139,7 @@ def load_config(config_path: str = None) -> dict:
             "max_tag_chars": 12,
             "auto_merge_enabled": False,
             "merge_threshold": 90,
-            "merge_min_content_similarity": 92,
+            "merge_min_content_similarity": 99,
             "merge_require_domain_overlap": True,
             "merge_require_source_match": True,
             "merge_block_disjoint_dates": True,
@@ -191,7 +169,7 @@ def load_config(config_path: str = None) -> dict:
             "base_url": "https://api.deepseek.com/v1",
             "api_key": "",
             "thinking_mode": "",
-            "max_tokens": 64000,
+            "max_tokens": 1024,
             "temperature": 0.1,
         },
         "embedding": {
@@ -218,15 +196,6 @@ def load_config(config_path: str = None) -> dict:
             "max_candidates": 20,
             "max_text_chars": 220,
         },
-        "debug_trace": {
-            "enabled": False,
-            "gateway_payloads": True,
-            "mcp_http": True,
-            "max_value_chars": 12000,
-            "max_body_chars": 20000,
-            "max_files": 7,
-            "dir": "",
-        },
         "recall_thresholds": {
             "vector_min_score": 0.50,
             "facet_vector_min_score": 0.45,
@@ -236,12 +205,21 @@ def load_config(config_path: str = None) -> dict:
         },
         "word_map": {
             "enabled": False,
+            "daily_rebuild_enabled": True,
+            "daily_rebuild_hour": 4,
+            "daily_rebuild_minute": 30,
+            "daily_rebuild_include_archive": False,
+            "daily_rebuild_check_interval_minutes": 15,
             "max_terms_per_bucket": 16,
             "edge_top_k": 10,
             "min_term_len": 2,
             "stopwords": [],
             "private_terms": [],
             "stopword_prefixes": [],
+        },
+        "raw_events": {
+            "db_path": "",
+            "max_ingest_batch": 1000,
         },
         "identity_semantics": {
             "enabled": False,
@@ -309,11 +287,23 @@ def load_config(config_path: str = None) -> dict:
             "skip_recent_rounds": 5,
             "cooldown_hours": 6,
             "cooldown_floor": 0.3,
+            "semantic_session_dedupe_enabled": True,
+            "semantic_session_dedupe_threshold": 0.90,
+            "semantic_session_dedupe_lexical_threshold": 0.82,
+            "memory_sentinel_enabled": True,
+            "memory_sentinel_llm_enabled": False,
+            "memory_sentinel_model": "",
+            "memory_sentinel_context_turns": 3,
+            "domain_sentinel_enabled": True,
+            "domain_sentinel_model": "Qwen/Qwen3.5-4B",
+            "domain_sentinel_max_tokens": 260,
+            "domain_sentinel_enable_thinking": False,
             "inject_total_budget": 1200,
             "core_memory_budget": 0,
             "recent_context_budget": 300,
             "recalled_memory_budget": 400,
             "direct_render_mode": "auto",
+            "bucket_list_cache_ttl_seconds": 300,
             "portrait_memory_enabled": False,
             "portrait_memory_budget": 360,
             "portrait_memory_max_sources": 8,
@@ -322,6 +312,7 @@ def load_config(config_path: str = None) -> dict:
             "favorite_memory_budget": 0,
             "favorite_memory_max_cards": 1,
             "related_memory_budget": 220,
+            "operit_context_rewrite_enabled": False,
             "core_memory_interval_rounds": 0,
             "current_inner_state_interval_rounds": 15,
             "relationship_weather_interval_rounds": 0,
@@ -349,7 +340,7 @@ def load_config(config_path: str = None) -> dict:
             "api_key": "",
             "thinking_mode": "",
             "temperature": 0.1,
-            "max_tokens": 64000,
+            "max_tokens": 500,
             "global_decay_hours": 168,
             "session_mood_half_life_minutes": 90,
             "max_personality_delta": 0.01,
@@ -401,9 +392,11 @@ def load_config(config_path: str = None) -> dict:
             "api_key": "",
             "thinking_mode": "",
             "temperature": 0.1,
-            "max_tokens": 64000,
+            "max_tokens": 700,
             "timezone": "Asia/Shanghai",
             "daily_hour": 4,
+            "daily_min_memory_items": 5,
+            "daily_conversation_turn_limit": 0,
             "weekly_day": 0,
             "weekly_hour": 4,
             "check_interval_minutes": 60,
@@ -416,6 +409,12 @@ def load_config(config_path: str = None) -> dict:
             "diary_memory_extract_enabled": True,
             "diary_memory_extract_max_per_day": 1,
             "diary_memory_extract_min_confidence": 0.68,
+            "daily_chat_memory_mode": "auto",
+            "daily_chat_memory_hour": 0,
+            "daily_chat_memory_turn_limit": 0,
+            "daily_chat_memory_max_per_day": 3,
+            "daily_chat_memory_candidate_model": "Qwen/Qwen3.5-4B",
+            "daily_chat_memory_candidate_thinking_mode": "disabled",
         },
         "portrait": {
             "enabled": True,
@@ -431,7 +430,7 @@ def load_config(config_path: str = None) -> dict:
             "api_key": "",
             "thinking_mode": "",
             "temperature": 0.1,
-            "max_tokens": 64000,
+            "max_tokens": 1800,
             "material_limit": 18,
             "first_run_material_limit": 160,
             "persona_events_limit": 24,
@@ -450,7 +449,7 @@ def load_config(config_path: str = None) -> dict:
             "api_key": "",
             "thinking_mode": "disabled",
             "temperature": 0.85,
-            "max_tokens": 64000,
+            "max_tokens": 900,
             "timezone": "Asia/Shanghai",
             "daily_hour": 3,
             "run_window_hours": 3,
@@ -663,6 +662,10 @@ def load_config(config_path: str = None) -> dict:
             if item.strip()
         ]
 
+    env_domain_sentinel_model = os.environ.get("OMBRE_DOMAIN_SENTINEL_MODEL", "")
+    if env_domain_sentinel_model:
+        config.setdefault("gateway", {})["domain_sentinel_model"] = env_domain_sentinel_model
+
     env_persona_api_key = os.environ.get("OMBRE_PERSONA_API_KEY", "")
     if env_persona_api_key:
         config.setdefault("persona", {})["api_key"] = env_persona_api_key
@@ -686,6 +689,10 @@ def load_config(config_path: str = None) -> dict:
     env_reflection_model = os.environ.get("OMBRE_REFLECTION_MODEL", "")
     if env_reflection_model:
         config.setdefault("reflection", {})["model"] = env_reflection_model
+
+    env_reflection_candidate_model = os.environ.get("OMBRE_REFLECTION_CANDIDATE_MODEL", "")
+    if env_reflection_candidate_model:
+        config.setdefault("reflection", {})["daily_chat_memory_candidate_model"] = env_reflection_candidate_model
 
     env_diary_mcp_url = os.environ.get("OMBRE_DIARY_MCP_URL", "")
     if env_diary_mcp_url:
@@ -780,6 +787,9 @@ def strip_wikilinks(text: str) -> str:
 
 
 _AFFECT_ANCHOR_RE = re.compile(r"(?ims)^###\s*affect_anchor\s*$.*?(?=^###\s+|\Z)")
+_FOLLOWUP_SECTION_RE = re.compile(
+    r"(?ims)^#{2,6}\s*(?:followup|followups|follow-up|followup_log|followups_log|followup-log|todo|to-do|todo_log|todo-log|next|后续|后续待办|后续记录|待办|待办事项|待办记录)\s*$.*?(?=^#{2,6}\s+|\Z)"
+)
 _DISPLAY_TEMPERATURE_SECTION_RE = re.compile(
     r"(?ims)^###\s*(?:affect_anchor|affect anchor|喜欢它的原因|favorite_reason|favorite reason)\s*$.*?(?=^###\s+|\Z)"
 )
@@ -822,6 +832,22 @@ def strip_affect_anchor(text: str) -> str:
     return _AFFECT_ANCHOR_RE.sub("", str(text)).strip()
 
 
+def strip_followup_sections(text: str) -> str:
+    """Remove followup/todo blocks from ordinary recall text."""
+    if not text:
+        return text
+    return _FOLLOWUP_SECTION_RE.sub("", str(text)).strip()
+
+
+def bucket_content_for_recall(bucket: dict) -> str:
+    """Build bucket body text for ordinary recall/search, excluding task-only blocks."""
+    if not isinstance(bucket, dict):
+        return ""
+    text = strip_wikilinks(str(bucket.get("content") or ""))
+    text = strip_affect_anchor(text)
+    return strip_followup_sections(text).strip()
+
+
 def strip_display_temperature_sections(text: str) -> str:
     """Remove display-only temperature sections from direct bucket rendering."""
     if not text:
@@ -856,7 +882,7 @@ def bucket_text_for_embedding(bucket: dict) -> str:
         meta = {}
 
     title = strip_wikilinks(str(meta.get("name") or "")).strip()
-    body = strip_affect_anchor(strip_wikilinks(str(bucket.get("content") or ""))).strip()
+    body = bucket_content_for_recall(bucket)
 
     parts = []
     if title:
