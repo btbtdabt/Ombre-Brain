@@ -2,10 +2,11 @@
 
 这份文档用于把 Ombre-Brain 接给 Operit、RikkaHub、ChatGPT MCP、Claude Connector 或其它聊天平台时，直接粘贴到平台指令里。
 
-## 当前 MCP 工具（19 个）
+## 当前 MCP 工具（23 个）
 
-- 读取与盘点：`breath`、`read_bucket`、`list_buckets_light`、`pulse`、`introspection`
+- 读取与盘点：`breath`、`breath_search`、`breath_advanced`、`read_bucket`、`list_buckets_light`、`pulse`、`introspection`
 - 写入与维护记忆：`hold`、`grow`、`comment_bucket`、`delete_bucket_comment`、`trace`、`profile_fact`
+- 独立信件：`letter_write`、`letter_read`
 - 照顾备忘：`reminder_create`、`reminder_list`、`reminder_update`
 - 暗房：`darkroom_enter`、`darkroom_rooms`、`darkroom_delete`、`darkroom_view`
 - 索引维护：`entity_edge_backfill`（维护工具，默认 `dry_run=true`；普通聊天不要调用）
@@ -19,6 +20,7 @@
 - 新窗口/醒来/换窗：breath(mode="handoff")。
 - 新窗口第一轮，即使用户直接问“昨天/昨晚/前天/记不记得昨天/昨天做了什么/昨天聊了什么”：先 breath(mode="handoff") 恢复身份和生活背景；细节不够时再 breath(query="日期 + 主题")。
 - 还记得/之前/某个暗号/项目/偏好/边界：breath(query="关键词或原句")。
+- 客户端按需加载工具时，日常主题检索可用较小参数面的 breath_search(query="关键词")；需要日期、情绪或联想选项时用 breath_advanced。
 - 如果想查明确日期的具体普通记忆：breath(date="YYYY-MM-DD") 或 breath(query="YYYY-MM-DD + 主题")。支持 2026-06-15、2026.06.15、2026年6月15日、25年6月15日、6月15日；没有年份的“6月15日”默认按今年查。
 - 日期查询优先看 bucket 的事件日期 date；没有 date 的旧桶才回退看 created/updated_at/last_active。带了 date 的桶不会因为创建日期误入别的日期。
 - 日印象不会混进普通日期查询；想读日印象必须显式 breath(domain="daily_impression")，也可以加 date，例如 breath(domain="daily_impression", date="2026-06-15")。
@@ -43,12 +45,17 @@
 - 稳定画像事实：先有证据 bucket，再 profile_fact(fact, evidence_bucket_id, ...)。
 - 不确定是否重复：先 breath/read_bucket，再写。
 - 碎碎念、突然的念头可以写 whisper：hold(content="...", whisper=True, ...)
+- 给记忆附加图片/音频等媒体：hold 的 media 可传服务器上传临时目录内的路径，或传 `data_base64+filename` 项；已有桶用 trace 的 media_append / media_replace。系统会复制为持久文件，记忆库校验备份会一起保存。
 - content 最少只需要正文。确实需要结构化时再按需写：`### moment`（事件事实）/ `### original`（必须保留原味的短原话）/ `### reflection`（用“我……”第一人称写你的理解和以后如何回应）。没有的部分不写。不要写 `### affect_anchor`、`### followup` 或 `### todo`；长期回应变化写进 reflection，到时提醒用 reminder_create。feel 年轮和 whisper 只写第一人称正文，不写标题、列表或任何 Markdown 分段。
 
 照顾备忘：
 - 以后某个时间或若干轮后需要轻轻提醒的事项，用 reminder_create；它独立于长期记忆桶，不触发 embedding。
 - 查看现有备忘用 reminder_list(status="active")；完成用 reminder_update(reminder_id, status="done")；稍后再提醒用 snooze_minutes。
 - 不要把提醒事项为了“能提醒”而重复写进 hold/grow；只有事项本身也值得长期记住时，才另写记忆。
+
+独立信件：
+- 完整长信使用 letter_write(author=..., content=...) 永久保存；author 可用 user、ai、当前 AI 名称或自定义署名。
+- 使用 letter_read(query=..., author=..., date_from=..., date_to=...) 读取。信件不进入普通 breath、合并或衰减。
 
 暗房：
 - 未想透、不该给用户看、不该进普通记忆的内在反思：darkroom_enter(note=..., visibility="active", lock_for="6h")；默认新开一间房，只有明确要续写当前 active 房间时才传 new_room=false。visibility 可用 active / archived / retracted，lock_for 可用 6h / 3d / 6小时 / 3天。

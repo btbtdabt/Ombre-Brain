@@ -26,6 +26,7 @@
 import os
 import re
 import hashlib
+import json
 import sqlite3
 import logging
 from typing import Any
@@ -76,6 +77,9 @@ def _sanitize_generated_tags(tags: object) -> list[str]:
 
 # --- Dehydration prompt: instructs cheap LLM to compress information ---
 # --- 脱水提示词：指导廉价 LLM 压缩信息 ---
+DEHYDRATION_PROMPT_VERSION = 1
+
+
 DEHYDRATE_PROMPT = """你是一个信息压缩专家。请将以下内容脱水为紧凑摘要。
 
 压缩规则：
@@ -84,6 +88,7 @@ DEHYDRATE_PROMPT = """你是一个信息压缩专家。请将以下内容脱水�
 3. 保留所有待办/未完成事项
 4. 关键数字、日期、名称必须保留
 5. 目标压缩率 > 70%
+6. 动作、感受、承诺和原话必须归属于原文中的主体；保持原有人称与视角，不要交换双方视角。原文省略主体且上下文不足时，保留省略，不猜测。
 
 输出格式（纯 JSON，无其他内容）：
 {
@@ -106,6 +111,7 @@ DIRECT_BUCKET_CAPSULE_PROMPT = """你是长期记忆证据压缩器。请把一�
 4. 如果原文里有明显的“用户原话 / assistant 原话”，尽量保留短句原话。
 5. 不要写“这条记忆说明了什么”“象征着什么”这类解释。
 6. 输出为中文短胶囊，200-500字，按信息密度组织。
+7. 动作、感受、承诺和原话必须归属于原文中的主体；保持原有人称与视角，不要交换双方视角。原文省略主体且上下文不足时，保留省略，不猜测。
 
 直接输出胶囊正文，不要 JSON，不要标题。"""
 
@@ -149,6 +155,7 @@ DIGEST_PROMPT_TEMPLATE = """你是一个长期记忆摘记专家。用户会发�
    - ### original：只放必须保留原味的短原话；不要复制长段原文，不要为了“有证据”而写。
    - ### reflection：{ai_name} 对这件事的理解、以后该怎么回应、哪里需要克制或记住。
 14. ### moment 可以用第三人称客观记录；### reflection 必须保留为 {ai_name} 的第一人称反思，使用“我记得 / 我明白 / 我以后 / 我喜欢 / 我会”等表达，不要改写成“{ai_name} 应记住 / {ai_name} 需要 / 关于 {ai_name} 的说明”。
+15. 动作、感受、承诺和原话必须归属于原文中的主体；保持原有人称与视角，不要交换双方视角。原文省略主体且上下文不足时，保留省略，不猜测。
 
 输出格式（必须按照此格式输出）：
 [
@@ -206,6 +213,7 @@ MERGE_PROMPT_TEMPLATE = """你是一个信息合并专家。请将旧记忆与�
 7. 称呼本身只是原话或互动语气，不能自动推断成稳定画像事实；只有原文明确表达长期关系定位、稳定偏好或明确约定时，才写入稳定事实或回应规则。
 8. 合并后的 content 最少要有正文。section 按需写，没必要就省略：### moment 只放一条长期有用的短事实；### original 只放必须保留原味的短原话，不要复制长段原文，不要为了“有证据”而写；### reflection 放 {ai_name} 的理解、以后该怎么回应、哪里需要克制或记住。
 9. 保留旧记忆和新内容已有的 section 语义与人称。### moment 可以客观第三人称；### reflection 是 {ai_name} 的第一人称反思，合并时不要把“我”改写成“{ai_name} 应记住 / {ai_name} 需要 / 关于 {ai_name} 的说明”。如果原 reflection 已经是第一人称，必须继续第一人称。
+10. 动作、感受、承诺和原话必须归属于原文中的主体；保持原有人称与视角，不要交换双方视角。原文省略主体且上下文不足时，保留省略，不猜测。
 
 直接输出合并后的文本，不要加额外说明。"""
 
@@ -310,9 +318,20 @@ class Dehydrator:
         conn.commit()
         conn.close()
 
-    def _get_cached_summary(self, content: str) -> str | None:
-        """Look up cached dehydration result by content hash."""
-        content_hash = hashlib.sha256(content.encode()).hexdigest()
+    def _cache_key(self, content: str, *, purpose: str = "dehydrate") -> str:
+        identity = {
+            "base_url": str(self.base_url or "").strip().rstrip("/"),
+            "model": str(self.model or "").strip(),
+            "prompt_version": DEHYDRATION_PROMPT_VERSION,
+            "purpose": str(purpose or "dehydrate").strip(),
+            "thinking_mode": str(self.thinking_mode or "").strip(),
+        }
+        payload = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(f"{payload}\n{content}".encode("utf-8")).hexdigest()
+
+    def _get_cached_summary(self, content: str, *, purpose: str = "dehydrate") -> str | None:
+        """Look up a cached result scoped to the active model and prompt contract."""
+        content_hash = self._cache_key(content, purpose=purpose)
         conn = sqlite3.connect(self.cache_db_path)
         row = conn.execute(
             "SELECT summary FROM dehydration_cache WHERE content_hash = ?",
@@ -321,9 +340,9 @@ class Dehydrator:
         conn.close()
         return row[0] if row else None
 
-    def _set_cached_summary(self, content: str, summary: str):
-        """Store dehydration result in cache."""
-        content_hash = hashlib.sha256(content.encode()).hexdigest()
+    def _set_cached_summary(self, content: str, summary: str, *, purpose: str = "dehydrate"):
+        """Store a result scoped to the active model and prompt contract."""
+        content_hash = self._cache_key(content, purpose=purpose)
         conn = sqlite3.connect(self.cache_db_path)
         conn.execute(
             "INSERT OR REPLACE INTO dehydration_cache (content_hash, summary, model) VALUES (?, ?, ?)",
@@ -334,9 +353,15 @@ class Dehydrator:
 
     def invalidate_cache(self, content: str):
         """Remove cached summary for specific content (call when bucket content changes)."""
-        content_hash = hashlib.sha256(content.encode()).hexdigest()
+        content_hashes = [
+            self._cache_key(content, purpose="dehydrate"),
+            self._cache_key(content, purpose="direct_capsule"),
+        ]
         conn = sqlite3.connect(self.cache_db_path)
-        conn.execute("DELETE FROM dehydration_cache WHERE content_hash = ?", (content_hash,))
+        conn.executemany(
+            "DELETE FROM dehydration_cache WHERE content_hash = ?",
+            ((content_hash,) for content_hash in content_hashes),
+        )
         conn.commit()
         conn.close()
 
@@ -387,8 +412,7 @@ class Dehydrator:
         if not content or not content.strip():
             return "（空记忆 / empty memory）"
 
-        cache_content = "direct-bucket-capsule-v1\n" + content
-        cached = self._get_cached_summary(cache_content)
+        cached = self._get_cached_summary(content, purpose="direct_capsule")
         if cached:
             return self._format_output(cached, metadata)
 
@@ -396,7 +420,7 @@ class Dehydrator:
             raise RuntimeError("脱水 API 不可用，请配置 OMBRE_API_KEY")
 
         result = await self._api_direct_bucket_capsule(content)
-        self._set_cached_summary(cache_content, result)
+        self._set_cached_summary(content, result, purpose="direct_capsule")
         return self._format_output(result, metadata)
 
     # ---------------------------------------------------------

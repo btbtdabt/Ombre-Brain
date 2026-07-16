@@ -476,12 +476,14 @@ Codex 接线时注意：
 | 工具 | 用途 |
 | --- | --- |
 | `breath` | 浮现记忆、按 query/date 查询、执行新窗口 handoff |
+| `breath_search` / `breath_advanced` | 给按需加载客户端提供小参数检索和高级检索入口 |
 | `grow` | 写入或合并长期记忆 |
-| `hold` | 暂存当前值得抓住的片段 |
+| `hold` | 暂存当前值得抓住的片段，可附加持久媒体 |
 | `read_bucket` | 读取指定 bucket 原文 |
 | `comment_bucket` / `delete_bucket_comment` | 添加或删除年轮 |
 | `profile_fact` | 管理带证据的画像事实 |
 | `reminder_create/list/update` | 管理独立照顾备忘 |
+| `letter_write` / `letter_read` | 写入和读取不参与普通浮现的永久信件 |
 | `darkroom_enter/rooms/view` | 写入、列出和在解锁后读取 Darkroom |
 | `trace` / `pulse` / `introspection` | 近期轨迹、系统脉搏与内省 |
 

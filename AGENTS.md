@@ -15,6 +15,8 @@ These instructions are project-local for `C:\Users\Amy98\Projects\Ombre-Brain`.
 
 - `fork` is Amy's working GitHub fork and the normal push target.
 - `origin` is the upstream author repo. Fetch/compare from it; do not push there unless Amy explicitly asks.
+- `p0luz` is the second implementation used as a selective feature source. Its
+  structural rewrite is not merged wholesale; see `docs/upstream-integration.md`.
 - Before edits, check:
 
 ```powershell

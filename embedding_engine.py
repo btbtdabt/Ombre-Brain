@@ -12,12 +12,12 @@
 # ============================================================
 
 import os
+import hashlib
 import json
 import math
 import sqlite3
 import logging
-import asyncio
-from pathlib import Path
+from collections import OrderedDict
 
 from openai import AsyncOpenAI
 
@@ -48,6 +48,8 @@ class EmbeddingEngine:
             or "Given a memory search query, retrieve relevant long-term memory passages."
         ).strip()
         self.document_instruction = str(embed_cfg.get("document_instruction") or "").strip()
+        self.query_cache_size = self._int_between(embed_cfg.get("query_cache_size", 32), 32, 0, 256)
+        self._query_cache: OrderedDict[tuple[str, str, str], list[float]] = OrderedDict()
 
         # --- SQLite path: buckets_dir/embeddings.db ---
         db_path = os.path.join(config["buckets_dir"], "embeddings.db")
@@ -76,11 +78,13 @@ class EmbeddingEngine:
                 embedding TEXT NOT NULL,
                 model TEXT,
                 dimension INTEGER,
+                content_hash TEXT,
                 updated_at TEXT NOT NULL
             )
         """)
         self._ensure_column(conn, "embeddings", "model", "TEXT")
         self._ensure_column(conn, "embeddings", "dimension", "INTEGER")
+        self._ensure_column(conn, "embeddings", "content_hash", "TEXT")
         conn.commit()
         conn.close()
 
@@ -97,7 +101,11 @@ class EmbeddingEngine:
             embedding = await self._generate_embedding(content, kind="document")
             if not embedding:
                 return False
-            self._store_embedding(bucket_id, embedding)
+            self._store_embedding(
+                bucket_id,
+                embedding,
+                content_hash=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            )
             return True
         except Exception as e:
             logger.warning(f"Embedding generation failed for {bucket_id}: {e}")
@@ -108,28 +116,40 @@ class EmbeddingEngine:
         # Truncate to avoid token limits
         prepared = self._prepare_embedding_input(text, kind=kind)
         truncated = prepared[: self.max_chars]
+        cache_key = (str(kind or "document"), self.model, truncated)
+        cached = self._query_cache.get(cache_key)
+        if cached is not None:
+            self._query_cache.move_to_end(cache_key)
+            return list(cached)
         try:
             response = await self.client.embeddings.create(
                 model=self.model,
                 input=truncated,
             )
             if response.data and len(response.data) > 0:
-                return response.data[0].embedding
+                embedding = list(response.data[0].embedding)
+                if self.query_cache_size > 0 and embedding:
+                    self._query_cache[cache_key] = list(embedding)
+                    self._query_cache.move_to_end(cache_key)
+                    while len(self._query_cache) > self.query_cache_size:
+                        self._query_cache.popitem(last=False)
+                return embedding
             return []
         except Exception as e:
             logger.warning(f"Embedding API call failed: {e}")
             return []
 
-    def _store_embedding(self, bucket_id: str, embedding: list[float]):
+    def _store_embedding(self, bucket_id: str, embedding: list[float], *, content_hash: str = ""):
         """Store embedding in SQLite."""
         from utils import now_iso
         conn = sqlite3.connect(self.db_path)
         conn.execute(
             """
-            INSERT OR REPLACE INTO embeddings (bucket_id, embedding, model, dimension, updated_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO embeddings
+                (bucket_id, embedding, model, dimension, content_hash, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (bucket_id, json.dumps(embedding), self.model, len(embedding), now_iso()),
+            (bucket_id, json.dumps(embedding), self.model, len(embedding), content_hash, now_iso()),
         )
         conn.commit()
         conn.close()
@@ -140,6 +160,33 @@ class EmbeddingEngine:
         conn.execute("DELETE FROM embeddings WHERE bucket_id = ?", (bucket_id,))
         conn.commit()
         conn.close()
+
+    def list_all_ids(self) -> list[str]:
+        conn = sqlite3.connect(self.db_path)
+        try:
+            return [str(row[0]) for row in conn.execute("SELECT bucket_id FROM embeddings").fetchall()]
+        finally:
+            conn.close()
+
+    def list_content_ids(self) -> list[str]:
+        conn = sqlite3.connect(self.db_path)
+        try:
+            rows = conn.execute(
+                "SELECT bucket_id FROM embeddings WHERE COALESCE(content_hash, '') != ''"
+            ).fetchall()
+            return [str(row[0]) for row in rows]
+        finally:
+            conn.close()
+
+    def list_content_hashes(self) -> dict[str, str]:
+        conn = sqlite3.connect(self.db_path)
+        try:
+            rows = conn.execute(
+                "SELECT bucket_id, content_hash FROM embeddings WHERE COALESCE(content_hash, '') != ''"
+            ).fetchall()
+            return {str(bucket_id): str(digest) for bucket_id, digest in rows}
+        finally:
+            conn.close()
 
     async def get_embedding(self, bucket_id: str) -> list[float] | None:
         """Retrieve stored embedding for a bucket. Returns None if not found."""

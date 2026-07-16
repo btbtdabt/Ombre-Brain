@@ -10,18 +10,183 @@
 # ============================================================
 
 import json
+import errno
 import os
 import re
+import sys
+import tempfile
+import threading
 import uuid
 import yaml
 import logging
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
+
+
+_yaml_locks_guard = threading.Lock()
+_yaml_locks: dict[str, threading.RLock] = {}
+_MOUNTINFO_ESCAPES = {
+    "040": " ",
+    "011": "\t",
+    "012": "\n",
+    "134": "\\",
+}
+
+
+def _yaml_lock(path: str | os.PathLike[str]) -> threading.RLock:
+    normalized = os.path.normcase(os.path.abspath(os.fspath(path)))
+    with _yaml_locks_guard:
+        return _yaml_locks.setdefault(normalized, threading.RLock())
+
+
+def _decode_mountinfo_path(value: str) -> str:
+    return re.sub(
+        r"\\(040|011|012|134)",
+        lambda match: _MOUNTINFO_ESCAPES[match.group(1)],
+        value,
+    )
+
+
+def _is_exact_linux_mount_point(path: str) -> bool:
+    if not sys.platform.startswith("linux") or not os.path.isfile(path):
+        return False
+    target = os.path.realpath(os.path.abspath(path))
+    try:
+        with open("/proc/self/mountinfo", "r", encoding="utf-8") as mountinfo:
+            for line in mountinfo:
+                fields = line.split()
+                if len(fields) > 4:
+                    mounted_at = _decode_mountinfo_path(fields[4])
+                    if os.path.realpath(mounted_at) == target:
+                        return True
+    except OSError:
+        return False
+    return False
+
+
+def _write_bytes_and_sync(path: str, payload: bytes) -> None:
+    with open(path, "wb") as target:
+        target.write(payload)
+        target.flush()
+        os.fsync(target.fileno())
+
+
+def _overwrite_mounted_yaml(tmp_path: str, target_path: str) -> bytes:
+    with open(target_path, "rb") as current:
+        previous_payload = current.read()
+    with open(tmp_path, "rb") as source:
+        next_payload = source.read()
+    try:
+        _write_bytes_and_sync(target_path, next_payload)
+    except Exception as write_error:
+        try:
+            _write_bytes_and_sync(target_path, previous_payload)
+        except Exception as restore_error:
+            raise OSError(
+                "YAML bind-mount write failed and restoring the previous file also failed: "
+                f"{restore_error}"
+            ) from write_error
+        raise
+    return previous_payload
+
+
+def atomic_update_yaml(
+    path: str | os.PathLike[str],
+    mutate: Callable[[dict], Any],
+) -> dict:
+    """Atomically apply a locked read-modify-write update to a YAML mapping."""
+    target_path = os.path.abspath(os.fspath(path))
+    tmp_path = ""
+    with _yaml_lock(target_path):
+        persisted: dict = {}
+        if os.path.exists(target_path):
+            with open(target_path, "r", encoding="utf-8") as source:
+                persisted = yaml.safe_load(source) or {}
+        if not isinstance(persisted, dict):
+            raise ValueError(f"YAML top level must be a mapping: {target_path}")
+
+        replacement = mutate(persisted)
+        if replacement is not None:
+            if not isinstance(replacement, dict):
+                raise TypeError("YAML mutation must return a mapping or None")
+            persisted = replacement
+
+        parent = os.path.dirname(target_path)
+        os.makedirs(parent, exist_ok=True)
+        fallback_backup: bytes | None = None
+        try:
+            descriptor, tmp_path = tempfile.mkstemp(
+                prefix=f".{os.path.basename(target_path)}.tmp.",
+                dir=parent,
+            )
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as target:
+                yaml.safe_dump(
+                    persisted,
+                    target,
+                    allow_unicode=True,
+                    default_flow_style=False,
+                    sort_keys=False,
+                )
+                target.flush()
+                os.fsync(target.fileno())
+            try:
+                os.replace(tmp_path, target_path)
+            except OSError as exc:
+                if exc.errno != errno.EBUSY or not _is_exact_linux_mount_point(target_path):
+                    raise
+                fallback_backup = _overwrite_mounted_yaml(tmp_path, target_path)
+
+            try:
+                with open(target_path, "r", encoding="utf-8") as source:
+                    verified = yaml.safe_load(source) or {}
+                if verified != persisted:
+                    raise OSError(f"YAML verification failed after write: {target_path}")
+            except Exception as verify_error:
+                if fallback_backup is not None:
+                    try:
+                        _write_bytes_and_sync(target_path, fallback_backup)
+                    except Exception as restore_error:
+                        raise OSError(
+                            "YAML verification failed and restoring the previous bind-mounted "
+                            f"file also failed: {restore_error}"
+                        ) from verify_error
+                raise
+        finally:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    logging.warning("Could not remove temporary YAML file: %s", tmp_path)
+        return persisted
+
+
+def atomic_write_text(path: str | os.PathLike[str], text: str) -> None:
+    """Atomically replace a UTF-8 text file after flushing it to disk."""
+    target_path = os.path.abspath(os.fspath(path))
+    parent = os.path.dirname(target_path)
+    os.makedirs(parent, exist_ok=True)
+    descriptor, tmp_path = tempfile.mkstemp(
+        prefix=f".{os.path.basename(target_path)}.tmp.",
+        dir=parent,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as target:
+            target.write(str(text))
+            target.flush()
+            os.fsync(target.fileno())
+        os.replace(tmp_path, target_path)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
 
 
 def parse_first_json_value(raw: str) -> Any:

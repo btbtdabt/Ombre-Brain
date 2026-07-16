@@ -50,10 +50,12 @@ import hmac
 import json as _json_lib
 import re
 import secrets
+import tempfile
 import time
 from base64 import b64decode
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
 from zoneinfo import ZoneInfo
 import httpx
@@ -66,16 +68,21 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mcp.server.fastmcp import Context, FastMCP
 
 from bucket_manager import BucketManager
+from backup_archive import BackupArchiveError, MAX_ARCHIVE_BYTES
+from backup_manager import VaultBackupManager
+from config_diagnostics import effective_config_report
 from dehydrator import Dehydrator
 from decay_engine import DecayEngine
 from darkroom import DarkroomStore
 from dream_engine import DreamEngine
 from embedding_engine import EmbeddingEngine
+from embedding_outbox import EmbeddingOutbox
 from favorite_tags import has_favorite_memory_tag, has_favorite_policy_tag
 from gateway_state import GatewayStateStore
 from identity import identity_names
 from identity_semantics import IdentitySemanticStore
 from import_memory import ImportEngine
+from letter_service import LetterService
 from memory_diffusion import (
     diffuse_memory,
     diffusion_options_from_config,
@@ -131,6 +138,7 @@ from scripts.migrate_affect_anchor_sections import plan_bucket_migration
 from source_refs import source_ref_window
 from word_map import WordMapStore, reflection_identity_terms
 from utils import (
+    atomic_update_yaml,
     bucket_content_for_recall,
     bucket_text_for_embedding,
     count_tokens_approx,
@@ -165,6 +173,8 @@ bucket_mgr = BucketManager(config)                  # Bucket manager / 记忆桶
 dehydrator = Dehydrator(config)                      # Dehydrator / 脱水器
 decay_engine = DecayEngine(config, bucket_mgr)       # Decay engine / 衰减引擎
 embedding_engine = EmbeddingEngine(config)            # Embedding engine / 向量化引擎
+embedding_outbox = EmbeddingOutbox(config, bucket_mgr, embedding_engine)
+backup_manager = VaultBackupManager(config, bucket_mgr, embedding_engine)
 reranker_engine = RerankerEngine(config)              # Reranker / 召回重排序
 recall_diagnostics = RecallDiagnosticsLogger(config)  # Recall diagnostics / 召回诊断
 import_engine = ImportEngine(config, bucket_mgr, dehydrator, embedding_engine)  # Import engine / 导入引擎
@@ -183,6 +193,7 @@ darkroom_store = DarkroomStore(config)                  # Private reflection roo
 gateway_state_store = GatewayStateStore(os.path.join(config["buckets_dir"], "gateway_state.db"))
 raw_event_store = RawEventStore(config)                  # Raw dialogue archive / 原文保险箱
 reminder_store = ReminderStore(config)                    # Standalone care memos / 独立照顾备忘
+letter_service = LetterService(config, bucket_mgr, embedding_engine)
 
 # --- Create MCP server instance / 创建 MCP 服务器实例 ---
 # host="0.0.0.0" so Docker container's SSE is externally reachable
@@ -3067,14 +3078,17 @@ def _refresh_entity_edges_for_bucket(bucket: dict | None) -> int:
 
 
 def _queue_embedding_refresh(bucket_id: str) -> bool:
-    if not bucket_id or not getattr(embedding_engine, "enabled", False):
+    if not bucket_id or not bool(config.get("embedding", {}).get("enabled", True)):
         return False
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
+    file_path = bucket_mgr._find_bucket_file(str(bucket_id))
+    bucket = bucket_mgr._load_bucket(file_path) if file_path else None
+    if not bucket:
+        embedding_outbox.discard(str(bucket_id))
         return False
-    loop.create_task(_refresh_bucket_embedding_async(bucket_id))
-    return True
+    queued = embedding_outbox.enqueue(str(bucket_id), bucket_text_for_embedding(bucket))
+    if queued:
+        embedding_outbox.ensure_started()
+    return queued
 
 
 def _bucket_embedding_text_changed(before: dict | None, after: dict | None) -> bool:
@@ -3519,6 +3533,12 @@ async def _refresh_bucket_embedding(bucket_id: str) -> bool:
 def _delete_bucket_indexes(bucket_id: str) -> tuple[dict, list[str]]:
     cleanup: dict = {}
     errors: list[str] = []
+
+    try:
+        cleanup["embedding_outbox"] = embedding_outbox.discard(bucket_id)
+    except Exception as e:
+        logger.warning("Failed to discard embedding task / 删除桶向量任务失败: %s: %s", bucket_id, e)
+        errors.append("embedding_outbox")
 
     try:
         embedding_engine.delete_embedding(bucket_id)
@@ -4025,6 +4045,7 @@ async def _merge_or_create(
     memory_layer: str = "",
     memory_classification_source: str = "",
     date: str = "",
+    media=None,
 ) -> tuple[str, str, bool, dict | None]:
     """
     Check if a similar bucket exists for merging; merge if so, create if not.
@@ -4086,6 +4107,7 @@ async def _merge_or_create(
         arousal=arousal,
         name=name or None,
         date=date or None,
+        media=media,
         extra_metadata=_memory_classification_metadata(
             memory_subject,
             memory_layer,
@@ -7991,6 +8013,46 @@ async def resurface(max_results: int = 1, include_archive: bool = True, max_toke
 
 
 # =============================================================
+# Tool 1.25: smaller breath schemas for clients with lazy tool loading
+# 工具 1.25：给按需加载工具的客户端提供较小参数面
+# =============================================================
+@mcp.tool()
+async def breath_search(
+    query: str,
+    domain: str = "",
+    max_results: int = 20,
+) -> str:
+    """按关键词或语义检索记忆；domain 可预筛主题域，max_results 控制条数。"""
+    return await breath(query=query, domain=domain, max_results=max_results)
+
+
+@mcp.tool()
+async def breath_advanced(
+    query: str = "",
+    max_tokens: int = 10000,
+    domain: str = "",
+    date: str = "",
+    valence: float = -1,
+    arousal: float = -1,
+    max_results: int = 20,
+    include_related: bool = True,
+    retrieval_mode: str = "graph",
+) -> str:
+    """breath 的精细控制入口；日常主题检索优先用 breath_search。"""
+    return await breath(
+        query=query,
+        max_tokens=max_tokens,
+        domain=domain,
+        date=date,
+        valence=valence,
+        arousal=arousal,
+        max_results=max_results,
+        include_related=include_related,
+        retrieval_mode=retrieval_mode,
+    )
+
+
+# =============================================================
 # Tool 1.5: read_bucket — exact archive-cabinet read
 # 工具 1.5：read_bucket — 按 ID 精确读桶
 # =============================================================
@@ -8032,6 +8094,48 @@ async def list_buckets_light(
         }
     except Exception as e:
         return {"error": str(e), "buckets": []}
+
+
+@mcp.tool()
+async def letter_write(
+    author: str,
+    content: str,
+    user_name: str = "",
+    title: str = "",
+    date: str = "",
+    ai_name: str = "",
+) -> str:
+    """永久保存一封独立信件。author 可用 user、ai、当前 AI 名称或自定义署名。"""
+    result = await letter_service.write(
+        author=author,
+        content=content,
+        user_name=user_name,
+        title=title,
+        date=date,
+        ai_name=ai_name,
+    )
+    if "→" in result:
+        bucket_id = result.split("→", 1)[1].split(" ", 1)[0]
+        _queue_embedding_refresh(bucket_id)
+    return result
+
+
+@mcp.tool()
+async def letter_read(
+    query: str = "",
+    limit: int = 10,
+    author: str = "",
+    date_from: str = "",
+    date_to: str = "",
+) -> str:
+    """读取独立信件；可按关键词、署名和日期范围过滤，不混入普通 breath。"""
+    return await letter_service.read(
+        query=query,
+        limit=limit,
+        author=author,
+        date_from=date_from,
+        date_to=date_to,
+    )
 
 
 # =============================================================
@@ -8245,8 +8349,9 @@ async def hold(
     title: str = "",
     date: str = "",
     domain: str = "",
+    media: list | str | None = None,
 ) -> str:
-    """写一条长期记忆。单个事实/承诺/偏好用 hold；旧记忆的新感受用 comment_bucket；悄悄话用 whisper=True。date 可传事件日期；title 可选，传了就用给定标题，不传则自动生成。普通记忆不用填写 domain，系统会自动判断；维护自我锚点等特殊桶时可显式传 domain。显式 valence/arousal 会覆盖自动情绪。普通记忆 content 的最小写入就是正文；只有确实需要结构化时才按需使用 ### moment、### original、### reflection；reflection 必须写成“我……”第一人称。不要写 ### affect_anchor、### followup 或 ### todo：长期回应变化写进 reflection，到时提醒用 reminder_create。feel=True/whisper=True 时 content 只能写第一人称正文，不写标题或任何 Markdown 分段。"""
+    """写一条长期记忆。单个事实/承诺/偏好用 hold；旧记忆的新感受用 comment_bucket；悄悄话用 whisper=True。date 可传事件日期；title 可选，传了就用给定标题，不传则自动生成。media 可传服务器上传临时目录内的路径，或 data_base64+filename 项。普通记忆不用填写 domain，系统会自动判断；维护自我锚点等特殊桶时可显式传 domain。显式 valence/arousal 会覆盖自动情绪。普通记忆 content 的最小写入就是正文；只有确实需要结构化时才按需使用 ### moment、### original、### reflection；reflection 必须写成“我……”第一人称。不要写 ### affect_anchor、### followup 或 ### todo：长期回应变化写进 reflection，到时提醒用 reminder_create。feel=True/whisper=True 时 content 只能写第一人称正文，不写标题或任何 Markdown 分段。"""
     await decay_engine.ensure_started()
 
     # --- Input validation / 输入校验 ---
@@ -8278,6 +8383,7 @@ async def hold(
             name=None,
             bucket_type="feel",
             date=event_date or None,
+            media=media,
         )
         _queue_embedding_refresh(bucket_id)
         return f"🫧whisper→{bucket_id}"
@@ -8312,6 +8418,8 @@ async def hold(
             )
             if not entry:
                 return "年轮写入失败。"
+            if media:
+                await bucket_mgr.update(source_id, media_append=media)
             _queue_embedding_refresh(source_id)
             return f"年轮→{source_id}#{entry['id']}"
 
@@ -8331,14 +8439,19 @@ async def hold(
             "tags": [], "suggested_name": "",
         }
 
-    domain = requested_domain or analysis["domain"]
+    analyzed_domains = analysis.get("domain") or ["general"]
+    if isinstance(analyzed_domains, str):
+        analyzed_domains = [analyzed_domains]
+    memory_domains = requested_domain or [str(item) for item in analyzed_domains]
     valence = requested_valence if requested_valence is not None else analysis["valence"]
     arousal = requested_arousal if requested_arousal is not None else analysis["arousal"]
     auto_tags = analysis["tags"]
     suggested_name = title.strip() or analysis.get("suggested_name", "")
 
     all_tags = list(dict.fromkeys(auto_tags + extra_tags))
-    content = await _auto_generate_write_moment_if_needed(content, all_tags, domain=domain)
+    content = await _auto_generate_write_moment_if_needed(
+        content, all_tags, domain=memory_domains
+    )
     classification = normalize_write_classification(
         memory_subject=analysis.get("memory_subject", ""),
         memory_layer=analysis.get("memory_layer", ""),
@@ -8356,13 +8469,14 @@ async def hold(
             content=content,
             tags=all_tags,
             importance=10,
-            domain=domain,
+            domain=memory_domains,
             valence=valence,
             arousal=arousal,
             name=suggested_name or None,
             bucket_type="permanent",
             pinned=True,
             date=event_date or None,
+            media=media,
             extra_metadata=_memory_classification_metadata(
                 classification["memory_subject"],
                 classification["memory_layer"],
@@ -8372,14 +8486,14 @@ async def hold(
         _queue_embedding_refresh(bucket_id)
         _queue_memory_enrichment(bucket_id)
         related_note = _format_readonly_related_memory(related_bucket) if related_bucket else ""
-        return f"📌钉选→{bucket_id} {','.join(domain)}{related_note}"
+        return f"📌钉选→{bucket_id} {','.join(memory_domains)}{related_note}"
 
     # --- Step 2: merge or create / 合并或新建 ---
     bucket_id, result_name, is_merged, related_bucket = await _merge_or_create(
         content=content,
         tags=all_tags,
         importance=importance,
-        domain=domain,
+        domain=memory_domains,
         valence=valence,
         arousal=arousal,
         name=suggested_name,
@@ -8388,12 +8502,13 @@ async def hold(
         memory_layer=classification["memory_layer"],
         memory_classification_source=classification["memory_classification_source"],
         date=event_date,
+        media=media,
     )
     _queue_memory_enrichment(bucket_id)
 
     action = "合并→" if is_merged else "新建→"
     related_note = _format_readonly_related_memory(related_bucket) if related_bucket else ""
-    return f"{action}{result_name} {','.join(domain)}{related_note}"
+    return f"{action}{result_name} {','.join(memory_domains)}{related_note}"
 
 
 # =============================================================
@@ -8854,9 +8969,11 @@ async def trace(
     digested: int = -1,
     content: str = "",
     date: str = "",
+    media_append: list | str | None = None,
+    media_replace: list | str | None = None,
     delete: bool = False,
 ) -> str:
-    """修改已有记忆，不创建新桶。tags/domain/content 是替换；date 可改事件日期；改前先 read_bucket。resolved/digested 让旧事沉底。只改元数据/date 不重建 embedding，改 content/name 才重建。"""
+    """修改已有记忆，不创建新桶。tags/domain/content 是替换；date 可改事件日期；media_append 追加持久媒体，media_replace 整体替换；改前先 read_bucket。resolved/digested 让旧事沉底。只改元数据/date 不重建 embedding，改 content/name 才重建。"""
 
     bucket_id = _coerce_memory_id(bucket_id)
     if not bucket_id:
@@ -8905,6 +9022,10 @@ async def trace(
         updates["digested"] = bool(digested)
     if content:
         updates["content"] = content
+    if media_append:
+        updates["media_append"] = media_append
+    if media_replace is not None:
+        updates["media"] = media_replace
     event_date = str(date or "").strip()
     if event_date:
         updates["date"] = event_date
@@ -8927,9 +9048,19 @@ async def trace(
         after_bucket = await bucket_mgr.get(bucket_id)
         _queue_embedding_refresh_if_changed(bucket_id, before_bucket, after_bucket)
 
-    changed = ", ".join(f"{k}={v}" for k, v in updates.items() if k != "content")
+    changed = ", ".join(
+        f"{k}={v}"
+        for k, v in updates.items()
+        if k not in {"content", "media_append", "media"}
+    )
     if "content" in updates:
         changed += (", content=已替换" if changed else "content=已替换")
+    if "media_append" in updates:
+        count = len(media_append) if isinstance(media_append, list) else 1
+        changed += (", " if changed else "") + f"media=已追加{count}项"
+    if "media" in updates:
+        count = len(media_replace) if isinstance(media_replace, list) else int(bool(media_replace))
+        changed += (", " if changed else "") + f"media=整体替换({count}项)"
     # Explicit hint about resolved state change semantics
     # 特别提示 resolved 状态变化的语义
     if "resolved" in updates:
@@ -8959,7 +9090,12 @@ async def pulse(include_archive: bool = False) -> str:
     except Exception as e:
         return f"获取系统状态失败: {e}"
 
-    active_count = stats["permanent_count"] + stats["dynamic_count"] + stats["feel_count"]
+    active_count = (
+        stats["permanent_count"]
+        + stats["dynamic_count"]
+        + stats["feel_count"]
+        + stats.get("letter_count", 0)
+    )
     total_count = active_count + stats["archive_count"]
     visible_count = total_count if include_archive else active_count
     status = (
@@ -8967,6 +9103,7 @@ async def pulse(include_archive: bool = False) -> str:
         f"固化记忆桶: {stats['permanent_count']} 个\n"
         f"动态记忆桶: {stats['dynamic_count']} 个\n"
         f"情绪/印象桶: {stats['feel_count']} 个\n"
+        f"独立信件: {stats.get('letter_count', 0)} 封\n"
         f"归档记忆桶: {stats['archive_count']} 个\n"
         f"当前显示桶: {visible_count} 个\n"
         f"全量记忆桶: {total_count} 个\n"
@@ -8977,6 +9114,7 @@ async def pulse(include_archive: bool = False) -> str:
     # --- List all bucket summaries / 列出所有桶摘要 ---
     try:
         buckets = await bucket_mgr.list_all(include_archive=include_archive)
+        buckets.extend(await bucket_mgr.list_letters())
     except Exception as e:
         return status + f"\n列出记忆桶失败: {e}"
 
@@ -8994,6 +9132,8 @@ async def pulse(include_archive: bool = False) -> str:
             icon = "📦"
         elif meta.get("type") == "feel":
             icon = "🫧"
+        elif meta.get("type") == "letter":
+            icon = "✉️"
         elif meta.get("type") == "archived":
             icon = "🗄️"
         elif meta.get("resolved", False):
@@ -12013,7 +12153,6 @@ async def api_config_get(request):
 async def api_config_update(request):
     """Hot-update runtime config. Optionally persist to config.yaml."""
     from starlette.responses import JSONResponse
-    import yaml
     global dream_engine, persona_engine, portrait_engine, reflection_engine, reranker_engine
     err = _require_dashboard_auth(request)
     if err:
@@ -13066,34 +13205,14 @@ async def api_config_update(request):
             return save_config
 
         try:
-            save_config = {}
-            if os.path.exists(config_path):
-                with open(config_path, "r", encoding="utf-8") as f:
-                    save_config = yaml.safe_load(f) or {}
-            save_config = _apply_dashboard_config(save_config)
-
-            with open(config_path, "w", encoding="utf-8") as f:
-                yaml.dump(save_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+            atomic_update_yaml(config_path, _apply_dashboard_config)
             updated.append("persisted_to_yaml")
             if os.path.exists(runtime_config_path):
-                runtime_config = {}
-                with open(runtime_config_path, "r", encoding="utf-8") as f:
-                    runtime_config = yaml.safe_load(f) or {}
-                runtime_config = _apply_dashboard_config(runtime_config)
-                os.makedirs(os.path.dirname(runtime_config_path), exist_ok=True)
-                with open(runtime_config_path, "w", encoding="utf-8") as f:
-                    yaml.dump(runtime_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+                atomic_update_yaml(runtime_config_path, _apply_dashboard_config)
                 updated.append("runtime_yaml_synced")
         except Exception as e:
             try:
-                runtime_config = {}
-                if os.path.exists(runtime_config_path):
-                    with open(runtime_config_path, "r", encoding="utf-8") as f:
-                        runtime_config = yaml.safe_load(f) or {}
-                runtime_config = _apply_dashboard_config(runtime_config)
-                os.makedirs(os.path.dirname(runtime_config_path), exist_ok=True)
-                with open(runtime_config_path, "w", encoding="utf-8") as f:
-                    yaml.dump(runtime_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+                atomic_update_yaml(runtime_config_path, _apply_dashboard_config)
                 updated.append("persisted_to_runtime_yaml")
                 updated.append(f"config_yaml_unwritable:{type(e).__name__}")
             except Exception as fallback_e:
@@ -13139,16 +13258,162 @@ async def api_status(request):
                     "dynamic": stats.get("dynamic_count", 0),
                     "archive": stats.get("archive_count", 0),
                     "feel": stats.get("feel_count", 0),
+                    "letter": stats.get("letter_count", 0),
                     "total": stats.get("permanent_count", 0)
                     + stats.get("dynamic_count", 0)
                     + stats.get("archive_count", 0)
-                    + stats.get("feel_count", 0),
+                    + stats.get("feel_count", 0)
+                    + stats.get("letter_count", 0),
                 },
                 "using_env_password": bool(os.environ.get("OMBRE_DASHBOARD_PASSWORD", "")),
+                "embedding_outbox": embedding_outbox.status(),
             }
         )
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/config/effective", methods=["GET"])
+async def api_config_effective(request):
+    from starlette.responses import JSONResponse
+
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    config_path = os.environ.get(
+        "OMBRE_CONFIG_PATH",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml"),
+    )
+    runtime_config_path = str(
+        config.get("_runtime_config_path")
+        or os.environ.get("OMBRE_RUNTIME_CONFIG_PATH", "")
+        or os.path.join(config.get("state_dir") or os.path.dirname(config_path), "config.runtime.yaml")
+    )
+    try:
+        report = effective_config_report(
+            config,
+            config_path=config_path,
+            runtime_config_path=runtime_config_path,
+        )
+        report["embedding_outbox"] = embedding_outbox.status()
+        return JSONResponse(report)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@mcp.custom_route("/api/backup/export", methods=["GET"])
+async def api_backup_export(request):
+    from starlette.background import BackgroundTask
+    from starlette.responses import FileResponse, JSONResponse
+
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        archive_path, _manifest = backup_manager.create_archive()
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    filename = f"ombre-memory-vault-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
+    return FileResponse(
+        archive_path,
+        media_type="application/zip",
+        filename=filename,
+        background=BackgroundTask(lambda: Path(archive_path).unlink(missing_ok=True)),
+    )
+
+
+async def _refresh_indexes_after_vault_restore(bucket_ids: list[str]) -> dict:
+    """Clear stale per-bucket state and rebuild deterministic derived indexes."""
+    refreshed = 0
+    errors: list[str] = []
+    for bucket_id in dict.fromkeys(str(item or "").strip() for item in bucket_ids):
+        if not bucket_id:
+            continue
+        try:
+            memory_moment_store.delete_bucket(bucket_id)
+            memory_edge_store.delete_for_bucket(bucket_id)
+            entity_edge_store.delete_for_bucket(bucket_id)
+            memory_node_store.delete(bucket_id)
+            bucket = await bucket_mgr.get(bucket_id)
+            if bucket:
+                memory_moment_store.upsert_bucket(bucket)
+                memory_node_store.upsert_bucket(bucket)
+                _refresh_entity_edges_for_bucket(bucket)
+            refreshed += 1
+        except Exception as exc:
+            logger.warning(
+                "Vault restore index refresh failed / 记忆库恢复索引刷新失败: %s: %s",
+                bucket_id,
+                exc,
+            )
+            errors.append(bucket_id)
+
+    try:
+        all_buckets = await bucket_mgr.list_all(include_archive=True)
+        identity_semantic_store.rebuild_alias_index(all_buckets)
+        await _rebuild_word_map_index(word_map_store, bucket_mgr, include_archive=False)
+    except Exception as exc:
+        logger.warning("Vault restore global index refresh failed: %s", exc)
+        errors.append("global_indexes")
+    return {"refreshed": refreshed, "errors": errors}
+
+
+@mcp.custom_route("/api/backup/restore", methods=["POST"])
+async def api_backup_restore(request):
+    from starlette.responses import JSONResponse
+
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    mode = str(request.query_params.get("mode") or "skip").strip().lower()
+    if mode not in {"skip", "overwrite"}:
+        return JSONResponse({"error": "mode must be skip or overwrite"}, status_code=400)
+
+    descriptor, upload_path = tempfile.mkstemp(prefix="ombre-upload-", suffix=".zip")
+    total = 0
+    try:
+        with os.fdopen(descriptor, "wb") as target:
+            content_type = request.headers.get("content-type", "")
+            if "multipart/form-data" in content_type:
+                form = await request.form()
+                upload = form.get("file")
+                if not upload:
+                    return JSONResponse({"error": "No file field"}, status_code=400)
+                while chunk := await upload.read(1024 * 1024):
+                    total += len(chunk)
+                    if total > MAX_ARCHIVE_BYTES:
+                        raise BackupArchiveError("备份压缩包超过 512 MiB 上限")
+                    target.write(chunk)
+            else:
+                async for chunk in request.stream():
+                    total += len(chunk)
+                    if total > MAX_ARCHIVE_BYTES:
+                        raise BackupArchiveError("备份压缩包超过 512 MiB 上限")
+                    target.write(chunk)
+            target.flush()
+            os.fsync(target.fileno())
+        if total == 0:
+            return JSONResponse({"error": "Empty backup"}, status_code=400)
+
+        result = await backup_manager.restore_archive(upload_path, mode=mode)
+        result["scope"] = "memory-vault"
+        result["derived_indexes"] = await _refresh_indexes_after_vault_restore(
+            result.get("restored_ids", [])
+        )
+        if result.get("embedding_snapshot") != "restored":
+            result["embeddings_queued"] = sum(
+                1 for bucket_id in result.get("restored_ids", []) if _queue_embedding_refresh(bucket_id)
+            )
+        else:
+            result["embeddings_queued"] = 0
+        return JSONResponse(result)
+    except (BackupArchiveError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        logger.exception("Backup restore failed / 备份恢复失败: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    finally:
+        Path(upload_path).unlink(missing_ok=True)
 
 
 # =============================================================
@@ -13611,6 +13876,7 @@ if __name__ == "__main__":
         if hasattr(_app, "add_event_handler"):
             async def _start_decay_engine_on_app_startup():
                 await _ensure_decay_engine_started_for_transport(transport)
+                await embedding_outbox.start(reconcile=True)
 
             _app.add_event_handler("startup", _start_decay_engine_on_app_startup)
         _app.add_middleware(
@@ -13633,4 +13899,27 @@ if __name__ == "__main__":
             )
         uvicorn.run(_app, host="0.0.0.0", port=8000)
     else:
+        import threading
+
+        outbox_ready = threading.Event()
+
+        def _start_stdio_embedding_outbox():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(embedding_outbox.start(reconcile=True))
+            finally:
+                outbox_ready.set()
+            if embedding_outbox.status().get("running"):
+                loop.run_forever()
+
+        if embedding_outbox.background_enabled:
+            outbox_thread = threading.Thread(
+                target=_start_stdio_embedding_outbox,
+                name="ombre-embedding-outbox-stdio",
+                daemon=True,
+            )
+            outbox_thread.start()
+            if not outbox_ready.wait(timeout=30):
+                logger.warning("stdio embedding outbox startup reconciliation is still running")
         mcp.run(transport=transport)

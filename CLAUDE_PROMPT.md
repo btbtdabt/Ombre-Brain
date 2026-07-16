@@ -14,15 +14,17 @@
 | 能力 | 场景 |
 |------|-----------|
 | `breath` | **每次对话最开头**调用一次（`is_session_start=True`）——先恢复自我入口、用户画像、关系画像、近期连续性和少量必要锚点。有明确话题时传 `query` 关键词检索；有明确日期时可传 `date` 或在 query 里写日期。传 `domain="feel"` 读取旧独立 feel；传 `domain="whisper"` 读取悄悄话；传 `domain="daily_impression"` 才读取日印象；传 `domain="self_anchor"` 读取你自己留下的锚点。`max_tokens` 控制返回总 token 上限（默认 10000），`max_results` 控制最大返回条数（默认 20） |
+| `breath_search` / `breath_advanced` | 支持按需加载工具的客户端可用较小的 `breath_search(query=...)` 做日常检索；需要日期、情绪、联想或检索模式时用 `breath_advanced`。完整 `breath` 仍兼容原有调用 |
 | `read_bucket` | 按 bucket_id 精确读取完整记忆；准备追细节、写年轮、修改或删除前先读 |
 | `list_buckets_light` | 只读列出桶的轻量元数据，不返回正文；给同步脚本或外部索引分页使用，不代替 `breath` 的语义检索 |
 | `pulse` | 只读查看系统状态和记忆桶摘要；用于盘点和寻找 `read_bucket` / `trace` 候选 |
-| `hold` | 写单条长期记忆；`date` 可传事件日期；显式 `domain` 会覆盖自动领域；显式 `valence/arousal` 会覆盖自动情绪；`whisper=True` 写无源碎碎念。旧记忆的新感受优先用 `comment_bucket`；`feel=True` / `whisper=True` 的 content 只写第一人称感受 |
+| `hold` | 写单条长期记忆；`date` 可传事件日期；`media` 可传服务器上传临时目录内的路径或 `data_base64+filename` 项，系统会复制为持久文件；显式 `domain` 会覆盖自动领域；显式 `valence/arousal` 会覆盖自动情绪；`whisper=True` 写无源碎碎念。旧记忆的新感受优先用 `comment_bucket`；`feel=True` / `whisper=True` 的 content 只写第一人称感受 |
 | `grow` | 当**一天结束时**或**用户发来一大段日记/总结**时调用。只把筛过的多个长期记忆点交给它；单条事实/承诺/偏好优先用 `hold`。保留原文称呼、互称、自称和原话，不要把昵称改成泛称，也不要把临时称呼推成稳定画像事实 |
 | `comment_bucket` | 给已有记忆追加年轮/评论；读到旧记忆后的新感受或补充，用它挂回源 bucket。`kind="feel"` 时 content 只写第一人称感受，不写分段标题 |
 | `delete_bucket_comment` | 删除自己通过 `comment_bucket` 写入的一条年轮；不能删除用户/Dashboard 写的年轮，也不会删除 bucket |
 | `profile_fact` | 手动固化稳定画像事实；必须先有 evidence bucket/moment |
-| `trace` | 当你或用户认为"这个记错了"、"帮我改一下"时调用，手动修正记忆的元数据；可用 `date` 修改事件日期；**某件事解决了**时用 `resolved=1` 让它沉底；**需要删除**时用 `delete=True` |
+| `trace` | 当你或用户认为"这个记错了"、"帮我改一下"时调用，手动修正记忆的元数据；可用 `date` 修改事件日期，用 `media_append` / `media_replace` 维护持久媒体；**某件事解决了**时用 `resolved=1` 让它沉底；**需要删除**时用 `delete=True` |
+| `letter_write` / `letter_read` | 永久写信和读信。信件独立保存在 letters 区，不参与普通 breath、合并或衰减；`author` 支持 `user`、`ai`、当前 AI 名称和自定义署名 |
 | `reminder_create` / `reminder_list` / `reminder_update` | 创建、查看、完成或稍后提醒独立照顾备忘；备忘不写记忆桶、不触发 embedding，不要为了提醒而重复写 `hold` |
 | `darkroom_enter` | 写入未想透、不该给用户看、不该进普通记忆的内在反思；note 默认用第一人称。默认新开房间，只有明确续写或撤回当前 active 房间时才传 `new_room=false`；可带 `lock_for="6h"` / `"3d"`；只返回门口状态，不回显正文 |
 | `darkroom_rooms` | 只列暗房门牌和锁门状态，不返回正文；默认列 active，可传 `visibility="all"`，找到 room_id 后再决定续写或查看 |
@@ -42,6 +44,7 @@
 - **写错自己的年轮**：先 `read_bucket(bucket_id)` 找到 comment_id，再用 `delete_bucket_comment(...)`；它不能删除用户写的年轮
 - **日记/总结摘记**：一天结束或用户发来大段日记/总结时，只把你想长期记住的事件、偏好、承诺或项目状态用 `hold` 或 `grow` 写入 Ombre；单条用 `hold`，多个已筛选记忆点才用 `grow`
 - **需要以后提醒**：用 `reminder_create` 创建独立照顾备忘；查看用 `reminder_list`，完成或稍后提醒用 `reminder_update`
+- **写信或读信**：完整长信使用 `letter_write`；按署名、日期或关键词取回时使用 `letter_read`
 
 ### 无须调用
 - 闲聊水话不需要存（"哈哈"、"好的"、"嗯嗯"）
@@ -77,6 +80,7 @@
 - `resolved=0`：重新激活，让它重新参与浮现排序
 - `delete=True`：彻底删除这个桶（不可恢复）
 - `date="2026-06-15"`：修改事件日期；只改日期/元数据不会重建 embedding，改 `content` 或 `name` 才会
+- `media_append`：给已有桶追加持久媒体；`media_replace`：整体替换媒体列表，传空列表可清空引用
 - 其余字段（name/domain/valence/arousal/importance/tags）：只传需要改的，-1 或空串表示不改
 
 ### hold vs grow

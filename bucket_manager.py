@@ -26,13 +26,18 @@
 # ============================================================
 
 import os
+import asyncio
+import hashlib
+import inspect
 import math
 import logging
 import re
-import shutil
 import json
+import time
+from contextlib import asynccontextmanager
 from collections import Counter
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 from typing import Optional
 
@@ -40,18 +45,95 @@ import frontmatter
 import jieba
 
 from identity import identity_names
+from media_store import MediaStore
 from memory_relevance import content_terms_for_query, memory_relevance_options_from_config, recall_topic_query
 from query_terms import GENERIC_LEXICAL_STOPWORDS
 from utils import (
+    atomic_write_text,
     bucket_content_for_recall,
     generate_bucket_id,
     now_iso,
     safe_path,
     sanitize_name,
-    strip_wikilinks,
 )
 
 logger = logging.getLogger("ombre_brain.bucket")
+
+
+@asynccontextmanager
+async def _filesystem_turn(base_dir: str, key: str, timeout_seconds: float = 30.0):
+    """Serialize a storage mutation across threads, event loops, and processes."""
+    if not base_dir:
+        yield
+        return
+    lock_dir = Path(base_dir) / ".locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_id = hashlib.sha256(str(key).encode("utf-8", errors="surrogatepass")).hexdigest()
+    lock_path = lock_dir / f"{lock_id}.lock"
+    deadline = time.monotonic() + timeout_seconds
+    flags = os.O_RDWR | os.O_CREAT
+    flags |= int(getattr(os, "O_CLOEXEC", 0))
+    flags |= int(getattr(os, "O_NOFOLLOW", 0))
+    descriptor = os.open(lock_path, flags, 0o600)
+    handle = os.fdopen(descriptor, "r+b", buffering=0)
+    handle.seek(0, os.SEEK_END)
+    if handle.tell() == 0:
+        handle.write(b"\0")
+    handle.seek(0)
+
+    def try_acquire() -> bool:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:  # pragma: no cover - Linux production path
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except (BlockingIOError, OSError):
+            return False
+
+    def release() -> None:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:  # pragma: no cover - Linux production path
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    acquired = False
+    try:
+        while not acquired:
+            acquired = try_acquire()
+            if acquired:
+                break
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"timed out waiting for filesystem lease {lock_id}")
+            await asyncio.sleep(0.01)
+        yield
+    finally:
+        try:
+            if acquired:
+                release()
+        except OSError:
+            pass
+        finally:
+            handle.close()
+
+
+def _serialized_bucket_method(method):
+    @wraps(method)
+    async def wrapped(self, bucket_id: str, *args, **kwargs):
+        async with self._bucket_turn(bucket_id):
+            return await method(self, bucket_id, *args, **kwargs)
+
+    return wrapped
 
 
 class BucketManager:
@@ -72,7 +154,14 @@ class BucketManager:
         self.dynamic_dir = os.path.join(self.base_dir, "dynamic")
         self.archive_dir = os.path.join(self.base_dir, "archive")
         self.feel_dir = os.path.join(self.base_dir, "feel")
+        self.letter_dir = os.path.join(self.base_dir, "letters")
         self.tombstone_dir = os.path.join(self.base_dir, ".tombstones")
+        self.media_store = MediaStore(
+            self.base_dir,
+            str(config.get("media_dir") or os.path.join(self.base_dir, "_media")),
+            max_bytes=int(config.get("media_max_bytes") or 25 * 1024 * 1024),
+            allowed_source_dirs=config.get("media_allowed_source_dirs"),
+        )
         self.fuzzy_threshold = config.get("matching", {}).get("fuzzy_threshold", 50)
         self.max_results = config.get("matching", {}).get("max_results", 5)
 
@@ -109,35 +198,55 @@ class BucketManager:
             tuple[tuple, Counter[str], float, tuple[str, str, str, str]],
         ] = {}
 
+    def _bucket_turn(self, bucket_id: str):
+        return _filesystem_turn(str(self.base_dir), f"bucket-{bucket_id}")
+
+    async def create(self, content: str, *args, **kwargs) -> str:
+        """Create without overwriting an existing bucket ID."""
+        signature = inspect.signature(self._create_unlocked)
+        bound = signature.bind(content, *args, **kwargs)
+        bound.apply_defaults()
+        preferred_id = str(bound.arguments.get("bucket_id") or generate_bucket_id())
+        candidates = [preferred_id]
+        candidates.extend(generate_bucket_id() for _ in range(8))
+        for candidate_id in candidates:
+            async with self._bucket_turn(candidate_id):
+                if self._find_bucket_file(candidate_id):
+                    continue
+                bound.arguments["bucket_id"] = candidate_id
+                return await self._create_unlocked(*bound.args, **bound.kwargs)
+        raise FileExistsError(f"could not allocate a unique bucket id after retries: {preferred_id}")
+
     # ---------------------------------------------------------
     # Create a new bucket
     # 创建新桶
     # Write content and metadata into a .md file
     # 将内容和元数据写入一个 .md 文件
     # ---------------------------------------------------------
-    async def create(
+    async def _create_unlocked(
         self,
         content: str,
-        tags: list[str] = None,
+        tags: list[str] | None = None,
         importance: int = 5,
-        domain: list[str] = None,
+        domain: list[str] | None = None,
         valence: float = 0.5,
         arousal: float = 0.3,
         bucket_type: str = "dynamic",
-        name: str = None,
+        name: str | None = None,
         pinned: bool = False,
         protected: bool = False,
-        bucket_id: str = None,
-        source: str = None,
-        created: str = None,
-        last_active: str = None,
-        updated_at: str = None,
+        bucket_id: str | None = None,
+        source: str | None = None,
+        created: str | None = None,
+        last_active: str | None = None,
+        updated_at: str | None = None,
         anchor: bool = False,
         resolved: bool = False,
         digested: bool = False,
         confidence: float | None = None,
         period: str | None = None,
         date: str | None = None,
+        media=None,
         extra_metadata: dict | None = None,
     ) -> str:
         """
@@ -202,10 +311,6 @@ class BucketManager:
                     continue
                 metadata[str(key)] = value
 
-        # --- Assemble Markdown file (frontmatter + body) ---
-        # --- 组装 Markdown 文件 ---
-        post = frontmatter.Post(linked_content, **metadata)
-
         # --- Choose directory by type + primary domain ---
         # --- 按类型 + 主题域选择存储目录 ---
         if bucket_type == "permanent" or pinned:
@@ -214,10 +319,14 @@ class BucketManager:
                 metadata["type"] = "permanent"
         elif bucket_type == "feel":
             type_dir = self.feel_dir
+        elif bucket_type == "letter":
+            type_dir = self.letter_dir
         else:
             type_dir = self.dynamic_dir
         if bucket_type == "feel":
             primary_domain = "沉淀物"  # feel subfolder name
+        elif bucket_type == "letter":
+            primary_domain = "history"
         else:
             primary_domain = sanitize_name(domain[0]) if domain else "未分类"
         target_dir = os.path.join(type_dir, primary_domain)
@@ -232,8 +341,13 @@ class BucketManager:
         file_path = safe_path(target_dir, filename)
 
         try:
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(frontmatter.dumps(post))
+            if os.path.exists(file_path):
+                raise FileExistsError(file_path)
+            persisted_media = await self.media_store.persist(bucket_id, media)
+            if persisted_media:
+                metadata["media"] = persisted_media[:50]
+            post = frontmatter.Post(linked_content, **metadata)
+            atomic_write_text(file_path, frontmatter.dumps(post))
         except OSError as e:
             logger.error(f"Failed to write bucket file / 写入桶文件失败: {file_path}: {e}")
             raise
@@ -265,7 +379,12 @@ class BucketManager:
     # Move bucket between directories
     # 在目录间移动桶文件
     # ---------------------------------------------------------
-    def _move_bucket(self, file_path: str, target_type_dir: str, domain: list[str] = None) -> str:
+    def _move_bucket(
+        self,
+        file_path: str,
+        target_type_dir: str,
+        domain: list[str] | None = None,
+    ) -> str:
         """
         Move a bucket file to a new type directory, preserving domain subfolder.
         Returns new file path.
@@ -276,15 +395,46 @@ class BucketManager:
         filename = os.path.basename(file_path)
         new_path = safe_path(target_dir, filename)
         if os.path.normpath(file_path) != os.path.normpath(new_path):
-            os.rename(file_path, new_path)
+            self._commit_bucket_move(
+                file_path,
+                str(new_path),
+                Path(file_path).read_text(encoding="utf-8"),
+            )
             logger.info(f"Moved bucket / 移动记忆桶: {filename} → {target_dir}/")
-        return new_path
+        return str(new_path)
+
+    @staticmethod
+    def _same_path(first: str, second: str) -> bool:
+        return os.path.normcase(os.path.abspath(first)) == os.path.normcase(os.path.abspath(second))
+
+    def _commit_bucket_move(self, source_path: str, target_path: str, serialized: str) -> str:
+        if self._same_path(source_path, target_path):
+            atomic_write_text(source_path, serialized)
+            return source_path
+        if os.path.exists(target_path):
+            raise FileExistsError(f"bucket migration target already exists: {target_path}")
+        os.rename(source_path, target_path)
+        try:
+            atomic_write_text(target_path, serialized)
+        except Exception:
+            try:
+                os.rename(target_path, source_path)
+            except OSError as rollback_error:
+                logger.critical(
+                    "Failed to roll back bucket migration %s -> %s: %s",
+                    source_path,
+                    target_path,
+                    rollback_error,
+                )
+            raise
+        return target_path
 
     # ---------------------------------------------------------
     # Update bucket
     # 更新桶
     # Supports: content, tags, facets, importance, valence, arousal, name, resolved
     # ---------------------------------------------------------
+    @_serialized_bucket_method
     async def update(self, bucket_id: str, **kwargs) -> bool:
         """
         Update bucket content or metadata fields.
@@ -298,6 +448,11 @@ class BucketManager:
             post = frontmatter.load(file_path)
         except Exception as e:
             logger.warning(f"Failed to load bucket for update / 加载桶失败: {file_path}: {e}")
+            return False
+
+        current_type = str(post.get("type") or "dynamic").strip().lower()
+        if current_type == "archived" or post.get("deleted_at") or post.get("tombstone"):
+            logger.warning("update() rejected mutation on terminal bucket=%s", bucket_id)
             return False
 
         # --- Pinned/protected buckets: lock importance to 10, ignore importance changes ---
@@ -335,6 +490,28 @@ class BucketManager:
             post["digested"] = bool(kwargs["digested"])
         if "model_valence" in kwargs:
             post["model_valence"] = max(0.0, min(1.0, float(kwargs["model_valence"])))
+        if "media" in kwargs:
+            persisted_media = await self.media_store.persist(bucket_id, kwargs["media"])
+            if persisted_media:
+                post["media"] = persisted_media[:50]
+            else:
+                post.metadata.pop("media", None)
+        if "media_append" in kwargs:
+            appended_media = await self.media_store.persist(bucket_id, kwargs["media_append"])
+            existing_media = post.get("media") or []
+            if not isinstance(existing_media, list):
+                existing_media = []
+            existing_paths = {
+                item.get("path") for item in existing_media if isinstance(item, dict)
+            }
+            post["media"] = (
+                list(existing_media)
+                + [
+                    item
+                    for item in appended_media
+                    if item.get("path") not in existing_paths
+                ]
+            )[:50]
         if "source" in kwargs:
             post["source"] = str(kwargs["source"])
         if "confidence" in kwargs:
@@ -384,8 +561,7 @@ class BucketManager:
         post["last_active"] = kwargs.get("last_active") or now_iso()
 
         try:
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(frontmatter.dumps(post))
+            atomic_write_text(file_path, frontmatter.dumps(post))
         except OSError as e:
             logger.error(f"Failed to write bucket update / 写入桶更新失败: {file_path}: {e}")
             return False
@@ -395,8 +571,7 @@ class BucketManager:
         domain = post.get("domain", ["未分类"])
         if kwargs.get("pinned") and post.get("type") != "permanent":
             post["type"] = "permanent"
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(frontmatter.dumps(post))
+            atomic_write_text(file_path, frontmatter.dumps(post))
             self._move_bucket(file_path, self.permanent_dir, domain)
         elif "domain" in kwargs and post.get("type") != "feel":
             bucket_type = str(post.get("type") or "dynamic")
@@ -411,7 +586,22 @@ class BucketManager:
         logger.info(f"Updated bucket / 更新记忆桶: {bucket_id}")
         return True
 
-    async def add_comment(
+    async def add_comment(self, bucket_id: str, content: str, **kwargs) -> Optional[dict]:
+        touch = bool(kwargs.get("touch", True))
+        async with self._bucket_turn(bucket_id):
+            entry = await self._add_comment_locked(bucket_id, content, **kwargs)
+        if entry and touch:
+            bucket = await self.get(bucket_id)
+            metadata = (bucket or {}).get("metadata", {})
+            current_time = self._parse_iso_datetime(
+                metadata.get("created", metadata.get("last_active", ""))
+            )
+            if current_time is None:
+                current_time = datetime.now(timezone.utc).replace(tzinfo=None)
+            await self._time_ripple(bucket_id, current_time)
+        return entry
+
+    async def _add_comment_locked(
         self,
         bucket_id: str,
         content: str,
@@ -470,21 +660,15 @@ class BucketManager:
             post["activation_count"] = post.get("activation_count", 0) + 1
 
         try:
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(frontmatter.dumps(post))
+            atomic_write_text(file_path, frontmatter.dumps(post))
         except OSError as e:
             logger.error(f"Failed to write bucket comment / 写入桶评论失败: {file_path}: {e}")
             return None
 
-        if touch:
-            current_time = self._parse_iso_datetime(post.get("created", post.get("last_active", "")))
-            if current_time is None:
-                current_time = datetime.now(timezone.utc).replace(tzinfo=None)
-            await self._time_ripple(bucket_id, current_time)
-
         logger.info(f"Added bucket comment / 已追加年轮: {bucket_id}#{entry['id']}")
         return entry
 
+    @_serialized_bucket_method
     async def delete_comment(
         self,
         bucket_id: str,
@@ -527,8 +711,7 @@ class BucketManager:
         post["updated_at"] = now_iso()
 
         try:
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(frontmatter.dumps(post))
+            atomic_write_text(file_path, frontmatter.dumps(post))
         except OSError as e:
             logger.error(f"Failed to delete bucket comment / 删除桶评论失败: {file_path}: {e}")
             return {"status": "failed", "comment": target}
@@ -551,6 +734,7 @@ class BucketManager:
     # Delete bucket
     # 删除桶
     # ---------------------------------------------------------
+    @_serialized_bucket_method
     async def delete(self, bucket_id: str) -> bool:
         """
         Delete a memory bucket file.
@@ -562,8 +746,24 @@ class BucketManager:
 
         try:
             tombstone = self._build_tombstone(bucket_id, file_path)
-            os.remove(file_path)
-            self._write_tombstone(tombstone)
+            tombstone_path = safe_path(self.tombstone_dir, f"{bucket_id}.json")
+            previous_tombstone = (
+                Path(tombstone_path).read_text(encoding="utf-8")
+                if os.path.exists(tombstone_path)
+                else None
+            )
+            tombstone_path = self._write_tombstone(tombstone)
+            try:
+                os.remove(file_path)
+            except Exception:
+                try:
+                    if previous_tombstone is None:
+                        os.remove(tombstone_path)
+                    else:
+                        atomic_write_text(tombstone_path, previous_tombstone)
+                except OSError:
+                    pass
+                raise
         except OSError as e:
             logger.error(f"Failed to delete bucket file / 删除桶文件失败: {file_path}: {e}")
             return False
@@ -607,11 +807,14 @@ class BucketManager:
             pass
         return tombstone
 
-    def _write_tombstone(self, tombstone: dict) -> None:
+    def _write_tombstone(self, tombstone: dict) -> str:
         os.makedirs(self.tombstone_dir, exist_ok=True)
         path = safe_path(self.tombstone_dir, f"{tombstone['id']}.json")
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(tombstone, f, ensure_ascii=False, indent=2)
+        atomic_write_text(
+            path,
+            json.dumps(tombstone, ensure_ascii=False, indent=2, default=str) + "\n",
+        )
+        return str(path)
 
     # ---------------------------------------------------------
     # Touch bucket (refresh activation time + increment count)
@@ -619,33 +822,36 @@ class BucketManager:
     # Called on every recall hit; affects decay score.
     # 每次检索命中时调用，影响衰减得分。
     # ---------------------------------------------------------
-    async def touch(self, bucket_id: str) -> None:
+    async def touch(self, bucket_id: str, ripple: bool = True) -> None:
         """
         Update a bucket's last activation time and count.
         Also triggers time ripple: nearby memories get a slight activation boost.
         更新桶的最后激活时间和激活次数。
         同时触发时间涟漪：时间上相邻的记忆轻微唤醒。
         """
+        async with self._bucket_turn(bucket_id):
+            current_time = await self._touch_locked(bucket_id)
+        if ripple and current_time is not None:
+            await self._time_ripple(bucket_id, current_time)
+
+    async def _touch_locked(self, bucket_id: str) -> datetime | None:
         file_path = self._find_bucket_file(bucket_id)
         if not file_path:
-            return
+            return None
 
         try:
             post = frontmatter.load(file_path)
             post["last_active"] = now_iso()
             post["activation_count"] = post.get("activation_count", 0) + 1
 
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(frontmatter.dumps(post))
-
-            # --- Time ripple: boost nearby memories within ±48h ---
-            # --- 时间涟漪：±48小时内的记忆轻微唤醒 ---
+            atomic_write_text(file_path, frontmatter.dumps(post))
             current_time = self._parse_iso_datetime(post.get("created", post.get("last_active", "")))
             if current_time is None:
                 current_time = datetime.now(timezone.utc).replace(tzinfo=None)
-            await self._time_ripple(bucket_id, current_time)
+            return current_time
         except Exception as e:
             logger.warning(f"Failed to touch bucket / 触碰桶失败: {bucket_id}: {e}")
+            return None
 
     async def _time_ripple(self, source_id: str, reference_time: datetime, hours: float = 48.0) -> None:
         """
@@ -665,32 +871,49 @@ class BucketManager:
                 break
             if bucket["id"] == source_id:
                 continue
-            meta = bucket.get("metadata", {})
-            # Skip pinned/permanent/feel
-            if meta.get("pinned") or meta.get("protected") or meta.get("type") in ("permanent", "feel"):
+            target_id = str(bucket.get("id") or "").strip()
+            if not target_id:
                 continue
-
-            created_str = meta.get("created", meta.get("last_active", ""))
-            created = self._parse_iso_datetime(created_str)
-            if created is None:
-                continue
-            delta_hours = abs((reference_time - created).total_seconds()) / 3600
-
-            if delta_hours <= hours:
-                # Boost activation_count by 0.3 (fractional), don't change last_active
-                file_path = self._find_bucket_file(bucket["id"])
-                if not file_path:
-                    continue
-                try:
+            try:
+                async with self._bucket_turn(target_id):
+                    file_path = self._find_bucket_file(target_id)
+                    if not file_path or not self._is_active_path(file_path):
+                        continue
                     post = frontmatter.load(file_path)
-                    current_count = post.get("activation_count", 1)
-                    # Store as float for fractional increments; calculate_score handles it
+                    if (
+                        post.get("pinned")
+                        or post.get("protected")
+                        or post.get("deleted_at")
+                        or post.get("tombstone")
+                        or str(post.get("type") or "dynamic").lower() in ("permanent", "feel", "archived")
+                    ):
+                        continue
+                    created_str = post.get("created", post.get("last_active", ""))
+                    created = self._parse_iso_datetime(created_str)
+                    if created is None:
+                        continue
+                    delta_hours = abs((reference_time - created).total_seconds()) / 3600
+                    if delta_hours > hours:
+                        continue
+                    current_count = float(post.get("activation_count") or 0)
+                    if not math.isfinite(current_count) or current_count < 0:
+                        current_count = 0.0
                     post["activation_count"] = round(current_count + 0.3, 1)
-                    with open(file_path, "w", encoding="utf-8") as f:
-                        f.write(frontmatter.dumps(post))
+                    atomic_write_text(file_path, frontmatter.dumps(post))
                     rippled += 1
-                except Exception:
-                    continue
+            except Exception:
+                continue
+
+    def _is_active_path(self, file_path: str) -> bool:
+        normalized = os.path.normcase(os.path.abspath(file_path))
+        for directory in (self.permanent_dir, self.dynamic_dir, self.feel_dir):
+            active_dir = os.path.normcase(os.path.abspath(directory))
+            try:
+                if os.path.commonpath((normalized, active_dir)) == active_dir:
+                    return True
+            except ValueError:
+                continue
+        return False
 
     # ---------------------------------------------------------
     # Multi-dimensional search (core feature)
@@ -1283,6 +1506,20 @@ class BucketManager:
 
         return buckets
 
+    async def list_letters(self) -> list[dict]:
+        """List permanent letters without including them in ordinary memory reads."""
+        letters = []
+        if not os.path.exists(self.letter_dir):
+            return letters
+        for root, _, files in os.walk(self.letter_dir):
+            for filename in files:
+                if not filename.endswith(".md"):
+                    continue
+                bucket = self._load_bucket(os.path.join(root, filename))
+                if bucket and bucket.get("metadata", {}).get("type") == "letter":
+                    letters.append(bucket)
+        return letters
+
     # ---------------------------------------------------------
     # Statistics (counts per category + total size)
     # 统计信息（各分类桶数量 + 总体积）
@@ -1297,6 +1534,7 @@ class BucketManager:
             "dynamic_count": 0,
             "archive_count": 0,
             "feel_count": 0,
+            "letter_count": 0,
             "total_size_kb": 0.0,
             "domains": {},
         }
@@ -1306,6 +1544,7 @@ class BucketManager:
             (self.dynamic_dir, "dynamic_count"),
             (self.archive_dir, "archive_count"),
             (self.feel_dir, "feel_count"),
+            (self.letter_dir, "letter_count"),
         ]:
             if not os.path.exists(subdir):
                 continue
@@ -1331,6 +1570,7 @@ class BucketManager:
     # Called by decay engine to simulate "forgetting"
     # 由衰减引擎调用，模拟"遗忘"
     # ---------------------------------------------------------
+    @_serialized_bucket_method
     async def archive(self, bucket_id: str) -> bool:
         """
         Move a bucket into the archive directory (preserving domain subdirs).
@@ -1343,6 +1583,8 @@ class BucketManager:
         try:
             # Read once, get domain info and update type / 一次性读取
             post = frontmatter.load(file_path)
+            if str(post.get("type") or "").strip().lower() == "archived":
+                return True
             domain = post.get("domain", ["未分类"])
             if not isinstance(domain, list):
                 domain = [domain]
@@ -1352,14 +1594,8 @@ class BucketManager:
 
             dest = safe_path(archive_subdir, os.path.basename(file_path))
 
-            # Update type marker then move file / 更新类型标记后移动文件
             post["type"] = "archived"
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(frontmatter.dumps(post))
-
-            # Use shutil.move for cross-filesystem safety
-            # 使用 shutil.move 保证跨文件系统安全
-            shutil.move(file_path, str(dest))
+            self._commit_bucket_move(file_path, str(dest), frontmatter.dumps(post))
         except Exception as e:
             logger.error(
                 f"Failed to archive bucket / 归档桶失败: {bucket_id}: {e}"
@@ -1369,6 +1605,7 @@ class BucketManager:
         logger.info(f"Archived bucket / 归档记忆桶: {bucket_id} → archive/{primary_domain}/")
         return True
 
+    @_serialized_bucket_method
     async def activate(self, bucket_id: str) -> bool:
         """
         Move an archived bucket back to dynamic storage and mark it active.
@@ -1394,11 +1631,7 @@ class BucketManager:
             post["resolved"] = False
             post["updated_at"] = now_iso()
             post["last_active"] = post.get("last_active") or post["updated_at"]
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(frontmatter.dumps(post))
-
-            if os.path.normpath(file_path) != os.path.normpath(str(dest)):
-                shutil.move(file_path, str(dest))
+            self._commit_bucket_move(file_path, str(dest), frontmatter.dumps(post))
         except Exception as e:
             logger.error(
                 f"Failed to activate bucket / 恢复桶失败: {bucket_id}: {e}"
@@ -1420,7 +1653,13 @@ class BucketManager:
         """
         if not bucket_id:
             return None
-        for dir_path in [self.permanent_dir, self.dynamic_dir, self.archive_dir, self.feel_dir]:
+        for dir_path in [
+            self.permanent_dir,
+            self.dynamic_dir,
+            self.archive_dir,
+            self.feel_dir,
+            self.letter_dir,
+        ]:
             if not os.path.exists(dir_path):
                 continue
             for root, _, files in os.walk(dir_path):

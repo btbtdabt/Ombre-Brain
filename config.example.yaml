@@ -21,6 +21,16 @@ log_level: "INFO"
 # 保持默认则使用内置的 ./buckets/ 目录
 # buckets_dir: "/path/to/your/Obsidian Vault/Ombre Brain"
 
+# --- Persistent media / 持久媒体 ---
+# Defaults to <buckets_dir>/_media. A verified backup includes this directory.
+# 默认保存到 <buckets_dir>/_media；已验证备份会一起包含这些文件。
+# media_dir: "/path/to/your/Obsidian Vault/Ombre Brain/_media"
+# media_allowed_source_dirs:
+#   - "/tmp"
+# Media path inputs are accepted only from these server-side upload/temp roots.
+# Base64 media does not use this setting. The OS temp directory is the default.
+media_max_bytes: 26214400  # per item, 25 MiB
+
 # --- Runtime state path / 运行状态路径 ---
 # Stores runtime SQLite state such as Persona State outside bucket sync.
 # 保存 Persona State 等运行时 SQLite 状态，建议放在 buckets 同步目录外。

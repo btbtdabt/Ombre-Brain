@@ -3409,6 +3409,24 @@
     <p style="color:var(--text-dim);font-size:13px;">支持 Claude JSON、ChatGPT 导出、DeepSeek、Markdown、纯文本，以及 Operit 记忆备份 JSON</p>
     <p style="color:var(--text-dim);font-size:12px;">Operit 备份会按条目保留 content 原文，不经过脱水；仅保留原标签、补 <code>operit_import</code> 来源标记与 embedding。</p>
 
+    <div class="config-section" style="margin:20px 0;">
+      <h3>记忆库备份与恢复</h3>
+      <p style="color:var(--text-dim);font-size:12px;">校验包包含记忆桶、信件、持久媒体与向量快照；运行状态、提醒、配置和密钥使用服务器部署备份。</p>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+        <button onclick="downloadVerifiedBackup()">下载记忆库校验备份</button>
+        <input type="file" id="backup-restore-file" accept=".zip,application/zip" />
+        <select id="backup-restore-mode" style="width:auto;min-width:130px;">
+          <option value="skip">保留现有冲突</option>
+          <option value="overwrite">覆盖现有冲突</option>
+        </select>
+        <button onclick="restoreVerifiedBackup()">恢复备份</button>
+        <button onclick="loadEffectiveConfig()">查看生效配置</button>
+      </div>
+      <pre id="backup-status" style="display:none;white-space:pre-wrap;overflow:auto;max-height:320px;margin-top:12px;"></pre>
+    </div>
+
+    <hr style="border-color:var(--border);margin:24px 0;" />
+
     <div id="import-upload-zone" style="border:2px dashed var(--border);border-radius:16px;padding:40px;text-align:center;cursor:pointer;margin:20px 0;transition:border-color .2s;">
       <div style="font-size:32px;margin-bottom:8px;">📁</div>
       <div>拖拽文件到此处，或 <span style="color:var(--accent);text-decoration:underline;">点击选择</span></div>
@@ -8773,6 +8791,74 @@ checkAuth().then(function(ok) {
 // --- Import functions ---
 const uploadZone = document.getElementById('import-upload-zone');
 const fileInput = document.getElementById('import-file-input');
+
+function showBackupStatus(value) {
+  const output = document.getElementById('backup-status');
+  output.style.display = '';
+  output.textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+}
+
+async function downloadVerifiedBackup() {
+  showBackupStatus('正在生成备份...');
+  try {
+    const response = await authFetch(BASE + '/api/backup/export');
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.error || ('HTTP ' + response.status));
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get('content-disposition') || '';
+    const match = disposition.match(/filename="?([^";]+)"?/i);
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = match ? match[1] : 'ombre-memory-vault.zip';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(link.href);
+    showBackupStatus('备份已生成。');
+  } catch (error) {
+    showBackupStatus('备份失败: ' + error.message);
+  }
+}
+
+async function restoreVerifiedBackup() {
+  const input = document.getElementById('backup-restore-file');
+  const file = input.files && input.files[0];
+  if (!file) {
+    showBackupStatus('请选择 ZIP 备份。');
+    return;
+  }
+  const mode = document.getElementById('backup-restore-mode').value;
+  if (!confirm(mode === 'overwrite' ? '覆盖冲突记忆并恢复？' : '保留冲突记忆并恢复其余内容？')) return;
+  const form = new FormData();
+  form.append('file', file);
+  showBackupStatus('正在校验并恢复...');
+  try {
+    const response = await authFetch(BASE + '/api/backup/restore?mode=' + encodeURIComponent(mode), {
+      method: 'POST',
+      body: form,
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || ('HTTP ' + response.status));
+    showBackupStatus(result);
+    await loadAll();
+  } catch (error) {
+    showBackupStatus('恢复失败: ' + error.message);
+  }
+}
+
+async function loadEffectiveConfig() {
+  showBackupStatus('正在读取生效配置...');
+  try {
+    const response = await authFetch(BASE + '/api/config/effective');
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || ('HTTP ' + response.status));
+    showBackupStatus(result);
+  } catch (error) {
+    showBackupStatus('读取失败: ' + error.message);
+  }
+}
 
 uploadZone.addEventListener('click', () => fileInput.click());
 uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.style.borderColor = 'var(--accent)'; });
