@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import re
 from contextlib import AsyncExitStack
 from pathlib import Path
 import shutil
@@ -19,7 +18,8 @@ from backup_archive import (
     extract_backup_archive_file,
     validate_sqlite_file,
 )
-from utils import atomic_write_text, now_iso
+from media_store import media_bucket_directory_name
+from utils import atomic_write_text, now_iso, same_path
 
 
 class VaultBackupManager:
@@ -117,7 +117,7 @@ class VaultBackupManager:
                     operations.append(operation)
                     atomic_write_text(target_path, candidate["serialized"])
                     for existing_path in existing_paths:
-                        if not self._same_path(existing_path, str(target_path)):
+                        if not same_path(existing_path, str(target_path)):
                             os.remove(existing_path)
 
                     if existing_paths:
@@ -262,7 +262,7 @@ class VaultBackupManager:
         media = post.get("media")
         if not isinstance(media, list):
             return
-        safe_bucket = re.sub(r"[^a-zA-Z0-9_.-]", "_", bucket_id)[:128]
+        safe_bucket = media_bucket_directory_name(bucket_id)
         rewritten = []
         for raw_item in media:
             if not isinstance(raw_item, dict) or not raw_item.get("stored"):
@@ -379,7 +379,3 @@ class VaultBackupManager:
                     os.replace(temporary, destination)
                 except OSError:
                     pass
-
-    @staticmethod
-    def _same_path(first: str, second: str) -> bool:
-        return os.path.normcase(os.path.abspath(first)) == os.path.normcase(os.path.abspath(second))

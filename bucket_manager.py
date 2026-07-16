@@ -54,6 +54,7 @@ from utils import (
     generate_bucket_id,
     now_iso,
     safe_path,
+    same_path,
     sanitize_name,
 )
 
@@ -403,12 +404,8 @@ class BucketManager:
             logger.info(f"Moved bucket / 移动记忆桶: {filename} → {target_dir}/")
         return str(new_path)
 
-    @staticmethod
-    def _same_path(first: str, second: str) -> bool:
-        return os.path.normcase(os.path.abspath(first)) == os.path.normcase(os.path.abspath(second))
-
     def _commit_bucket_move(self, source_path: str, target_path: str, serialized: str) -> str:
-        if self._same_path(source_path, target_path):
+        if same_path(source_path, target_path):
             atomic_write_text(source_path, serialized)
             return source_path
         if os.path.exists(target_path):

@@ -17,6 +17,11 @@ _SAFE_SUFFIX = re.compile(r"^\.[a-zA-Z0-9]{1,10}$")
 _DEFAULT_MAX_MEDIA_BYTES = 25 * 1024 * 1024
 
 
+def media_bucket_directory_name(bucket_id: str) -> str:
+    """Map a bucket id to its durable media subdirectory name."""
+    return re.sub(r"[^a-zA-Z0-9_.-]", "_", bucket_id)[:128]
+
+
 class MediaPersistenceError(ValueError):
     """Raised when media cannot be persisted on the Ombre server."""
 
@@ -57,7 +62,7 @@ class MediaStore:
         return guessed if _SAFE_SUFFIX.fullmatch(guessed) else ".bin"
 
     def _stable_path(self, bucket_id: str, digest: str, suffix: str) -> Path:
-        safe_bucket = re.sub(r"[^a-zA-Z0-9_.-]", "_", bucket_id)[:128]
+        safe_bucket = media_bucket_directory_name(bucket_id)
         target_dir = (self.media_dir / safe_bucket).resolve()
         if self.media_dir not in target_dir.parents:
             raise MediaPersistenceError("媒体目录越界，已拒绝保存。")

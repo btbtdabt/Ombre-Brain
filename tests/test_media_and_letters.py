@@ -8,7 +8,16 @@ from backup_manager import VaultBackupManager
 from bucket_manager import BucketManager
 from embedding_engine import EmbeddingEngine
 from letter_service import LetterService
-from media_store import MediaPersistenceError, MediaStore
+from media_store import MediaPersistenceError, MediaStore, media_bucket_directory_name
+from utils import same_path
+
+
+def test_shared_path_helpers_preserve_write_restore_identity(tmp_path: Path) -> None:
+    bucket_id = "character/scene:one"
+    assert media_bucket_directory_name(bucket_id) == "character_scene_one"
+
+    relative = tmp_path / "vault" / "item.md"
+    assert same_path(str(relative), str(tmp_path / "vault" / "." / "item.md"))
 
 
 def _config(tmp_path: Path) -> dict:

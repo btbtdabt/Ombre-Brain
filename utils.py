@@ -1111,6 +1111,13 @@ def sanitize_name(name: str) -> str:
     return cleaned if cleaned else "unnamed"
 
 
+def same_path(first: str, second: str) -> bool:
+    """Return whether two path strings identify the same normalized path."""
+    return os.path.normcase(os.path.abspath(first)) == os.path.normcase(
+        os.path.abspath(second)
+    )
+
+
 def safe_path(base_dir: str, filename: str) -> Path:
     """
     Construct a safe file path, ensuring it stays within base_dir.
