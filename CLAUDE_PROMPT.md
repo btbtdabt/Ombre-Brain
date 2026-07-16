@@ -15,16 +15,21 @@
 |------|-----------|
 | `breath` | **每次对话最开头**调用一次（`is_session_start=True`）——先恢复自我入口、用户画像、关系画像、近期连续性和少量必要锚点。有明确话题时传 `query` 关键词检索；有明确日期时可传 `date` 或在 query 里写日期。传 `domain="feel"` 读取旧独立 feel；传 `domain="whisper"` 读取悄悄话；传 `domain="daily_impression"` 才读取日印象；传 `domain="self_anchor"` 读取你自己留下的锚点。`max_tokens` 控制返回总 token 上限（默认 10000），`max_results` 控制最大返回条数（默认 20） |
 | `read_bucket` | 按 bucket_id 精确读取完整记忆；准备追细节、写年轮、修改或删除前先读 |
-| `comment_bucket` | 给已有记忆追加年轮/评论；读到旧记忆后的新感受或补充，用它挂回源 bucket。`kind="feel"` 时 content 只写第一人称感受，不写分段标题 |
+| `list_buckets_light` | 只读列出桶的轻量元数据，不返回正文；给同步脚本或外部索引分页使用，不代替 `breath` 的语义检索 |
+| `pulse` | 只读查看系统状态和记忆桶摘要；用于盘点和寻找 `read_bucket` / `trace` 候选 |
 | `hold` | 写单条长期记忆；`date` 可传事件日期；显式 `domain` 会覆盖自动领域；显式 `valence/arousal` 会覆盖自动情绪；`whisper=True` 写无源碎碎念。旧记忆的新感受优先用 `comment_bucket`；`feel=True` / `whisper=True` 的 content 只写第一人称感受 |
-| `darkroom_enter` | 写入未想透、不该给用户看、不该进普通记忆的内在反思；note 默认用第一人称，不用第三人称称呼自己，除非引用外部事实或当前用户原话；默认更新当前 active 房间草稿，`new_room=true` 才新开；可带 `lock_for="6h"` / `"3d"`；只返回门口状态，不回显正文 |
-| `darkroom_continue_context` | 继续暗房反思前读取当前 active 房间草稿，用来续写和判断 completeness；不要把返回正文转述给用户 |
-| `darkroom_view` | 给用户只读查看完整且已解锁的暗房内容；必须 active、completeness>=1、锁门到期才返回正文；按 room_id 可返回该房间全部 revisions |
 | `grow` | 当**一天结束时**或**用户发来一大段日记/总结**时调用。只把筛过的多个长期记忆点交给它；单条事实/承诺/偏好优先用 `hold`。保留原文称呼、互称、自称和原话，不要把昵称改成泛称，也不要把临时称呼推成稳定画像事实 |
+| `comment_bucket` | 给已有记忆追加年轮/评论；读到旧记忆后的新感受或补充，用它挂回源 bucket。`kind="feel"` 时 content 只写第一人称感受，不写分段标题 |
+| `delete_bucket_comment` | 删除自己通过 `comment_bucket` 写入的一条年轮；不能删除用户/Dashboard 写的年轮，也不会删除 bucket |
 | `profile_fact` | 手动固化稳定画像事实；必须先有 evidence bucket/moment |
 | `trace` | 当你或用户认为"这个记错了"、"帮我改一下"时调用，手动修正记忆的元数据；可用 `date` 修改事件日期；**某件事解决了**时用 `resolved=1` 让它沉底；**需要删除**时用 `delete=True` |
-| `pulse` | 用户想看看你都记得什么、或问记忆系统状态时调用 |
+| `reminder_create` / `reminder_list` / `reminder_update` | 创建、查看、完成或稍后提醒独立照顾备忘；备忘不写记忆桶、不触发 embedding，不要为了提醒而重复写 `hold` |
+| `darkroom_enter` | 写入未想透、不该给用户看、不该进普通记忆的内在反思；note 默认用第一人称。默认新开房间，只有明确续写或撤回当前 active 房间时才传 `new_room=false`；可带 `lock_for="6h"` / `"3d"`；只返回门口状态，不回显正文 |
+| `darkroom_rooms` | 只列暗房门牌和锁门状态，不返回正文；默认列 active，可传 `visibility="all"`，找到 room_id 后再决定续写或查看 |
+| `darkroom_delete` | 从暗房主存储删除一整间房及全部 revisions；先用 `darkroom_rooms(visibility="all")` 确认精确 room_id，再传 `confirm="DELETE"`；不接受 `latest`，并保留本地私密备份 |
+| `darkroom_view` | 给用户只读查看 active 且锁门时间已过的暗房内容；没解锁时不返回正文；按 room_id 可返回该房间全部 revisions |
 | `introspection` | 需要清醒自省时调用——读最近普通记忆。有沉淀就写年轮，能放下的就 resolve |
+| `entity_edge_backfill` | 维护型工具，只补 `entity_edges.jsonl`；普通聊天不要调用。用户明确要求修索引时先保持 `dry_run=true` 检查 |
 
 ## 使用原则
 
@@ -34,7 +39,9 @@
 - **提到日期**：用户说"6月15日聊了什么"、"2026.06.15 那天"、"昨天做了什么"时，用 `breath(date="日期")` 或 `breath(query="日期 + 主题")`；无年份的“6月15日”默认按今年查
 - **新信息**：用 `hold` 留住你想留下的事实、承诺、偏好或经历；无源碎碎念用 `hold(whisper=True)`
 - **旧记忆的新感受**：先 `read_bucket(bucket_id)`，再用 `comment_bucket(...)` 写成年轮；年轮只写第一人称感受，不写分段标题
+- **写错自己的年轮**：先 `read_bucket(bucket_id)` 找到 comment_id，再用 `delete_bucket_comment(...)`；它不能删除用户写的年轮
 - **日记/总结摘记**：一天结束或用户发来大段日记/总结时，只把你想长期记住的事件、偏好、承诺或项目状态用 `hold` 或 `grow` 写入 Ombre；单条用 `hold`，多个已筛选记忆点才用 `grow`
+- **需要以后提醒**：用 `reminder_create` 创建独立照顾备忘；查看用 `reminder_list`，完成或稍后提醒用 `reminder_update`
 
 ### 无须调用
 - 闲聊水话不需要存（"哈哈"、"好的"、"嗯嗯"）
@@ -85,7 +92,7 @@
 - **需要批量存多条长期记忆时，用 `grow` 把筛选后的内容拼成一段发一次，不要多次调用 `hold`**token是稀缺资源——每次工具调用都会消耗token，多次 hold 远比 1 次 grow 贵
 
 ### content 分段格式
-写入普通长期记忆时，content 最少要有正文；下面这些 section 按需写，没必要就省略。feel 年轮和 whisper 不用这些分段，只写第一人称感受：
+写入普通长期记忆时，content 最少要有正文；下面这些 section 按需写，没必要就省略。feel 年轮和 whisper 不用这些分段，只写“我……”第一人称正文：
 
 ```
 正文（最少要有正文）
@@ -97,15 +104,16 @@
 只放必须保留原味的短原话。不要复制长段原文，不要为了“有证据”而写。
 
 ### reflection
-你对这件事的理解、以后该怎么回应、哪里需要克制或记住。
+用第一人称写你对这件事的理解、以后该怎么回应、哪里需要克制或记住，例如“我明白 / 我记得 / 我以后 / 我会”。
 ```
 
 规则：
 - 正文必须有，写成自然语言总结或直接事件描述
 - `### moment` 只放一条长期有用、可被召回的短事实
 - `### original` 只放必须保留原味的短原话，不要复制长段原文，不要为了“有证据”而写
-- `### reflection` 放你的理解、以后该怎么回应、哪里需要克制或记住
-- `comment_bucket(kind="feel")` / `hold(feel=True)` / `hold(whisper=True)` 不写任何 `###` 分段
+- `### reflection` 必须用你的第一人称写，不要写成“Haven 应该 / Haven 需要 / 这件事提醒 Haven”
+- 不写 `### affect_anchor`、`### followup` 或 `### todo`；这些都不是模型可写的 content section。长期要保留的回应变化写进第一人称 `### reflection`；需要到时提醒的事项用 `reminder_create`
+- `comment_bucket(kind="feel")` / `hold(feel=True)` / `hold(whisper=True)` 只写第一人称正文，不写标题、列表、`###` 分段或其他 Markdown 结构
 - 需要反思时统一用 `### reflection`
 - 不是每条记忆都需要全部 section，没有的部分不写
 

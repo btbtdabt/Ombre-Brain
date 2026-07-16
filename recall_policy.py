@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from itertools import product
 from typing import Any
 
@@ -11,6 +12,7 @@ from memory_relevance import (
     active_facets,
     content_terms_for_query,
     emotional_recall_plan,
+    extract_protected_phrases,
     facets_for_node,
     memory_relevance_options_from_config,
     query_has_facet,
@@ -20,6 +22,8 @@ from memory_relevance import (
     recall_topic_query,
 )
 from identity import identity_names
+from query_terms import GENERIC_LEXICAL_STOPWORDS, RECALL_SYSTEM_META_TERMS, identity_address_terms
+from query_understanding import query_intent_terms
 
 
 CONTEXT_ONLY_SECTIONS = frozenset({"affect_anchor", "favorite_reason", "comment", "followup"})
@@ -49,6 +53,7 @@ CONTEXT_ONLY_SECTION_ALIASES = {
 MARKDOWN_HEADING_RE = re.compile(r"^(#{2,6})\s+(.+?)\s*$")
 WEAK_RECALL_TOPIC_TERMS = frozenset(
     {
+        *RECALL_SYSTEM_META_TERMS,
         "进度",
         "偏好",
         "情况",
@@ -400,6 +405,8 @@ SHORT_CASUAL_ONLY_TERMS = frozenset(
         "太短",
         "写一个",
         "嘿嘿",
+        "好久没聊",
+        "好久不见",
     }
 )
 SHORT_TASTE_QUERY_TERMS = ("不好吃", "不好喝", "难吃", "难喝", "好吃", "好喝")
@@ -626,6 +633,7 @@ LOCATABLE_GENERIC_TERMS = frozenset(
     {
         *WEAK_RECALL_TOPIC_TERMS,
         *GENERIC_RECALL_CONTEXT_TERMS,
+        *GENERIC_LEXICAL_STOPWORDS,
         *AFFECT_ONLY_QUERY_TERMS,
         *AFFECTION_ONLY_SIGNAL_TERMS,
         "代码",
@@ -685,6 +693,8 @@ LOCATABLE_GENERIC_TERMS = frozenset(
         "又",
     }
 )
+EVENT_PLACE_LOCATABLE_TERMS = frozenset({"水边", "海边", "岸边"})
+EVENT_PLACE_QUERY_MARKERS = frozenset({"那次", "这次", "那天", "当天", "当时", "那回", "这一回", "那件事", "这件事"})
 LOCATABLE_STRIP_TERMS = frozenset(
     {
         *AUTO_VAGUE_FILLER_TERMS,
@@ -810,6 +820,7 @@ DETAIL_READ_QUERY_MARKERS = frozenset(
         "原文",
         "细节",
         "原话",
+        "说过的话",
         "怎么说的",
         "怎么说",
     }
@@ -958,6 +969,8 @@ class RecallQueryPlan:
     activated_axis_terms: tuple[str, ...]
     activated_axis_groups: tuple[tuple[str, ...], ...]
     activated_axis_multi: bool
+    auto_too_vague: bool
+    short_taste_terms: tuple[str, ...]
     long_term_route: str
     skip_long_term_recall: bool
     skip_reason: str
@@ -997,6 +1010,21 @@ class QueryAnchorPlan:
 
 
 ANCHOR_MUST_GROUP_MAX_SPAN = 24
+ANCHOR_WEAK_EVENT_TERMS = {
+    "时",
+    "时候",
+    "这时",
+    "那时",
+    "这次",
+    "那次",
+    "什么",
+}
+ANCHOR_TERM_VARIANTS = {
+    "担心": ("担心", "担忧", "怕", "害怕"),
+    "担忧": ("担忧", "担心", "怕", "害怕"),
+    "忘记": ("忘记", "忘", "遗忘", "记忆丢失", "记忆断掉"),
+}
+ANCHOR_OPTIONAL_WEAK_TERMS = frozenset({"喜欢"})
 
 
 def build_query_anchor_plan(
@@ -1089,12 +1117,36 @@ def _emotional_must_groups(emotional_plan: Any) -> tuple[tuple[str, ...], ...]:
         groups.append(_dedupe_group(pieces or [strong_text]))
 
     event_anchor = _primary_emotional_event_term(event_terms)
-    if event_anchor and weak_terms:
-        groups.append(_dedupe_group([event_anchor, weak_terms[0]]))
+    forget_worry_group = _emotional_forget_worry_group(event_terms, weak_terms)
+    if forget_worry_group:
+        groups.append(forget_worry_group)
+    binding_weak_terms = tuple(term for term in weak_terms if _anchor_weak_term_requires_binding(term))
+    if event_anchor and binding_weak_terms:
+        groups.append(_dedupe_group([event_anchor, binding_weak_terms[0]]))
+    elif event_anchor:
+        groups.append(_dedupe_group([event_anchor]))
     elif not groups and weak_terms:
         groups.append(_dedupe_group([weak_terms[0]]))
 
     return tuple(dict.fromkeys(group for group in groups if group))
+
+
+def _anchor_weak_term_requires_binding(term: str) -> bool:
+    key = _compact_anchor_term(term)
+    return bool(key and key not in ANCHOR_OPTIONAL_WEAK_TERMS)
+
+
+def _emotional_forget_worry_group(
+    event_terms: tuple[str, ...],
+    weak_terms: tuple[str, ...],
+) -> tuple[str, ...]:
+    weak_keys = {_compact_anchor_term(term) for term in weak_terms}
+    if not ({"担心", "担忧"} & weak_keys):
+        return ()
+    event_key = _compact_anchor_term(" ".join(event_terms))
+    if not any(marker in event_key for marker in ("忘记", "忘", "遗忘", "记忆丢失")):
+        return ()
+    return _dedupe_group(["忘记", "担心"])
 
 
 def _primary_emotional_event_term(event_terms: tuple[str, ...]) -> str:
@@ -1110,6 +1162,13 @@ def _primary_emotional_event_term(event_terms: tuple[str, ...]) -> str:
         for term in terms
         if _compact_anchor_term(term)
     ]
+    keyed = [
+        (term, key)
+        for term, key in keyed
+        if len(key) >= 2 and key not in ANCHOR_WEAK_EVENT_TERMS
+    ]
+    if not keyed:
+        return ""
     compact_terms = [key for _term, key in keyed]
     candidates = [
         term
@@ -1117,7 +1176,25 @@ def _primary_emotional_event_term(event_terms: tuple[str, ...]) -> str:
         if not any(other != key and other in key for other in compact_terms)
     ]
     candidates = candidates or [term for term, _key in keyed]
+    non_address_candidates = [
+        term
+        for term in candidates
+        if not _anchor_is_identity_address_term(term)
+    ]
+    if non_address_candidates:
+        candidates = non_address_candidates
     return sorted(candidates, key=lambda item: (len(_compact_anchor_term(item)), len(item)))[0]
+
+
+def _anchor_is_identity_address_term(term: str) -> bool:
+    key = _compact_anchor_term(term)
+    if not key:
+        return False
+    return key in {
+        _compact_anchor_term(value)
+        for value in identity_address_terms(identity_names(), include_legacy_ai=True)
+        if _compact_anchor_term(value)
+    }
 
 
 def _candidate_anchor_text(node: dict) -> str:
@@ -1159,7 +1236,9 @@ def _anchor_group_matches(text: str, group: tuple[str, ...]) -> bool:
         key = _compact_anchor_term(term)
         if not key:
             continue
-        positions = _anchor_term_positions(compact_text, key)
+        positions: list[tuple[int, int]] = []
+        for variant in _anchor_term_variants(key):
+            positions.extend(_anchor_term_positions(compact_text, variant))
         if not positions:
             return False
         positions_by_term.append(positions)
@@ -1242,6 +1321,15 @@ def _anchor_term_positions(text: str, term: str) -> list[tuple[int, int]]:
     return positions
 
 
+def _anchor_term_variants(key: str) -> tuple[str, ...]:
+    variants = [
+        _compact_anchor_term(item)
+        for item in ANCHOR_TERM_VARIANTS.get(key, (key,))
+        if _compact_anchor_term(item)
+    ]
+    return tuple(dict.fromkeys(variants)) or (key,)
+
+
 def _compact_anchor_term(value: object) -> str:
     return re.sub(r"[^0-9a-z\u4e00-\u9fff_.:-]+", "", str(value or "").strip().lower())
 
@@ -1307,6 +1395,7 @@ class RecallPolicy:
     def should_enforce_topic_evidence(self, query: str, *, allow_body_chain: bool = False) -> bool:
         return self.requires_topic_evidence(query) and not allow_body_chain
 
+    @lru_cache(maxsize=512)
     def plan_query(self, query: str, *, context_mode: str = "") -> RecallQueryPlan:
         text = str(query or "").strip()
         wants_body_chain = query_has_facet(text, "embodiment", self.options)
@@ -1334,6 +1423,8 @@ class RecallPolicy:
             activated_axis_terms=axis_terms,
             activated_axis_groups=axis_groups,
             activated_axis_multi=axis_multi,
+            auto_too_vague=self.is_auto_query_too_vague(text),
+            short_taste_terms=tuple(self._short_taste_query_terms(text)),
             long_term_route="skip" if skip_long_term_recall else "search",
             skip_long_term_recall=skip_long_term_recall,
             skip_reason=skip_reason,
@@ -1407,7 +1498,7 @@ class RecallPolicy:
     @staticmethod
     def _query_has_multi_axis_marker(query: str) -> bool:
         text = str(query or "")
-        return any(marker in text for marker in (" 和 ", " 与 ", " 以及 ", " 还有 ", "、", "，", ",", "/", "|"))
+        return any(marker in text for marker in (" 和 ", " 与 ", " 以及 ", " 还有 ", "和", "与", "以及", "还有", "、", "，", ",", "/", "|"))
 
     def _relation_axis_groups(
         self,
@@ -1522,8 +1613,13 @@ class RecallPolicy:
             return True, "empty_query"
         if self.is_auto_query_too_vague(text):
             return True, "auto_vague_query"
+        protected_phrases = tuple(extract_protected_phrases(text))
+        if self._query_has_recall_system_meta_terms(text) and not locatable_terms and not protected_phrases:
+            return True, "recall_meta_without_target"
         if (
             not locatable_terms
+            and not protected_phrases
+            and not self._query_has_explicit_recall_marker(text)
             and self._query_has_low_signal_shell(text)
             and not self.is_emotional_reason_lookup(text)
             and not self.is_detail_read_query(text)
@@ -1532,6 +1628,28 @@ class RecallPolicy:
         ):
             return True, "no_locatable_terms"
         return False, ""
+
+    @staticmethod
+    def _query_has_explicit_recall_marker(query: str) -> bool:
+        text = str(query or "").strip().lower()
+        return bool(
+            text
+            and any(
+                str(marker or "").strip().lower() in text
+                for marker in query_intent_terms("memory_sentinel.explicit_recall_markers")
+                if str(marker or "").strip()
+            )
+        )
+
+    def _query_has_recall_system_meta_terms(self, query: str) -> bool:
+        compact = self._compact_entity_keyword(query)
+        if not compact:
+            return False
+        return any(
+            self._compact_entity_keyword(term) in compact
+            for term in RECALL_SYSTEM_META_TERMS
+            if self._compact_entity_keyword(term)
+        )
 
     def build_query_anchor_plan(self, query: str) -> QueryAnchorPlan:
         return build_query_anchor_plan(query, self.options)
@@ -1559,6 +1677,8 @@ class RecallPolicy:
         if self._is_probe_only_query(text):
             return True
         if self._is_short_casual_only_query(text):
+            return True
+        if self._is_current_time_status_only_query(text):
             return True
         if query_has_explicit_entity_marker(text) or query_has_technical_recall_marker(text):
             return False
@@ -1684,6 +1804,51 @@ class RecallPolicy:
         )
         return len(stripped) < 2
 
+    def _is_current_time_status_only_query(self, query: str) -> bool:
+        compact = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(query or "").strip().lower())
+        if not compact:
+            return False
+        text = re.sub(r"^(?:啊|哈|呜|嗯|哇|呀|诶|欸|救命|天哪|妈呀)+", "", compact)
+        text = re.sub(r"(?:啊|哈|呜|嗯|哇|呀|诶|欸)+$", "", text)
+        prefix_terms = (
+            "怎么就",
+            "已经快",
+            "都快",
+            "现在",
+            "已经",
+            "居然",
+            "竟然",
+            "怎么",
+            "这就",
+            "都",
+            "才",
+            "刚",
+            "快",
+        )
+        changed = True
+        while changed and text:
+            changed = False
+            for prefix in prefix_terms:
+                if text.startswith(prefix) and len(text) > len(prefix):
+                    text = text[len(prefix):]
+                    changed = True
+                    break
+        suffix_terms = ("了啦啊呀嘛吗吧呢")
+        text = text.strip(suffix_terms)
+        if not text:
+            return False
+        if re.fullmatch(r"几点", text):
+            return True
+        time_prefix = r"(?:凌晨|早上|上午|中午|下午|晚上|夜里)?"
+        time_value = r"(?:[0-2]?\d|[零〇一二两三四五六七八九十]{1,3})"
+        if re.fullmatch(time_prefix + time_value + r"点(?:半|多|钟)?", text):
+            return True
+        if re.fullmatch(r"(?:好|太|很|这么|已经)?晚", text):
+            return True
+        if re.fullmatch(r"(?:天亮|该睡觉|该睡|睡觉时间到|睡觉时间)", text):
+            return True
+        return False
+
     def _is_reaction_only_query(self, query: str) -> bool:
         compact = re.sub(r"\s+", "", str(query or "").lower())
         if not compact:
@@ -1719,6 +1884,8 @@ class RecallPolicy:
             "亲爱的",
             "哥哥",
         }
+        if re.fullmatch(r"(?:啊|哈|呜|嗯|哇|呀|诶|欸|嘿){2,}", alnum_or_cjk):
+            return True
         return alnum_or_cjk in reaction_terms or alnum_or_cjk in self.ai_reaction_names
 
     @staticmethod
@@ -2022,6 +2189,8 @@ class RecallPolicy:
                 strong_keys.add(key)
             keywords.append(cleaned)
 
+        for phrase in extract_protected_phrases(raw):
+            add(phrase, strong=True)
         for match in ENTITY_QUOTED_RE.finditer(raw):
             add(match.group(1), strong=True)
         for match in ENTITY_VERSION_RE.finditer(raw):
@@ -2172,12 +2341,23 @@ class RecallPolicy:
         raw = str(query or "").strip()
         if not raw:
             return []
+        return list(self._locatable_query_terms_cached(raw))
+
+    @lru_cache(maxsize=512)
+    def _locatable_query_terms_cached(self, raw: str) -> tuple[str, ...]:
         output: list[str] = []
         seen: set[str] = set()
+        content_term_keys = {
+            self._compact_entity_keyword(term)
+            for term in content_terms_for_query(raw, self.options)
+            if self._compact_entity_keyword(term)
+        }
 
-        def add(value: object) -> None:
+        def add(value: object, *, force: bool = False) -> None:
             cleaned = self._normalize_locatable_query_term(value)
-            if not cleaned or not self._locatable_query_term_allowed(cleaned):
+            if not cleaned:
+                return
+            if not force and not self._locatable_query_term_allowed(cleaned):
                 return
             key = self._compact_entity_keyword(cleaned)
             if not key or key in seen:
@@ -2185,6 +2365,8 @@ class RecallPolicy:
             seen.add(key)
             output.append(cleaned)
 
+        for phrase in extract_protected_phrases(raw):
+            add(phrase)
         for match in ENTITY_QUOTED_RE.finditer(raw):
             add(match.group(1))
         for match in ENTITY_VERSION_RE.finditer(raw):
@@ -2199,11 +2381,21 @@ class RecallPolicy:
         ):
             add(match.group(0))
 
-        for term in self.extract_entity_keywords(raw):
+        for term in self._pos_structural_locatable_terms(raw, content_term_keys=content_term_keys):
             add(term)
+
         specific_terms = self.specific_query_terms(raw)
         compact_raw = self._compact_entity_keyword(raw)
-        for left, right in product(specific_terms, specific_terms):
+        structural_terms = list(output)
+        for structural_term in structural_terms:
+            structural_key = self._compact_entity_keyword(structural_term)
+            for term in specific_terms:
+                term_key = self._compact_entity_keyword(term)
+                if not term_key or term_key == structural_key or term_key not in structural_key:
+                    continue
+                if self._contained_structural_subterm_allowed(term):
+                    add(term)
+        for left, right in product(structural_terms, specific_terms):
             left_text = str(left or "").strip()
             right_text = str(right or "").strip()
             if not left_text or not right_text or left_text == right_text:
@@ -2213,14 +2405,161 @@ class RecallPolicy:
             combined = f"{left_text}{right_text}"
             if self._compact_entity_keyword(combined) in compact_raw:
                 add(combined)
-        for term in specific_terms:
+        if query_has_facet(raw, "embodiment", self.options):
+            add("身体")
+            add("具身")
+        for term in self._relation_axis_locatable_terms(raw, specific_terms):
             add(term)
+        for term in self._event_place_locatable_terms(raw, specific_terms):
+            add(term, force=True)
 
-        topic = recall_topic_query(raw, self.options)
-        if topic and topic != raw:
-            add(topic)
+        return tuple(output[:8])
 
-        return output[:8]
+    def _pos_structural_locatable_terms(
+        self,
+        raw: str,
+        *,
+        content_term_keys: set[str],
+    ) -> list[str]:
+        tokens = [
+            (self._normalize_entity_keyword(word), str(flag or ""))
+            for word, flag in self._posseg_words(raw)
+            if self._normalize_entity_keyword(word)
+        ]
+        output: list[str] = []
+
+        def add(value: object) -> None:
+            cleaned = self._normalize_entity_keyword(value)
+            if cleaned:
+                output.append(cleaned)
+
+        for word, flag in tokens:
+            if flag in ENTITY_KEYWORD_POS_TAGS or any(flag.startswith(prefix) for prefix in ENTITY_KEYWORD_POS_PREFIXES):
+                word = self._strip_leading_axis_conjunction(word, content_term_keys=content_term_keys)
+                add(word)
+                for expanded in self._expand_entity_title_suffixes(raw, word):
+                    add(expanded)
+                continue
+            if self._standalone_locatable_noun(word, flag, content_term_keys=content_term_keys):
+                add(word)
+
+        for index in range(len(tokens)):
+            for width in (2, 3):
+                window = tokens[index: index + width]
+                if len(window) != width:
+                    continue
+                if not all(self._compound_locatable_token_allowed(word, flag) for word, flag in window):
+                    continue
+                combined = "".join(word for word, _flag in window)
+                combined_key = self._compact_entity_keyword(combined)
+                suffix = next(
+                    (
+                        suffix
+                        for suffix in LOCATABLE_COMPOUND_SUFFIX_TERMS
+                        if combined_key.endswith(self._compact_entity_keyword(suffix))
+                    ),
+                    "",
+                )
+                if not suffix:
+                    continue
+                add(combined)
+                for word, _flag in window:
+                    add(word)
+
+        return self._dedupe_entity_keywords(output)
+
+    def _strip_leading_axis_conjunction(self, word: str, *, content_term_keys: set[str]) -> str:
+        key = self._compact_entity_keyword(word)
+        if len(key) <= 2:
+            return word
+        for prefix in ("和", "与"):
+            if key.startswith(prefix):
+                rest = key[len(prefix):]
+                if rest in content_term_keys:
+                    return rest
+        return word
+
+    def _standalone_locatable_noun(
+        self,
+        word: str,
+        flag: str,
+        *,
+        content_term_keys: set[str],
+    ) -> bool:
+        key = self._compact_entity_keyword(word)
+        if not key or key not in content_term_keys:
+            return False
+        if key in LOCATABLE_GENERIC_TERMS or self._is_recall_context_term(key):
+            return False
+        if not (flag == "eng" or flag.startswith("n") or flag in {"s"}):
+            return False
+        if re.fullmatch(r"[a-z][a-z0-9_.:/-]{2,}", key):
+            return True
+        if re.search(r"\d", key) and re.search(r"[a-z\u4e00-\u9fff]", key):
+            return True
+        if re.fullmatch(r"小[\u4e00-\u9fffA-Za-z0-9]{1,4}", key):
+            return True
+        if re.fullmatch(r"[\u4e00-\u9fff]{2,6}", key):
+            return not self._entity_candidate_has_verb_blocker(key)
+        return False
+
+    def _compound_locatable_token_allowed(self, word: str, flag: str) -> bool:
+        key = self._compact_entity_keyword(word)
+        if not key or key in LOCATABLE_GENERIC_TERMS or self._is_recall_context_term(key):
+            return False
+        if flag == "eng":
+            return True
+        if flag.startswith("n") or flag in {"s"}:
+            return True
+        return bool(re.search(r"\d", key) and re.search(r"[a-z\u4e00-\u9fff]", key))
+
+    def _relation_axis_locatable_terms(self, raw: str, specific_terms: list[str]) -> list[str]:
+        output: list[str] = []
+        if not self._query_has_axis_relation_marker(raw):
+            terms = []
+        else:
+            terms = specific_terms
+        for term in terms:
+            key = self._compact_entity_keyword(term)
+            if not key:
+                continue
+            if key in LOCATABLE_GENERIC_TERMS or self._is_recall_context_term(key):
+                continue
+            if re.fullmatch(r"[一二三四五六七八九十百千万两0-9]+年(?:后)?", key):
+                output.append(term)
+                continue
+            if key in {"承诺", "约定", "未来"}:
+                output.append(term)
+        if not output:
+            for match in re.finditer(r"[一二三四五六七八九十百千万两0-9]+年(?:后)?", str(raw or "")):
+                value = match.group(0)
+                output.append(value[:-1] if value.endswith("后") else value)
+        return output
+
+    def _event_place_locatable_terms(self, raw: str, specific_terms: list[str]) -> list[str]:
+        compact = self._compact_entity_keyword(raw)
+        if not any(self._compact_entity_keyword(marker) in compact for marker in EVENT_PLACE_QUERY_MARKERS):
+            return []
+        output: list[str] = []
+        for term in specific_terms:
+            key = self._compact_entity_keyword(term)
+            if key in EVENT_PLACE_LOCATABLE_TERMS:
+                output.append(term)
+        return output
+
+    def _contained_structural_subterm_allowed(self, value: object) -> bool:
+        key = self._compact_entity_keyword(value)
+        if not key:
+            return False
+        if key in LOCATABLE_GENERIC_TERMS or self._is_recall_context_term(key):
+            return False
+        if len(key) < 2:
+            return False
+        if re.fullmatch(r"[a-z][a-z0-9_.:/-]{2,}", key):
+            return True
+        if re.search(r"\d", key) and re.search(r"[a-z\u4e00-\u9fff]", key):
+            return True
+        return bool(re.fullmatch(r"[\u4e00-\u9fff]{2,8}", key))
 
     def _normalize_locatable_query_term(self, value: object) -> str:
         cleaned = self._normalize_entity_keyword(value)
@@ -2303,6 +2642,21 @@ class RecallPolicy:
 
     def specific_query_terms(self, query: str) -> list[str]:
         raw = str(query or "")
+        return list(self._specific_query_terms_cached(raw))
+
+    def _topic_evidence_terms(self, query: str) -> list[str]:
+        terms: list[str] = []
+        for term in self.specific_query_terms(query):
+            key = self._compact_entity_keyword(term)
+            if not key:
+                continue
+            if re.fullmatch(r"[\u4e00-\u9fff]", key):
+                continue
+            terms.append(term)
+        return terms
+
+    @lru_cache(maxsize=512)
+    def _specific_query_terms_cached(self, raw: str) -> tuple[str, ...]:
         terms = list(content_terms_for_query(raw, self.options))
         topic_key = recall_topic_query(raw, self.options)
         allow_single_cjk_terms = {
@@ -2323,6 +2677,8 @@ class RecallPolicy:
                 continue
             if key in WEAK_RECALL_TOPIC_TERMS:
                 continue
+            if key in RECALL_SYSTEM_META_TERMS:
+                continue
             if self._is_recall_context_term(cleaned):
                 continue
             if re.fullmatch(r"[a-z0-9_.:-]+", key) and len(key) < 3 and not re.fullmatch(r"\d+(?:\.\d+)+", key):
@@ -2339,11 +2695,11 @@ class RecallPolicy:
             seen = {existing.lower() for existing in kept}
             seen.add(key)
             kept.append(cleaned)
-        return kept
+        return tuple(kept)
 
     def moment_has_topic_evidence(self, query: str, moment: dict) -> bool:
         taste_terms = self._short_taste_query_terms(query)
-        terms = self.specific_query_terms(query)
+        terms = self._topic_evidence_terms(query)
         if not terms:
             return False
         meta = moment.get("metadata", {}) if isinstance(moment.get("metadata"), dict) else {}
@@ -2370,7 +2726,7 @@ class RecallPolicy:
 
     def bucket_has_topic_evidence(self, query: str, bucket: dict) -> bool:
         taste_terms = self._short_taste_query_terms(query)
-        terms = self.specific_query_terms(query)
+        terms = self._topic_evidence_terms(query)
         if not terms:
             return False
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
@@ -2438,6 +2794,7 @@ class RecallPolicy:
         query: str,
         node: dict,
         *,
+        query_plan: RecallQueryPlan | None = None,
         has_topic_evidence: bool | None = None,
         semantic_score: float | None = None,
         rerank_score: float | None = None,
@@ -2445,14 +2802,15 @@ class RecallPolicy:
         context_only: bool = False,
         auto: bool = False,
     ) -> RecallPolicyDecision:
+        query_plan = query_plan or self.plan_query(query)
         if has_topic_evidence is None:
             has_topic_evidence = self.node_has_topic_evidence(query, node)
-        auto_too_vague = self.is_auto_query_too_vague(query) if auto else False
+        auto_too_vague = query_plan.auto_too_vague if auto else False
         debug = {
-            "requires_topic_evidence": self.requires_topic_evidence(query),
+            "requires_topic_evidence": query_plan.requires_topic_evidence,
             "has_topic_evidence": bool(has_topic_evidence),
-            "specific_query_terms": self.specific_query_terms(query),
-            "short_taste_query_terms": self._short_taste_query_terms(query),
+            "specific_query_terms": list(query_plan.specific_terms),
+            "short_taste_query_terms": list(query_plan.short_taste_terms),
             "semantic_score": _maybe_float(semantic_score),
             "rerank_score": _maybe_float(rerank_score),
             "high_confidence_edge": bool(high_confidence_edge),
@@ -2461,7 +2819,7 @@ class RecallPolicy:
             "auto_too_vague": bool(auto_too_vague),
         }
 
-        if auto_too_vague:
+        if auto_too_vague and not high_confidence_edge:
             return RecallPolicyDecision(
                 admit_direct=False,
                 admit_diffused=False,

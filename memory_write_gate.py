@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -9,6 +10,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 from rapidfuzz import fuzz
+
+
+logger = logging.getLogger("ombre_brain.memory_write_gate")
 
 
 DEFAULT_AUTO_SOURCES = {"operit", "workflow", "worker", "auto"}
@@ -169,6 +173,17 @@ class MemoryWriteGate:
             return decision
 
         existing_similarity = await self._max_existing_similarity(text, bucket_mgr)
+        if existing_similarity is None:
+            decision = WriteGateDecision(
+                False,
+                "skipped",
+                0.0,
+                candidate_id,
+                source_key,
+                ("existing_memory_check_failed",),
+            )
+            self.record(decision, text)
+            return decision
         recent = self._read_recent()
         repeat_count, candidate_similarity = self._repeat_stats(text, source_key, recent)
         score, reasons = self._score(
@@ -229,8 +244,8 @@ class MemoryWriteGate:
             }
             with open(self.path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-        except OSError:
-            return
+        except OSError as exc:
+            logger.warning("Memory write candidate log failed | path=%s error=%s", self.path, exc)
 
     def list_recent(self, limit: int = 20) -> list[dict]:
         return self._read_recent(limit=limit)
@@ -311,13 +326,14 @@ class MemoryWriteGate:
         lowered = text.lower()
         return any(term in lowered for term in TASK_STATUS_TERMS)
 
-    async def _max_existing_similarity(self, text: str, bucket_mgr: Any) -> float:
+    async def _max_existing_similarity(self, text: str, bucket_mgr: Any) -> float | None:
         if bucket_mgr is None:
             return 0.0
         try:
             buckets = await bucket_mgr.list_all(include_archive=False)
-        except Exception:
-            return 0.0
+        except Exception as exc:
+            logger.warning("Memory write existing-memory check failed: %s", exc)
+            return None
         normalized = self._normalize(text)
         max_score = 0.0
         for bucket in buckets or []:

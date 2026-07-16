@@ -30,9 +30,71 @@ USER_RELATION_SPECS = (
     ("habit", r"(?:有个)?习惯是\s*([^。；;，,\n]{1,40})"),
 )
 
+AI_PARTICIPATION_VERB = (
+    r"(?:参与|协作|负责|帮忙|帮她|帮小雨|陪她|陪小雨|"
+    r"一起(?:做|写|修|开发|实现|调试|搭建)?|共同(?:做|写|开发|实现|调试|搭建)?|"
+    r"搭建|搭好|修复|修补|修好|撰写|写了|写过|在写|开发|实现|调试)"
+)
+
 AI_PARTICIPATION_TAIL = (
-    r".{0,18}(?:参与|一起|共同|协作|负责|帮忙|帮她|帮小雨|陪她|陪小雨|搭|修|写了|写过|在写|开发|实现|调试)"
-    r"(?:了|过|着)?\s*([^。；;，,\n]{2,48})"
+    r"[^。！？!?；;\n]{0,18}"
+    + AI_PARTICIPATION_VERB
+    + r"(?:了|过|着)?\s*([^。；;，,\n]{2,48})"
+)
+
+PARTICIPATION_OBJECT_MARKERS = (
+    "项目",
+    "系统",
+    "平台",
+    "服务",
+    "工具",
+    "功能",
+    "机制",
+    "模块",
+    "工作流",
+    "接口",
+    "数据库",
+    "网关",
+    "脚本",
+    "页面",
+    "插件",
+    "原型",
+    "版本",
+    "方案",
+    "流程",
+    "任务",
+    "计划",
+    "报告",
+    "论文",
+    "简历",
+    "作品集",
+    "ppt",
+    "答辩",
+    "会议",
+    "活动",
+    "仪式",
+    "测试",
+    "实验",
+    "修复",
+    "迁移",
+    "部署",
+    "开发",
+    "调试",
+    "配置",
+    "暗号",
+    "约定",
+    "承诺",
+)
+
+PARTICIPATION_CONNECTIVE_FRAGMENTS = (
+    "而非",
+    "并非",
+    "不是",
+    "不能",
+    "不要",
+    "没有",
+    "无需",
+    "不再",
 )
 
 SHARED_MARKERS = (
@@ -55,7 +117,25 @@ QUERY_HINTS = (
     ("dislikes", ("我不喜欢", "我讨厌", "我厌恶", "讨厌的", "不喜欢的")),
     ("boundary", ("我的雷点", "雷点", "边界")),
     ("participates_in", ("你参与", "你做", "你写", "你修", "你搭", "你帮", "你陪", "你负责")),
-    ("shared_anchor", ("我们", "咱们", "我们的", "一起", "共同")),
+    (
+        "shared_anchor",
+        (
+            "我们",
+            "咱们",
+            "我们的",
+            "一起",
+            "共同",
+            "有关",
+            "相关",
+            "关联",
+            "联系",
+            "关系",
+            "约定",
+            "承诺",
+            "暗号",
+            "习惯",
+        ),
+    ),
 )
 
 NOISY_OBJECTS = {
@@ -289,6 +369,7 @@ def extract_entity_edges_from_bucket(bucket: dict, identity: dict | None = None)
     ai_subject = _canonical_ai_subject(identity)
     user_pattern = _terms_pattern(_user_terms(identity))
     ai_pattern = _terms_pattern(_ai_terms(identity))
+    ai_subject_pattern = ai_pattern + r"(?![-_/A-Za-z0-9])"
 
     for relation, tail in USER_RELATION_SPECS:
         pattern = re.compile(user_pattern + tail, re.IGNORECASE)
@@ -324,9 +405,9 @@ def extract_entity_edges_from_bucket(bucket: dict, identity: dict | None = None)
                 )
             )
 
-    for match in re.compile(ai_pattern + AI_PARTICIPATION_TAIL, re.IGNORECASE).finditer(relation_text):
-        obj = _clean_entity_object(match.group(1))
-        if not _valid_entity_object(obj, identity):
+    for match in re.compile(ai_subject_pattern + AI_PARTICIPATION_TAIL, re.IGNORECASE).finditer(relation_text):
+        obj = _clean_participation_object(match.group(1))
+        if not _valid_participation_object(obj, identity):
             continue
         edges.append(
             _edge(
@@ -380,11 +461,14 @@ def entity_query_hints(query: str, identity: dict | None = None) -> list[dict[st
             relations = {relation}
             if relation == "likes":
                 relations.add("prefers")
+        object_terms = _query_object_terms(text, relation)
+        if relation == "shared_anchor" and not object_terms:
+            continue
         hints.append(
             {
                 "subject": subject,
                 "relations": relations,
-                "object_terms": _query_object_terms(text, relation),
+                "object_terms": object_terms,
             }
         )
     return hints
@@ -518,13 +602,26 @@ def _query_object_terms(query: str, relation: str) -> list[str]:
         "共同",
     ):
         text = text.replace(marker, " ")
-    text = re.sub(r"(什么|哪些|哪个|哪段|哪条|记忆|事情|东西|相关|关于|之前|以前|还记得|记得|吗|呢|呀|啊)", " ", text)
+    text = re.sub(
+        r"(什么|哪些|哪个|哪段|哪条|记忆|事情|东西|相关|有关|关联|联系|关于|之前|以前|还记得|记得|怎么回事|为什么|是否|是不是|吗|呢|呀|啊)",
+        " ",
+        text,
+    )
+    text = re.sub(r"(?:和|与|以及|及|、|\+)", " ", text)
     terms = []
+    for term in re.findall(r"[零一二两三四五六七八九十百千万\d]+年后?", query):
+        clean = _clean_entity_object(term)
+        if clean and len(_compact_key(clean)) >= 2:
+            terms.append(clean)
+    for term in re.findall(r"[A-Za-z][A-Za-z0-9_.:-]*", query):
+        clean = _clean_entity_object(term)
+        if clean and len(_compact_key(clean)) >= 2:
+            terms.append(clean)
     for term in re.split(r"[\s，。！？、,.!?:：;；~～]+", text):
         clean = _clean_entity_object(term)
         if clean and len(_compact_key(clean)) >= 2:
             terms.append(clean)
-    return terms[:4]
+    return list(dict.fromkeys(terms))[:4]
 
 
 def _canonical_user_subject(identity: dict) -> str:
@@ -578,6 +675,22 @@ def _clean_entity_object(value: Any) -> str:
     return text[:80].strip("。；;，,、 :：")
 
 
+def _clean_participation_object(value: Any) -> str:
+    text = _clean_entity_object(value)
+    text = re.sub(r"^(?:的|了|着|过|把|将|给|为|和|与|及|以及|再|也|正|正在|被|并)+", "", text)
+    text = re.split(r"(?:已被|已经被|被|而非|并非|不是|不能|不要|没有|无需|不再)", text, maxsplit=1)[0]
+    text = re.split(r"的(?:声音|声响|时候|样子|感觉|情绪|状态|方式|过程|原因)", text, maxsplit=1)[0]
+    text = re.split(r"[（(]", text, maxsplit=1)[0]
+    text = re.sub(r"^一个名为[“\"'「『]?[^”\"'」』]+[”\"'」』]?的", "", text)
+    text = re.sub(
+        r"^(?:设计并实现了?|设计实现了?|共同设计了?|共同实现了?|"
+        r"修改|修补|修复|调试|开发|实现|搭建|撰写|梳理了?|搓出了?|做出了?|做了?|改回|改成|改了)",
+        "",
+        text,
+    )
+    return _clean_entity_object(text)
+
+
 def _valid_entity_object(obj: str, identity: dict) -> bool:
     if not _valid_object_key(obj):
         return False
@@ -585,6 +698,59 @@ def _valid_entity_object(obj: str, identity: dict) -> bool:
     ai_name = _canonical_ai_subject(identity)
     noisy.update({ai_name, f"小{ai_name}"})
     return _compact_key(obj) not in {_compact_key(item) for item in noisy}
+
+
+def _valid_participation_object(obj: str, identity: dict) -> bool:
+    if not _valid_entity_object(obj, identity):
+        return False
+    key = _compact_key(obj)
+    if len(key) < 4 and not _has_code_like_token(obj):
+        return False
+    if any(fragment in key for fragment in PARTICIPATION_CONNECTIVE_FRAGMENTS):
+        return False
+    if _looks_quantity_only(key):
+        return False
+    if _looks_loose_action_phrase(key):
+        return False
+    if _looks_mixed_list_object(obj):
+        return False
+    if _has_participation_marker(key):
+        return True
+    if _has_code_like_token(obj) and len(key) >= 4:
+        return True
+    return False
+
+
+def _has_participation_marker(key: str) -> bool:
+    return any(_compact_key(marker) in key for marker in PARTICIPATION_OBJECT_MARKERS)
+
+
+def _has_code_like_token(value: str) -> bool:
+    return bool(re.search(r"[A-Za-z][A-Za-z0-9_-]{1,}|[A-Za-z]+-\w+|\bv?\d+(?:\.\d+)+\b", value or ""))
+
+
+def _looks_quantity_only(key: str) -> bool:
+    return bool(
+        re.fullmatch(
+            r"[零一二两三四五六七八九十百千万亿\d]+(?:多|余|来)?(?:个|字|次|条|段|页|轮|遍|年|月|天|小时|分钟|秒|块|张|篇)",
+            key,
+        )
+    )
+
+
+def _looks_loose_action_phrase(key: str) -> bool:
+    if _has_participation_marker(key) and len(key) > 6:
+        return False
+    if len(key) > 8:
+        return False
+    return bool(re.match(r"(?:听|看|改|写|读|睡|发|吃|喝|聊|讲|问|答|解释|解答|陪|帮|走|抱|亲|摸|玩|做|学|买|试|测|想|记)", key))
+
+
+def _looks_mixed_list_object(value: str) -> bool:
+    text = str(value or "")
+    if text.count("、") + text.count(",") + text.count("，") < 2:
+        return False
+    return True
 
 
 def _valid_object_key(obj: str) -> bool:

@@ -28,7 +28,7 @@ from typing import Optional
 import jieba
 from rapidfuzz import fuzz
 
-from utils import bucket_text_for_embedding, count_tokens_approx, now_iso, strip_affect_anchor
+from utils import LOCAL_TZ, bucket_text_for_embedding, count_tokens_approx, now_iso, strip_affect_anchor
 
 logger = logging.getLogger("ombre_brain.import")
 
@@ -265,6 +265,54 @@ def detect_and_parse(raw_content: str, filename: str = "") -> list[dict]:
 
     # Fall back to markdown/text
     return _parse_markdown(raw_content)
+
+
+def parse_operit_memory_backup(raw_content: str) -> dict | None:
+    """Return an Operit memory backup without rewriting entry bodies."""
+    try:
+        data = json.loads(raw_content)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+    if not isinstance(data, dict) or "memories" not in data:
+        return None
+    memories = data.get("memories")
+    if not isinstance(memories, list):
+        raise ValueError("Operit backup field 'memories' must be a list")
+
+    # Avoid treating an unrelated JSON object with a generic memories key as
+    # Operit. Empty exports are identified by Operit's exportDate/links fields.
+    known_entry_keys = {
+        "uuid",
+        "title",
+        "content",
+        "contentType",
+        "source",
+        "credibility",
+        "importance",
+        "folderPath",
+        "createdAt",
+        "updatedAt",
+        "tagNames",
+    }
+    root_has_operit_markers = bool("exportDate" in data or "links" in data)
+    entries_have_operit_markers = False
+    if memories:
+        entry_marker_keys = known_entry_keys - {"content"}
+        entries_have_operit_markers = all(
+            isinstance(item, dict)
+            and "content" in item
+            and bool(entry_marker_keys.intersection(item))
+            for item in memories
+        )
+    if not (root_has_operit_markers or entries_have_operit_markers):
+        return None
+
+    return {
+        "memories": memories,
+        "links": data.get("links") if isinstance(data.get("links"), list) else [],
+        "export_date": data.get("exportDate"),
+    }
 
 
 # ============================================================
@@ -556,6 +604,9 @@ class ImportState:
             "memories_duplicate_skipped": 0,
             "memories_raw": 0,
             "memories_failed": 0,
+            "embeddings_created": 0,
+            "embeddings_failed": 0,
+            "import_format": "",
             "errors": [],
             "status": "idle",  # idle | running | paused | completed | error
             "started_at": "",
@@ -571,6 +622,9 @@ class ImportState:
                 self.data.update(saved)
                 self.data.setdefault("memories_duplicate_skipped", 0)
                 self.data.setdefault("memories_failed", 0)
+                self.data.setdefault("embeddings_created", 0)
+                self.data.setdefault("embeddings_failed", 0)
+                self.data.setdefault("import_format", "")
                 return True
             except (json.JSONDecodeError, OSError):
                 return False
@@ -598,6 +652,9 @@ class ImportState:
             "memories_duplicate_skipped": 0,
             "memories_raw": 0,
             "memories_failed": 0,
+            "embeddings_created": 0,
+            "embeddings_failed": 0,
+            "import_format": "",
             "errors": [],
             "status": "running",
             "started_at": now_iso(),
@@ -758,6 +815,14 @@ class ImportEngine:
 
         try:
             source_hash = hashlib.sha256(raw_content.encode()).hexdigest()[:16]
+            operit_backup = parse_operit_memory_backup(raw_content)
+            if operit_backup is not None:
+                return await self._start_operit_import(
+                    operit_backup,
+                    filename=filename,
+                    source_hash=source_hash,
+                    resume=resume,
+                )
 
             # Check for resume
             if resume and self.state.load() and self.state.can_resume:
@@ -803,6 +868,251 @@ class ImportEngine:
             self.state.save()
             self._running = False
             raise
+
+    async def _start_operit_import(
+        self,
+        backup: dict,
+        *,
+        filename: str,
+        source_hash: str,
+        resume: bool,
+    ) -> dict:
+        """Import one untouched Ombre bucket per Operit memory entry."""
+        entries = list(backup.get("memories") or [])
+        if resume and self.state.load() and self.state.can_resume:
+            if (
+                self.state.data.get("source_hash") == source_hash
+                and self.state.data.get("import_format") == "operit"
+            ):
+                self.state.data["status"] = "running"
+                self.state.save()
+                return await self._process_operit_entries(
+                    entries,
+                    filename=filename,
+                    source_hash=source_hash,
+                    export_date=backup.get("export_date"),
+                )
+
+        self.state.reset(filename, source_hash, len(entries))
+        self.state.data["import_format"] = "operit"
+        self.state.save()
+        return await self._process_operit_entries(
+            entries,
+            filename=filename,
+            source_hash=source_hash,
+            export_date=backup.get("export_date"),
+        )
+
+    async def _process_operit_entries(
+        self,
+        entries: list[dict],
+        *,
+        filename: str,
+        source_hash: str,
+        export_date,
+    ) -> dict:
+        start_idx = int(self.state.data.get("processed") or 0)
+        for index in range(start_idx, len(entries)):
+            if self._paused:
+                self.state.data["status"] = "paused"
+                self.state.save()
+                self._running = False
+                return self.state.to_dict()
+
+            entry = entries[index]
+            try:
+                status = await self._import_operit_entry(
+                    entry,
+                    entry_index=index + 1,
+                    filename=filename,
+                    source_hash=source_hash,
+                    export_date=export_date,
+                )
+                if status == "created":
+                    self.state.data["memories_created"] += 1
+                    self.state.data["memories_raw"] += 1
+                elif status == "duplicate":
+                    self.state.data["memories_duplicate_skipped"] += 1
+                else:
+                    self.state.data["memories_failed"] += 1
+            except Exception as exc:
+                if isinstance(entry, dict):
+                    label = str(entry.get("title") or entry.get("uuid") or index + 1)
+                else:
+                    label = str(index + 1)
+                error = f"Operit entry {label}: {str(exc)[:200]}"
+                logger.warning(error)
+                self.state.data["memories_failed"] += 1
+                if len(self.state.data["errors"]) < 100:
+                    self.state.data["errors"].append(error)
+
+            self.state.data["processed"] = index + 1
+            self.state.save()
+
+        self.state.data["status"] = "completed"
+        self.state.save()
+        self._running = False
+        return self.state.to_dict()
+
+    async def _import_operit_entry(
+        self,
+        entry: dict,
+        *,
+        entry_index: int,
+        filename: str,
+        source_hash: str,
+        export_date,
+    ) -> str:
+        if not isinstance(entry, dict):
+            raise ValueError("entry must be an object")
+        content = entry.get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("content must be non-empty text")
+
+        operit_uuid = str(entry.get("uuid") or "").strip()
+        bucket_id = self._operit_bucket_id(entry, entry_index)
+        existing = await self.bucket_mgr.get(bucket_id)
+        if existing:
+            existing_meta = existing.get("metadata", {}) if isinstance(existing, dict) else {}
+            if str(existing_meta.get("operit_uuid") or "") != operit_uuid:
+                raise ValueError(f"bucket id collision: {bucket_id}")
+            if str(existing.get("content") or "") != content:
+                raise ValueError(f"Operit UUID already exists with different content: {operit_uuid}")
+            await self._ensure_operit_embedding(bucket_id, content, entry.get("title"))
+            return "duplicate"
+
+        title = str(entry.get("title") or "").strip()
+        tags = self._operit_tags(entry.get("tagNames"))
+        created = self._operit_epoch_iso(entry.get("createdAt"))
+        updated = self._operit_epoch_iso(entry.get("updatedAt")) or created
+        importance = self._operit_importance(entry.get("importance"))
+        credibility = self._operit_fraction(entry.get("credibility"))
+        source_ref = {
+            "type": "operit_memory",
+            "item_id": operit_uuid or bucket_id,
+            "source_file": str(filename or "upload"),
+            "source_hash": source_hash,
+        }
+        extra_metadata = {
+            "import_format": "operit",
+            "import_source_file": str(filename or "upload"),
+            "import_source_hash": source_hash,
+            "source_refs": [source_ref],
+            "operit_uuid": operit_uuid,
+            "operit_content_type": str(entry.get("contentType") or ""),
+            "operit_source": str(entry.get("source") or ""),
+            "operit_credibility": entry.get("credibility"),
+            "operit_importance": entry.get("importance"),
+            "operit_folder_path": str(entry.get("folderPath") or ""),
+            "operit_created_at_ms": entry.get("createdAt"),
+            "operit_updated_at_ms": entry.get("updatedAt"),
+            "operit_export_date_ms": export_date,
+            "operit_entry_index": entry_index,
+        }
+        extra_metadata = {key: value for key, value in extra_metadata.items() if value not in (None, "")}
+
+        await self.bucket_mgr.create(
+            bucket_id=bucket_id,
+            content=content,
+            name=title or None,
+            tags=tags,
+            domain=["Operit"],
+            importance=importance,
+            confidence=credibility,
+            source="operit",
+            created=created,
+            last_active=updated,
+            updated_at=updated,
+            extra_metadata=extra_metadata,
+        )
+        await self._ensure_operit_embedding(bucket_id, content, title)
+        return "created"
+
+    async def _ensure_operit_embedding(self, bucket_id: str, content: str, title) -> bool:
+        if not self.embedding_engine:
+            self.state.data["embeddings_failed"] += 1
+            self._append_import_error_once("Operit embedding engine is unavailable")
+            return False
+
+        getter = getattr(self.embedding_engine, "get_embedding", None)
+        if callable(getter):
+            try:
+                if await getter(bucket_id):
+                    return True
+            except Exception:
+                pass
+
+        text = bucket_text_for_embedding(
+            {
+                "id": bucket_id,
+                "content": content,
+                "metadata": {"name": str(title or "")},
+            }
+        )
+        ok = bool(await self.embedding_engine.generate_and_store(bucket_id, text))
+        if ok:
+            self.state.data["embeddings_created"] += 1
+        else:
+            self.state.data["embeddings_failed"] += 1
+            self._append_import_error_once("One or more Operit embeddings could not be generated")
+        return ok
+
+    def _append_import_error_once(self, message: str) -> None:
+        if message not in self.state.data["errors"] and len(self.state.data["errors"]) < 100:
+            self.state.data["errors"].append(message)
+
+    @staticmethod
+    def _operit_bucket_id(entry: dict, entry_index: int) -> str:
+        raw_uuid = str(entry.get("uuid") or "").strip().lower()
+        compact_uuid = re.sub(r"[^0-9a-f]", "", raw_uuid)
+        if len(compact_uuid) == 32:
+            return f"operit_{compact_uuid}"
+        identity = json.dumps(
+            {
+                "uuid": raw_uuid,
+                "title": entry.get("title"),
+                "content": entry.get("content"),
+                "createdAt": entry.get("createdAt"),
+                "entry_index": entry_index,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        return f"operit_{hashlib.sha256(identity.encode()).hexdigest()[:32]}"
+
+    @staticmethod
+    def _operit_tags(value) -> list[str]:
+        values = value if isinstance(value, list) else []
+        tags = ["operit_import"]
+        for raw in values:
+            tag = str(raw).strip()
+            if tag and tag not in tags:
+                tags.append(tag)
+        return tags
+
+    @staticmethod
+    def _operit_fraction(value) -> float | None:
+        try:
+            return max(0.0, min(1.0, float(value)))
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _operit_importance(cls, value) -> int:
+        fraction = cls._operit_fraction(value)
+        if fraction is None:
+            return 5
+        return max(1, min(10, round(fraction * 10)))
+
+    @staticmethod
+    def _operit_epoch_iso(value) -> str | None:
+        try:
+            timestamp_ms = float(value)
+            if timestamp_ms <= 0:
+                return None
+            return datetime.fromtimestamp(timestamp_ms / 1000.0, tz=LOCAL_TZ).isoformat(timespec="seconds")
+        except (TypeError, ValueError, OSError, OverflowError):
+            return None
 
     async def _process_chunks(self, preserve_raw: bool) -> dict:
         """Process chunks from current position."""

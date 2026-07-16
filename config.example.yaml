@@ -205,6 +205,14 @@ recall_thresholds:
   facet_vector_min_score: 0.45       # relationship/email/body/intimacy context / 有明确语境
   vague_vector_min_score: 0.40       # broad queries like "recent interesting things" / 模糊查询
   explicit_vector_min_score: 0.55    # IDs/protocols/model names / 明确实体
+  # Dynamic-alpha confidence calibration is embedding-model-specific and is
+  # intentionally separate from gateway.recall_admission_semantic_score.
+  # Qwen3-Embedding-4B starting profile, measured on this memory corpus:
+  dynamic_alpha_conf_lo: 0.45
+  dynamic_alpha_conf_hi: 0.65
+  dynamic_alpha_margin_ref: 0.10
+  dynamic_alpha_min: 0.35
+  dynamic_alpha_max: 0.85
   explicit_admission_semantic_score: 0.72
   explicit_admission_rerank_score: 0.65
   vague_top_k: 50
@@ -221,7 +229,9 @@ domain_taxonomy:
   domains:
     - { key: "relationship", label_zh: "关系" }
     - { key: "intimacy", label_zh: "亲密" }
+    - { key: "inner", label_zh: "内心" }
     - { key: "life", label_zh: "生活" }
+    - { key: "tech", label_zh: "技术" }
     - { key: "project", label_zh: "项目" }
     - { key: "general", label_zh: "通用" }
 
@@ -247,7 +257,7 @@ word_map:
   overview_aliases: {}                # Display-only canonical aliases, e.g. {"darkroom": "暗房"}
   overview_priority_terms: []         # Extra terms to boost in Top Nodes, without changing recall
   overview_hub_terms: []              # Extra broad entity hubs to keep but lightly saturate in overview ranking
-  weak_hint_terms: []                  # Extra broad terms whose word-map hints should not one-hop expand
+  weak_hint_terms: []                  # Deployment-specific broad categories, e.g. story/project; candidate hints only, never hard evidence
   weak_hint_weight: 0.25               # Direct hint weight for weak terms; keyword recall is unaffected
 
 # --- Raw Events Archive / 原文保险箱 ---
@@ -366,15 +376,13 @@ gateway:
   just_now_context_budget: 420
   conversation_turns_max_entries: 500
   memory_sentinel_enabled: true     # grey-zone routing: search | tone_only | skip; hard recall signals bypass it
-  memory_sentinel_llm_enabled: false # false = keep rule sentinel/searchable residue, skip the LLM grey-zone call
-  memory_sentinel_model: ""         # empty = use dehydration.model via dehydration API
-  memory_sentinel_context_turns: 3   # recent same-session turns for vague followups
-  domain_sentinel_enabled: true      # only opens likely domains + query; never decides should_recall
-  domain_sentinel_model: "Qwen/Qwen3-8B" # fast classifier; thinking is always disabled
-  domain_sentinel_base_url: ""       # empty = reuse embedding.base_url
-  # domain_sentinel_api_key: ""      # empty = OMBRE_DOMAIN_SENTINEL_API_KEY or embedding.api_key
+  domain_sentinel_enabled: true      # coarse routing: message_type, primary domain, optional should_recall=false
+  domain_sentinel_model: ""          # empty = use dehydration.model; prefer cheap/fast models
+  domain_sentinel_base_url: ""       # empty = reuse dehydration.base_url
+  # domain_sentinel_api_key: ""      # empty = OMBRE_DOMAIN_SENTINEL_API_KEY or dehydration.api_key
   domain_sentinel_enable_thinking: false   # forced false
   domain_sentinel_max_tokens: 260
+  domain_sentinel_timeout_seconds: 4
   date_persona_trace_enabled: true   # date words like 昨天/昨晚 add small same-day persona/original-turn trace
   date_persona_trace_budget: 220
   date_persona_trace_max_events: 5
@@ -394,6 +402,10 @@ gateway:
   query_planner_max_queries: 3
   query_planner_max_tokens: 360
   query_planner_supplemental_semantic: false # planner short queries use keyword/exact by default; avoids repeated embedding calls
+  semantic_rescue_enabled: false # optional last gate for semantic-only candidates; validates an exact evidence span
+  semantic_rescue_candidate_limit: 3 # one batched cheap-model call, top 1-3 semantic candidates
+  semantic_rescue_max_tokens: 220
+  semantic_rescue_timeout_seconds: 4
   memory_detail_recall_enabled: false # optional internal [memory_detail ids="..."] retry for admitted bucket ids
   memory_detail_recall_max_ids: 3
   memory_detail_recall_budget: 1200
@@ -445,6 +457,8 @@ gateway:
       - sqlite
       - sql
     technical_domain_terms:
+      - tech
+      - technical
       - projectcode
       - hardwareprotocol
       - hardware
@@ -452,7 +466,6 @@ gateway:
       - debug
       - 技术
       - 技术计划
-      - 项目
       - 工程
       - 代码
       - 硬件
@@ -624,8 +637,8 @@ reflection:
   auto_enabled: true
   daily_enabled: true              # daily relationship-weather impressions; persona_events only supplement
   enrich_on_write: true
-  memory_affect_anchor_enabled: true      # ordinary memory enrich may append affect_anchor; turn off for quieter buckets
-  relationship_weather_affect_anchor_enabled: true  # daily/weekly relationship weather keeps affect_anchor by default
+  memory_affect_anchor_enabled: false     # legacy compatibility only; new writes do not append affect_anchor sections
+  relationship_weather_affect_anchor_enabled: false  # legacy compatibility only; feel content stays body-only
   enrich_backfill_enabled: true      # hourly scheduler backfills missing tags/confidence/edges
   enrich_backfill_limit: 5           # max buckets to backfill per scheduler tick
   edge_backfill_limit: 5             # default limit for manual edge_backfill; only writes memory_edges
@@ -638,11 +651,27 @@ reflection:
   timezone: "Asia/Shanghai"
   daily_hour: 4                   # generate daily impression after this local hour
   daily_min_memory_items: 5        # ordinary memory/update items required before daily impression writes
-  daily_conversation_turn_limit: 0 # 0 = do not include short-term conversation_turns in daily impression material
-  daily_chat_memory_mode: auto     # auto = write selected Gateway chat memories; review = pending candidates; off = disabled
+  daily_conversation_turn_limit: 12 # small short-term turn window for daily impression material
+  daily_chat_memory_mode: review   # review = pending candidates; auto = write selected Gateway chat memories; off = disabled
   daily_chat_memory_hour: 0        # organize the previous day's Gateway chats after local midnight
   daily_chat_memory_turn_limit: 0  # 0 = use all raw_events for that date; >0 caps restored turns
-  daily_chat_memory_max_per_day: 3 # conservative cap for selected long-term memory candidates
+  daily_chat_memory_max_per_day: 10 # cap for selected long-term memory candidates
+  daily_chat_memory_min_confidence: 0.68 # auto-write threshold
+  daily_chat_memory_review_max_per_day: 10 # review mode can surface more candidates without auto-writing them
+  daily_chat_memory_review_min_confidence: 0.55 # lower review threshold; auto still uses daily_chat_memory_min_confidence
+  daily_chat_memory_summary_enabled: true       # first compress chat windows, then extract memory candidates
+  daily_chat_memory_summary_window_turns: 14    # overlapping context window so boundaries do not split causality
+  daily_chat_memory_summary_stride_turns: 7     # start a new summary window every N turns
+  daily_chat_memory_api_key_env: "" # optional; leave empty to use the dehydration model
+  daily_chat_memory_base_url: ""    # optional; set with api_key_env/model only for a separate daily-chat model
+  daily_chat_memory_timeout_seconds: 180
+  daily_chat_memory_summary_model: ""
+  daily_chat_memory_summary_max_tokens: 2200
+  daily_chat_memory_candidate_model: ""
+  daily_chat_memory_candidate_max_tokens: 3200
+  daily_activity_summary_enabled: true      # writes one "what happened today" item into portrait recent_timeline
+  daily_activity_summary_turn_limit: 0      # 0 = use all raw_events for that date; not sourced from auto-memory candidates
+  daily_activity_summary_max_tokens: 320
   persona_events_limit: 12         # selected and deduped; persona events supplement daily weather only
   persona_events_scan_limit: 80
   weekly_enabled: false            # weekly impressions are off by default; daily impressions remain
@@ -694,6 +723,8 @@ portrait:
   json_response_format: true
   material_limit: 18
   first_run_material_limit: 160
+  user_rewrite_evidence_delta: 10 # regenerate User Portrait after 10 new visible evidence items
+  manual_suppress_days: 14        # keep manually deleted evidence/recent items from immediately returning
   source_excerpt_chars: 900
   recent_continuity_days: 3
   persona_events_limit: 24
@@ -704,14 +735,14 @@ portrait:
   #   OMBRE_PORTRAIT_API_KEY
 
 # --- Night dream worker / 夜梦 ---
-# Generates latent dreams in the background. Dream bodies stay private; Dashboard only
-# shows that a dream happened, and breath() may surface one matching dream later.
+# Generates latent dreams in the background. Dashboard lists their metadata first,
+# then fetches a retained body only when someone chooses to open that dream.
 dream:
   enabled: true
   auto_enabled: true
   surface_enabled: true
   inject_enabled: false             # true lets Gateway quietly inject one resonant dream as Dream Context
-  retain_after_inject: false        # true keeps the dream record after Gateway injection while marking it surfaced
+  retain_after_inject: true         # keeps each surfaced dream readable while it still only injects once
   # DeepSeek official OpenAI-compatible endpoint.
   base_url: "https://api.deepseek.com"
   model: "deepseek-v4-flash"
@@ -729,6 +760,9 @@ dream:
   material_limit: 5
   old_echo_enabled: true           # add one old memory echo without counting it as recent material
   old_echo_min_age_hours: 72       # old echo must be older than this many hours
+  raw_residue_enabled: false       # true lets dreams sample a few original turns from the previous local day
+  raw_residue_turns: 4             # complete user/assistant turns, sampled across the day
+  raw_residue_max_chars: 1500      # cap original dialogue sent to the dream model
   identity_anchor_id: "c0b8ddb7423e"
   min_surface_age_hours: 3
   surface_threshold: 0.62

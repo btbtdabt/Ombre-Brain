@@ -2,6 +2,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Lock
@@ -163,6 +164,109 @@ class DarkroomStore:
                 "count": len(selected),
                 "total": len(entries),
                 "rooms": [self._room_door_payload_unlocked(entry) for entry in selected],
+            }
+
+    def delete_room(self, room_id: str, *, confirm: str = "") -> dict:
+        """Delete one exact room and every revision from the live store, keeping a private local backup."""
+        target = str(room_id or "").strip()
+        if str(confirm or "") != "DELETE":
+            raise ValueError("confirmation required")
+        if not target or target.lower() in {"latest", "all", "*"}:
+            raise ValueError("exact room_id required")
+        if len(target) > 200:
+            raise ValueError("invalid room_id")
+
+        with self._lock:
+            room_entries = [
+                entry
+                for entry in self._iter_entries_unlocked(visibility=None)
+                if self._entry_room_id(entry) == target
+            ]
+            if not room_entries:
+                raise KeyError("room not found")
+
+            deleted_entry_ids = {
+                str(entry.get("id") or "")
+                for entry in room_entries
+                if str(entry.get("id") or "")
+            }
+            entry_lines, deleted_revisions = self._filter_jsonl_lines_unlocked(
+                self.entries_path,
+                lambda row: self._entry_room_id(row) == target,
+            )
+            release_lines, deleted_releases = self._filter_jsonl_lines_unlocked(
+                self.release_log_path,
+                lambda row: str(row.get("entry_id") or "") in deleted_entry_ids,
+            )
+
+            backup_id = f"delete-{_now().strftime('%Y%m%dT%H%M%S')}-{secrets.token_hex(3)}"
+            backup_dir = self.base_dir / "backups" / backup_id
+            tracked_paths = (self.entries_path, self.release_log_path, self.state_path)
+            existed_before = {path: path.exists() for path in tracked_paths}
+            temp_paths: dict[Path, Path] = {}
+            try:
+                backup_dir.mkdir(parents=True, exist_ok=False)
+                for path in tracked_paths:
+                    if path.exists():
+                        shutil.copy2(path, backup_dir / path.name)
+
+                temp_paths[self.entries_path] = self._write_jsonl_temp_unlocked(
+                    self.entries_path,
+                    entry_lines,
+                    backup_id,
+                )
+                if self.release_log_path.exists():
+                    temp_paths[self.release_log_path] = self._write_jsonl_temp_unlocked(
+                        self.release_log_path,
+                        release_lines,
+                        backup_id,
+                    )
+                for path, temp_path in temp_paths.items():
+                    temp_path.replace(path)
+
+                remaining_entries = list(self._iter_entries_unlocked(visibility=None))
+                remaining_releases = list(self._iter_jsonl_unlocked(self.release_log_path))
+                release_dates = [
+                    str(row.get("created_at") or "")
+                    for row in remaining_releases
+                    if str(row.get("created_at") or "")
+                ]
+                entry_dates = [
+                    str(row.get("created_at") or "")
+                    for row in remaining_entries
+                    if str(row.get("created_at") or "")
+                ]
+                state = self._active_state_unlocked(
+                    base_state={
+                        "version": 1,
+                        "created_at": min(entry_dates) if entry_dates else "",
+                        "last_release_at": max(release_dates) if release_dates else "",
+                        "released_count": len(remaining_releases),
+                    }
+                )
+                self._write_json_unlocked(self.state_path, state)
+            except Exception:
+                for path in tracked_paths:
+                    backup_path = backup_dir / path.name
+                    if existed_before[path] and backup_path.exists():
+                        shutil.copy2(backup_path, path)
+                    elif not existed_before[path] and path.exists():
+                        path.unlink()
+                raise
+            finally:
+                for temp_path in temp_paths.values():
+                    if temp_path.exists():
+                        temp_path.unlink()
+
+            current_rooms = self._current_room_entries_unlocked(visibility=None)
+            return {
+                "status": "deleted",
+                "room_id": target,
+                "deleted_revisions": deleted_revisions,
+                "deleted_release_records": deleted_releases,
+                "backup_created": True,
+                "backup_id": backup_id,
+                "remaining_rooms": len(current_rooms),
             }
 
     def release(self, entry_id: str = "latest", *, reason: str = "") -> dict:
@@ -484,6 +588,46 @@ class DarkroomStore:
                     if visibility is not None and str(data.get("visibility") or "active") != visibility:
                         continue
                     yield data
+
+    def _iter_jsonl_unlocked(self, path: Path):
+        if not path.exists():
+            return
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(data, dict):
+                    yield data
+
+    def _filter_jsonl_lines_unlocked(self, path: Path, should_remove) -> tuple[list[str], int]:
+        if not path.exists():
+            return [], 0
+        kept: list[str] = []
+        removed = 0
+        with path.open("r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                try:
+                    row = json.loads(raw_line.strip())
+                except json.JSONDecodeError:
+                    kept.append(raw_line)
+                    continue
+                if isinstance(row, dict) and should_remove(row):
+                    removed += 1
+                    continue
+                kept.append(raw_line)
+        return kept, removed
+
+    def _write_jsonl_temp_unlocked(self, path: Path, lines: list[str], token: str) -> Path:
+        temp_path = path.with_name(f"{path.name}.{token}.tmp")
+        temp_path.parent.mkdir(parents=True, exist_ok=True)
+        with temp_path.open("w", encoding="utf-8") as handle:
+            handle.writelines(lines)
+        return temp_path
 
     def _append_jsonl_unlocked(self, path: Path, payload: dict) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

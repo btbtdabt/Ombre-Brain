@@ -158,6 +158,37 @@ class EmbeddingEngine:
                 return None
         return None
 
+    async def get_embeddings(self, bucket_ids: list[str]) -> dict[str, list[float]]:
+        """Retrieve stored embeddings for several buckets with one SQLite read."""
+        unique_ids = list(
+            dict.fromkeys(
+                str(item or "").strip()
+                for item in bucket_ids
+                if str(item or "").strip()
+            )
+        )
+        if not unique_ids:
+            return {}
+        placeholders = ",".join("?" for _ in unique_ids)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            rows = conn.execute(
+                f"SELECT bucket_id, embedding, model, dimension FROM embeddings WHERE bucket_id IN ({placeholders})",
+                unique_ids,
+            ).fetchall()
+        finally:
+            conn.close()
+
+        output: dict[str, list[float]] = {}
+        for bucket_id, payload, model, dimension in rows:
+            try:
+                embedding = json.loads(payload)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if self._row_matches_current_model(model, dimension, embedding):
+                output[str(bucket_id)] = embedding
+        return output
+
     async def search_similar(self, query: str, top_k: int = 10) -> list[tuple[str, float]]:
         """
         Search for buckets similar to query text.

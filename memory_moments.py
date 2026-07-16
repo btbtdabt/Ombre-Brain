@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sqlite3
+import unicodedata
 from datetime import datetime, timezone
 from typing import Any
 
@@ -16,6 +17,7 @@ from memory_relevance import (
     facets_for_node,
     memory_relevance_options_from_config,
 )
+from query_terms import GENERIC_LEXICAL_STOPWORDS
 from utils import strip_wikilinks
 
 
@@ -87,6 +89,92 @@ DEFAULT_ANNOTATION_OPTIONS = {
     "max_evidence_chars": 120,
 }
 DEFAULT_CONTENT_START_LINE = 1
+SHADOW_CHUNKABLE_CONTENT_SECTIONS = frozenset(
+    {
+        "body",
+        "moment",
+        "fact",
+        "original",
+        "context",
+        "evidence_context",
+        "reflection",
+        "feeling",
+    }
+)
+SENTENCE_END_RE = re.compile(r"[\u3002\uff01\uff1f\uff1b!?;]+|[.]+(?=\s|$)")
+RETRIEVAL_ALIAS_SECTIONS = frozenset({"body", "moment", "fact", "original"})
+MAX_RETRIEVAL_ALIASES_PER_BUCKET = 24
+MAX_RETRIEVAL_ALIASES_PER_MOMENT = 4
+MAX_RETRIEVAL_ALIAS_CHARS = 72
+GENERIC_RETRIEVAL_ALIAS_KEYS = frozenset(
+    {
+        "memory",
+        "memories",
+        "moment",
+        "moments",
+        "fact",
+        "facts",
+        "original",
+        "record",
+        "records",
+        "conversation",
+        "conversations",
+        "daily",
+        "game",
+        "games",
+        "haven",
+        "note",
+        "notes",
+        "momentbucket",
+        "xiaoyu",
+        "\u4e8b\u60c5",
+        "\u4e8b\u5b9e",
+        "\u54e5\u54e5",
+        "\u4eca\u5929",
+        "\u4ee5\u524d",
+        "\u539f\u6587",
+        "\u5bf9\u8bdd",
+        "\u6211\u4eec",
+        "\u65e5\u5e38",
+        "\u5c0f\u96e8",
+        "\u6e38\u620f",
+        "\u8bb0\u5f55",
+        "\u8bb0\u5fc6",
+        "\u7247\u6bb5",
+    }
+)
+COMPACT_RETRIEVAL_ALIAS_PATTERNS = (
+    re.compile(
+        r"^(?:\u5c0f\u96e8|haven|\u54e5\u54e5|\u6211|\u6211\u4eec)"
+        r"(?:\u548c|\u4e0e)(?:\u5c0f\u96e8|haven|\u54e5\u54e5|\u6211|\u6211\u4eec)"
+        r"(?:\u5173\u4e8e|\u6709\u5173)?(.+?)(?:\u7684)?"
+        r"(?:\u7ea6\u5b9a|\u5bf9\u8bdd|\u8bb0\u5fc6|\u8bb0\u5f55|\u4e8b\u60c5|\u7247\u6bb5)$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?:\u5173\u4e8e|\u6709\u5173)(.+?)(?:\u7684)?"
+        r"(?:\u7ea6\u5b9a|\u5bf9\u8bdd|\u8bb0\u5fc6|\u8bb0\u5f55|\u4e8b\u60c5|\u7247\u6bb5)?$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?:\u5c0f\u96e8|haven|\u54e5\u54e5|\u6211|\u6211\u4eec|\u5979|\u4ed6)"
+        r"(?:\u66fe\u7ecf|\u5f53\u65f6|\u540e\u6765|\u73b0\u5728|\u4e00\u76f4)?"
+        r"(?:\u8bf4\u8fc7|\u8bf4|\u89c9\u5f97|\u8ba4\u4e3a|\u8bb0\u5f97|\u5e0c\u671b|\u60f3\u8981|\u60f3|\u51b3\u5b9a|\u7ea6\u5b9a|\u559c\u6b22|\u63d0\u5230)"
+        r"[\s,\uff0c:\uff1a]*(.+)$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?:xiaoyu|haven|i|we|she|he)\s+"
+        r"(?:said|says|thought|thinks|wanted|wants|remembered|remembers|agreed|decided|mentioned)"
+        r"\s+(?:that\s+)?(.+)$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?:memory|moment|note|record|conversation)\s+(?:about|of)\s+(.+)$",
+        re.IGNORECASE,
+    ),
+    re.compile(r"^(?:about|regarding)\s+(.+)$", re.IGNORECASE),
+)
 
 
 class MemoryMomentStore:
@@ -151,6 +239,32 @@ class MemoryMomentStore:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_memory_moment_edges_target ON memory_moment_edges(target)"
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memory_retrieval_aliases (
+                bucket_id TEXT NOT NULL,
+                moment_id TEXT NOT NULL DEFAULT '',
+                alias_text TEXT NOT NULL,
+                alias_key TEXT NOT NULL,
+                source TEXT NOT NULL CHECK(source IN ('title', 'moment')),
+                text_hash TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(bucket_id, moment_id, alias_key, source)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_memory_retrieval_aliases_alias_key
+            ON memory_retrieval_aliases(alias_key, bucket_id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_memory_retrieval_aliases_bucket
+            ON memory_retrieval_aliases(bucket_id)
+            """
+        )
         conn.commit()
         conn.close()
 
@@ -158,7 +272,7 @@ class MemoryMomentStore:
         moments = parse_bucket_moments(bucket, self.relevance_options, self.annotation_options)
         bucket_id = _bucket_id(bucket)
         conn = self._connect()
-        self._replace_bucket(conn, bucket_id, moments)
+        self._replace_bucket(conn, bucket_id, moments, _bucket_title(bucket))
         conn.commit()
         conn.close()
         return [dict(moment) for moment in moments]
@@ -170,7 +284,7 @@ class MemoryMomentStore:
         for bucket in buckets:
             bucket_id = _bucket_id(bucket)
             moments = parse_bucket_moments(bucket, self.relevance_options, self.annotation_options)
-            self._replace_bucket(conn, bucket_id, moments)
+            self._replace_bucket(conn, bucket_id, moments, _bucket_title(bucket))
             indexed_buckets += 1
             indexed_moments += len(moments)
         conn.commit()
@@ -206,6 +320,23 @@ class MemoryMomentStore:
         ).fetchall()
         conn.close()
         return [self._row_to_moment(row) for row in rows]
+
+    def list_for_bucket_aliases(self, bucket_id: str, limit: int = 100) -> list[dict]:
+        bucket_id = str(bucket_id or "").strip()
+        if not bucket_id:
+            return []
+        conn = self._connect()
+        rows = conn.execute(
+            """
+            SELECT * FROM memory_retrieval_aliases
+            WHERE bucket_id = ?
+            ORDER BY source ASC, moment_id ASC, alias_key ASC
+            LIMIT ?
+            """,
+            (bucket_id, max(1, int(limit))),
+        ).fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
 
     def get(self, moment_id: str) -> dict | None:
         moment_id = str(moment_id or "").strip()
@@ -291,7 +422,7 @@ class MemoryMomentStore:
     def delete_bucket(self, bucket_id: str) -> dict:
         bucket_id = str(bucket_id or "").strip()
         if not bucket_id:
-            return {"moments": 0, "edges": 0}
+            return {"moments": 0, "edges": 0, "aliases": 0}
 
         escaped = (
             bucket_id
@@ -314,12 +445,93 @@ class MemoryMomentStore:
             "DELETE FROM memory_moments WHERE bucket_id = ?",
             (bucket_id,),
         )
+        alias_cursor = conn.execute(
+            "DELETE FROM memory_retrieval_aliases WHERE bucket_id = ?",
+            (bucket_id,),
+        )
         conn.commit()
         conn.close()
         return {
             "moments": max(0, int(moment_cursor.rowcount or 0)),
             "edges": max(0, int(edge_cursor.rowcount or 0)),
+            "aliases": max(0, int(alias_cursor.rowcount or 0)),
         }
+
+    def search_retrieval_aliases(self, query: str, limit: int = 20) -> list[dict]:
+        query_terms = _retrieval_alias_query_terms(query)
+        if not query_terms:
+            return []
+
+        conditions = ["a.alias_key LIKE ?" for _ in query_terms]
+        params: list[Any] = [f"%{key}%" for _, key in query_terms]
+        full_query_key = _retrieval_alias_key(query)
+        if full_query_key:
+            conditions.append("? LIKE '%' || a.alias_key || '%'")
+            params.append(full_query_key)
+
+        conn = self._connect()
+        rows = conn.execute(
+            f"""
+            SELECT a.*, counts.bucket_count
+            FROM memory_retrieval_aliases AS a
+            JOIN (
+                SELECT alias_key, COUNT(DISTINCT bucket_id) AS bucket_count
+                FROM memory_retrieval_aliases
+                GROUP BY alias_key
+            ) AS counts ON counts.alias_key = a.alias_key
+            WHERE {' OR '.join(conditions)}
+            """,
+            params,
+        ).fetchall()
+        conn.close()
+
+        results = []
+        for row in rows:
+            alias = dict(row)
+            alias_key = str(alias.get("alias_key") or "")
+            if alias_key in GENERIC_RETRIEVAL_ALIAS_STOP_KEYS:
+                continue
+            matched_terms = [
+                text
+                for text, key in query_terms
+                if key in alias_key or alias_key in key
+            ]
+            if not matched_terms:
+                continue
+            matched_keys = {
+                key for _, key in query_terms if key in alias_key or alias_key in key
+            }
+            coverage = len(matched_keys) / max(1, len({key for _, key in query_terms}))
+            if full_query_key == alias_key:
+                score = 1.0
+            elif full_query_key and (full_query_key in alias_key or alias_key in full_query_key):
+                score = 0.92
+            else:
+                specificity = max(len(key) for key in matched_keys) / max(1, len(alias_key))
+                score = min(0.9, 0.5 + coverage * 0.28 + min(1.0, specificity) * 0.12)
+            results.append(
+                {
+                    "bucket_id": alias["bucket_id"],
+                    "moment_id": alias["moment_id"],
+                    "alias_text": alias["alias_text"],
+                    "source": alias["source"],
+                    "bucket_count": int(alias["bucket_count"] or 0),
+                    "score": round(score, 4),
+                    "matched_terms": matched_terms,
+                }
+            )
+
+        results.sort(
+            key=lambda item: (
+                -float(item["score"]),
+                int(item["bucket_count"]),
+                0 if item["source"] == "title" else 1,
+                item["bucket_id"],
+                item["moment_id"],
+                item["alias_text"],
+            )
+        )
+        return results[: max(1, int(limit))]
 
     def search_moments(
         self,
@@ -427,8 +639,15 @@ class MemoryMomentStore:
             "edges": int(edge_row["edge_count"] or 0),
         }
 
-    def _replace_bucket(self, conn: sqlite3.Connection, bucket_id: str, moments: list[dict]) -> None:
+    def _replace_bucket(
+        self,
+        conn: sqlite3.Connection,
+        bucket_id: str,
+        moments: list[dict],
+        bucket_title: str,
+    ) -> None:
         conn.execute("DELETE FROM memory_moments WHERE bucket_id = ?", (bucket_id,))
+        conn.execute("DELETE FROM memory_retrieval_aliases WHERE bucket_id = ?", (bucket_id,))
         conn.execute(
             """
             DELETE FROM memory_moment_edges
@@ -475,6 +694,23 @@ class MemoryMomentStore:
                     edge["created_at"],
                 ),
             )
+        for alias in _build_retrieval_aliases(bucket_id, bucket_title, moments):
+            conn.execute(
+                """
+                INSERT INTO memory_retrieval_aliases
+                (bucket_id, moment_id, alias_text, alias_key, source, text_hash, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    alias["bucket_id"],
+                    alias["moment_id"],
+                    alias["alias_text"],
+                    alias["alias_key"],
+                    alias["source"],
+                    alias["text_hash"],
+                    alias["updated_at"],
+                ),
+            )
 
     def _row_to_moment(self, row: sqlite3.Row) -> dict:
         moment = dict(row)
@@ -484,6 +720,218 @@ class MemoryMomentStore:
             metadata = {}
         moment["metadata"] = metadata if isinstance(metadata, dict) else {}
         return moment
+
+
+def _build_retrieval_aliases(
+    bucket_id: str,
+    bucket_title: str,
+    moments: list[dict],
+) -> list[dict]:
+    updated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    aliases: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    def add_alias(text: str, source: str, moment_id: str) -> bool:
+        alias_text = _clean_retrieval_alias_text(text)
+        if not _valid_retrieval_alias(alias_text):
+            return False
+        alias_key = _retrieval_alias_key(alias_text)
+        identity = (moment_id, alias_key, source)
+        if identity in seen:
+            return False
+        seen.add(identity)
+        aliases.append(
+            {
+                "bucket_id": bucket_id,
+                "moment_id": moment_id,
+                "alias_text": alias_text,
+                "alias_key": alias_key,
+                "source": source,
+                "text_hash": _sha1(alias_text),
+                "updated_at": updated_at,
+            }
+        )
+        return True
+
+    for variant in _retrieval_alias_variants(bucket_title):
+        if len(aliases) >= MAX_RETRIEVAL_ALIASES_PER_BUCKET:
+            return aliases
+        add_alias(variant, "title", "")
+
+    ordered_moments = sorted(
+        [moment for moment in moments if moment.get("section") in RETRIEVAL_ALIAS_SECTIONS],
+        key=lambda item: int(item.get("ordinal", 0)),
+    )
+    for moment in ordered_moments:
+        moment_id = str(moment.get("moment_id") or "")
+        if not moment_id:
+            continue
+        added_for_moment = 0
+        for phrase in _retrieval_phrase_candidates(moment.get("text")):
+            for variant in _retrieval_alias_variants(phrase):
+                if len(aliases) >= MAX_RETRIEVAL_ALIASES_PER_BUCKET:
+                    return aliases
+                if add_alias(variant, "moment", moment_id):
+                    added_for_moment += 1
+                if added_for_moment >= MAX_RETRIEVAL_ALIASES_PER_MOMENT:
+                    break
+            if added_for_moment >= MAX_RETRIEVAL_ALIASES_PER_MOMENT:
+                break
+    return aliases
+
+
+def _bucket_title(bucket: dict) -> str:
+    meta = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
+    return _clean_text(
+        meta.get("name")
+        or meta.get("title")
+        or bucket.get("name")
+        or bucket.get("title")
+        or ""
+    )
+
+
+def _retrieval_phrase_candidates(value: Any) -> list[str]:
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    candidates: list[str] = []
+    for line in text.split("\n"):
+        fragments = [
+            fragment
+            for fragment in re.split(r"(?<=[\u3002\uff01\uff1f\uff1b!?;])\s*", line)
+            if _clean_retrieval_alias_text(fragment)
+        ]
+        if len(fragments) <= 1:
+            candidates.append(line)
+        else:
+            candidates.extend(fragments)
+
+    unique: list[str] = []
+    seen = set()
+    for candidate in candidates:
+        cleaned = _clean_retrieval_alias_text(candidate)
+        key = _retrieval_alias_key(cleaned)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique.append(cleaned)
+    return unique
+
+
+def _retrieval_alias_variants(value: Any) -> list[str]:
+    base = _clean_retrieval_alias_text(value)
+    if not base:
+        return []
+    variants = [base]
+    seen = {_retrieval_alias_key(base)}
+    queue = [(base, 0)]
+    while queue:
+        current, depth = queue.pop(0)
+        for pattern in COMPACT_RETRIEVAL_ALIAS_PATTERNS:
+            match = pattern.match(current)
+            if not match:
+                continue
+            compact = _clean_retrieval_alias_text(match.group(1))
+            key = _retrieval_alias_key(compact)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            variants.append(compact)
+            if depth < 1:
+                queue.append((compact, depth + 1))
+    return variants
+
+
+def _clean_retrieval_alias_text(value: Any) -> str:
+    text = _clean_text(value)
+    text = re.sub(r"^(?:(?:#{1,6}|[-*+]|>)\s*)+", "", text).strip()
+    return text.strip(
+        " \t\r\n`\"'.,!?;:()[]{}"
+        "\u2018\u2019\u201c\u201d\u3001\u3002\uff01\uff1f\uff0c\uff1b\uff1a"
+        "\uff08\uff09\u3010\u3011"
+    )
+
+
+def _retrieval_alias_key(value: Any) -> str:
+    normalized = unicodedata.normalize("NFKC", str(value or "")).lower()
+    return re.sub(r"[\W_]+", "", normalized, flags=re.UNICODE)
+
+
+GENERIC_RETRIEVAL_ALIAS_STOP_KEYS = frozenset(
+    {
+        *GENERIC_RETRIEVAL_ALIAS_KEYS,
+        *(
+            _retrieval_alias_key(term)
+            for term in GENERIC_LEXICAL_STOPWORDS
+            if _retrieval_alias_key(term)
+        ),
+    }
+)
+
+
+def _valid_retrieval_alias(alias_text: str) -> bool:
+    alias_key = _retrieval_alias_key(alias_text)
+    if len(alias_key) < 3 or len(alias_text) > MAX_RETRIEVAL_ALIAS_CHARS:
+        return False
+    if alias_key in GENERIC_RETRIEVAL_ALIAS_STOP_KEYS:
+        return False
+    if len(re.findall(r"[A-Za-z0-9]+", alias_text)) > 14:
+        return False
+    if _retrieval_alias_is_date(alias_text) or _retrieval_alias_is_identifier(alias_text):
+        return False
+    return True
+
+
+def _retrieval_alias_is_date(value: str) -> bool:
+    text = str(value or "").strip()
+    return bool(
+        re.fullmatch(
+            r"\d{4}(?:[-/.]\d{1,2}){1,2}(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?",
+            text,
+        )
+        or re.fullmatch(
+            r"\d{4}\u5e74\d{1,2}\u6708(?:\d{1,2}\u65e5)?",
+            text,
+        )
+        or re.fullmatch(r"\d{8}", text)
+    )
+
+
+def _retrieval_alias_is_identifier(value: str) -> bool:
+    text = str(value or "").strip().lower()
+    compact = re.sub(r"[-_:{}\s]", "", text)
+    if compact.isdigit():
+        return True
+    if re.fullmatch(r"[0-9a-f]{8,64}", compact):
+        return True
+    if re.fullmatch(r"(?:id|uuid|bucket|moment|comment)[-_: #]*[a-z0-9-]+", text):
+        return True
+    return bool(
+        re.fullmatch(r"[a-z]+[-_]?[a-z0-9_-]*\d[a-z0-9_-]*", text)
+        and len(compact) >= 12
+    )
+
+
+def _retrieval_alias_query_terms(query: Any) -> list[tuple[str, str]]:
+    cleaned = _clean_retrieval_alias_text(query)
+    if not cleaned:
+        return []
+    candidates = _retrieval_alias_variants(cleaned)
+    candidates.extend(
+        part
+        for part in re.split(r"[\s,\uff0c\u3002\uff01\uff1f!?;\uff1b:\uff1a/\\|]+", cleaned)
+        if part
+    )
+
+    terms: list[tuple[str, str]] = []
+    seen = set()
+    for candidate in candidates:
+        text = _clean_retrieval_alias_text(candidate)
+        key = _retrieval_alias_key(text)
+        if len(key) < 2 or key in seen or key in GENERIC_RETRIEVAL_ALIAS_STOP_KEYS:
+            continue
+        seen.add(key)
+        terms.append((text, key))
+    return terms[:8]
 
 
 def _annotation_options_from_config(config: dict | None) -> dict:
@@ -592,6 +1040,80 @@ def parse_bucket_moments(
             ordinal += 1
 
     return moments
+
+
+def preview_bucket_moment_chunks(
+    bucket: dict,
+    target_chars: int = 320,
+    max_chars: int = 520,
+    min_tail_chars: int = 100,
+) -> dict:
+    """Preview line-aware content chunks without changing indexed moments."""
+    target_chars = int(target_chars)
+    max_chars = int(max_chars)
+    min_tail_chars = int(min_tail_chars)
+    if target_chars <= 0 or max_chars <= 0:
+        raise ValueError("target_chars and max_chars must be positive")
+    if target_chars > max_chars:
+        raise ValueError("target_chars must not exceed max_chars")
+    if min_tail_chars < 0 or min_tail_chars > max_chars:
+        raise ValueError("min_tail_chars must be between 0 and max_chars")
+
+    current = parse_bucket_moments(bucket)
+    content_text_start_lines = _content_moment_text_start_lines(bucket)
+    current_debug = [_current_moment_preview(moment) for moment in current]
+    shadow: list[dict] = []
+
+    for moment in current:
+        text = str(moment.get("text") or "")
+        should_split = (
+            moment.get("source") == "content"
+            and moment.get("section") in SHADOW_CHUNKABLE_CONTENT_SECTIONS
+            and len(text) > max_chars
+        )
+        chunks = (
+            _split_shadow_moment_text(text, target_chars, max_chars, min_tail_chars)
+            if should_split
+            else [{"text": text, "start_line": 1, "end_line": max(1, text.count("\n") + 1)}]
+        )
+        parent_ref = _moment_source_ref(moment)
+        text_start_line = content_text_start_lines.get(str(moment.get("source_id") or ""))
+        for chunk_index, chunk in enumerate(chunks):
+            source_ref = parent_ref
+            if should_split:
+                source_ref = _shadow_chunk_source_ref(parent_ref, text_start_line, chunk)
+            chunk_text = str(chunk["text"])
+            shadow.append(
+                {
+                    "parent_moment_id": str(moment.get("moment_id") or ""),
+                    "section": str(moment.get("section") or ""),
+                    "chunk_index": chunk_index,
+                    "chars": len(chunk_text),
+                    "text_preview": _clip_text(chunk_text, 180),
+                    "source_ref": source_ref,
+                    "source": str(moment.get("source") or ""),
+                    "source_id": str(moment.get("source_id") or ""),
+                    "parent_ordinal": int(moment.get("ordinal") or 0),
+                    "split": should_split,
+                }
+            )
+
+    current_content_count = sum(1 for moment in current if moment.get("source") == "content")
+    shadow_content_count = sum(1 for moment in shadow if moment.get("source") == "content")
+    return {
+        "mode": "shadow_preview",
+        "strategy": "line_then_sentence_with_short_tail_merge",
+        "thresholds": {
+            "target_chars": target_chars,
+            "max_chars": max_chars,
+            "min_tail_chars": min_tail_chars,
+        },
+        "current_content_moment_count": current_content_count,
+        "shadow_content_moment_count": shadow_content_count,
+        "changed": shadow_content_count != current_content_count,
+        "current_moments": current_debug,
+        "shadow_moments": shadow,
+    }
 
 
 def build_moment_edges(moments: list[dict]) -> list[dict]:
@@ -735,10 +1257,16 @@ def _block_from_split_state(current: dict, fallback_end_line: int) -> dict:
     text = "\n".join(raw_lines).strip()
     start_line = _safe_int(current.get("start_line"), 1)
     end_line = max(start_line, int(fallback_end_line))
+    text_start_line = start_line
     if heading:
-        for index, line in enumerate(raw_lines, start=start_line + 1):
-            if str(line).strip():
-                end_line = index
+        nonblank = [
+            index
+            for index, line in enumerate(raw_lines, start=start_line + 1)
+            if str(line).strip()
+        ]
+        if nonblank:
+            text_start_line = nonblank[0]
+            end_line = nonblank[-1]
     else:
         nonblank = [
             index
@@ -747,6 +1275,7 @@ def _block_from_split_state(current: dict, fallback_end_line: int) -> dict:
         ]
         if nonblank:
             start_line = nonblank[0]
+            text_start_line = start_line
             end_line = nonblank[-1]
     return {
         "heading": heading,
@@ -754,7 +1283,162 @@ def _block_from_split_state(current: dict, fallback_end_line: int) -> dict:
         "text": text,
         "start_line": start_line,
         "end_line": end_line,
+        "text_start_line": text_start_line,
     }
+
+
+def _current_moment_preview(moment: dict) -> dict:
+    text = str(moment.get("text") or "")
+    return {
+        "moment_id": str(moment.get("moment_id") or ""),
+        "section": str(moment.get("section") or ""),
+        "ordinal": int(moment.get("ordinal") or 0),
+        "source": str(moment.get("source") or ""),
+        "source_id": str(moment.get("source_id") or ""),
+        "chars": len(text),
+        "text_preview": _clip_text(text, 180),
+        "source_ref": _moment_source_ref(moment),
+    }
+
+
+def _moment_source_ref(moment: dict) -> dict | None:
+    metadata = moment.get("metadata") if isinstance(moment.get("metadata"), dict) else {}
+    source_ref = metadata.get("source_ref")
+    return dict(source_ref) if isinstance(source_ref, dict) else None
+
+
+def _content_moment_text_start_lines(bucket: dict) -> dict[str, int]:
+    source_base = _source_ref_base(bucket)
+    if not source_base:
+        return {}
+
+    content = str(bucket.get("content") or "")
+    blocks = _split_markdown_blocks(content)
+    offset = int(source_base["content_start_line"]) - 1
+    if not any(_canonical_section(block["heading"]) for block in blocks if block["heading"]):
+        lines = content.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        first_nonblank = next(
+            (line_no for line_no, line in enumerate(lines, start=1) if str(line).strip()),
+            1,
+        )
+        return {"body": offset + first_nonblank}
+
+    starts: dict[str, int] = {}
+    for block_index, block in enumerate(blocks):
+        heading = block["heading"]
+        text = str(block["text"] or "").strip()
+        canonical_section = _canonical_section(heading) if heading else "body"
+        section = canonical_section or "body"
+        if not canonical_section and heading:
+            text = f"{block['heading_line']}\n{text}".strip()
+        if not text:
+            continue
+        relative_line = (
+            _safe_int(block.get("text_start_line"), _safe_int(block.get("start_line"), 1))
+            if canonical_section
+            else _safe_int(block.get("start_line"), 1)
+        )
+        starts[f"{section}-{block_index}"] = offset + relative_line
+    return starts
+
+
+def _split_shadow_moment_text(
+    text: str,
+    target_chars: int,
+    max_chars: int,
+    min_tail_chars: int,
+) -> list[dict]:
+    units = _shadow_text_units(text, max_chars)
+    if not units:
+        return [{"text": text, "start_line": 1, "end_line": 1}]
+
+    packed: list[list[dict]] = []
+    current: list[dict] = []
+    for unit in units:
+        candidate = [*current, unit]
+        if current and (
+            len(_render_shadow_units(current)) >= target_chars
+            or len(_render_shadow_units(candidate)) > max_chars
+        ):
+            packed.append(current)
+            current = [unit]
+        else:
+            current = candidate
+    if current:
+        packed.append(current)
+
+    if len(packed) > 1 and len(_render_shadow_units(packed[-1])) < min_tail_chars:
+        merged = [*packed[-2], *packed[-1]]
+        if len(_render_shadow_units(merged)) <= max_chars:
+            packed[-2:] = [merged]
+
+    return [
+        {
+            "text": _render_shadow_units(chunk_units),
+            "start_line": int(chunk_units[0]["line"]),
+            "end_line": int(chunk_units[-1]["line"]),
+        }
+        for chunk_units in packed
+    ]
+
+
+def _shadow_text_units(text: str, max_chars: int) -> list[dict]:
+    lines = str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    units: list[dict] = []
+    previous_line = 0
+    for line_no, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        fragments = _sentence_fragments(line) if len(line) > max_chars else [line]
+        for fragment_index, fragment in enumerate(fragments):
+            if not fragment:
+                continue
+            pieces = [fragment[index : index + max_chars] for index in range(0, len(fragment), max_chars)]
+            for piece_index, piece in enumerate(pieces):
+                separator = ""
+                if fragment_index == 0 and piece_index == 0 and previous_line:
+                    separator = "\n" * max(1, line_no - previous_line)
+                units.append({"text": piece, "separator": separator, "line": line_no})
+        previous_line = line_no
+    return units
+
+
+def _sentence_fragments(line: str) -> list[str]:
+    fragments = []
+    start = 0
+    for match in SENTENCE_END_RE.finditer(line):
+        end = match.end()
+        if end > start:
+            fragments.append(line[start:end])
+        start = end
+    if start < len(line):
+        fragments.append(line[start:])
+    return fragments or [line]
+
+
+def _render_shadow_units(units: list[dict]) -> str:
+    if not units:
+        return ""
+    parts = [str(units[0]["text"])]
+    for unit in units[1:]:
+        parts.append(str(unit.get("separator") or ""))
+        parts.append(str(unit["text"]))
+    return "".join(parts).strip()
+
+
+def _shadow_chunk_source_ref(
+    parent_ref: dict | None,
+    text_start_line: int | None,
+    chunk: dict,
+) -> dict | None:
+    if not parent_ref:
+        return None
+    source_ref = dict(parent_ref)
+    if text_start_line is None:
+        return source_ref
+    source_ref["start_line"] = text_start_line + int(chunk["start_line"]) - 1
+    source_ref["end_line"] = text_start_line + int(chunk["end_line"]) - 1
+    return source_ref
 
 
 def _make_edge(

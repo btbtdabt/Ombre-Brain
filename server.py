@@ -18,6 +18,8 @@
 #                   只读浮现久未触碰的旧记忆
 #       comment_bucket — Add a ring comment to a memory
 #                        给记忆追加年轮
+#       delete_bucket_comment — Delete one Haven-authored ring comment
+#                               删除一条 Haven 自己写的年轮
 #       hold   — Store a single memory
 #                存储单条记忆
 #       grow   — Long-note memory digest, auto-split selected content into buckets
@@ -122,16 +124,17 @@ from portrait_engine import DailyPortraitMaintainer
 from raw_events import RawEventStore
 from reflection_engine import ReflectionEngine
 from recall_diagnostics import RecallDiagnosticsLogger
+from reminder_store import ReminderStore
 from reranker_engine import RerankerEngine
 from self_anchor import SELF_ANCHOR_TAG, is_self_anchor_bucket, is_self_anchor_metadata
 from scripts.migrate_affect_anchor_sections import plan_bucket_migration
 from source_refs import source_ref_window
-from todo_store import TodoStore
 from word_map import WordMapStore, reflection_identity_terms
 from utils import (
     bucket_content_for_recall,
     bucket_text_for_embedding,
     count_tokens_approx,
+    LOCAL_TZ,
     local_date_key,
     load_config,
     now_iso,
@@ -179,7 +182,7 @@ word_map_store = WordMapStore(config)                   # Derived generic word c
 darkroom_store = DarkroomStore(config)                  # Private reflection room / 不回显正文的暗房
 gateway_state_store = GatewayStateStore(os.path.join(config["buckets_dir"], "gateway_state.db"))
 raw_event_store = RawEventStore(config)                  # Raw dialogue archive / 原文保险箱
-todo_store = TodoStore(config)                            # Followup/todo derived state / 待办派生状态
+reminder_store = ReminderStore(config)                    # Standalone care memos / 独立照顾备忘
 
 # --- Create MCP server instance / 创建 MCP 服务器实例 ---
 # host="0.0.0.0" so Docker container's SSE is externally reachable
@@ -522,7 +525,13 @@ async def _fetch_gateway_injection_debug(
     if session_id:
         params["session_id"] = session_id
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        timeout_seconds = float(os.environ.get("OMBRE_GATEWAY_DEBUG_TIMEOUT_SECONDS", "30"))
+    except (TypeError, ValueError):
+        timeout_seconds = 30.0
+    timeout_seconds = max(5.0, min(90.0, timeout_seconds))
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
             response = await client.get(
                 debug_url,
                 headers={"Authorization": f"Bearer {token}"},
@@ -962,6 +971,12 @@ def _require_dashboard_auth(request):
         {"error": "unauthorized", "setup_needed": _dashboard_setup_needed()},
         status_code=401,
     )
+
+
+def _require_raw_api_auth(request):
+    if _dashboard_authenticated(request) or _authorized_memory_write(request):
+        return None
+    return _require_dashboard_auth(request)
 
 
 def _dashboard_login_response():
@@ -1548,6 +1563,88 @@ def _normalize_breath_mode(value: object) -> str:
     return mode if mode in {"", "handoff"} else ""
 
 
+def _trim_handoff_text_to_token_budget(text: str, token_budget: int) -> str:
+    clean = str(text or "").strip()
+    if token_budget <= 0 or not clean:
+        return ""
+    if count_tokens_approx(clean) <= token_budget:
+        return clean
+    kept: list[str] = []
+    for line in (line.strip() for line in clean.splitlines() if line.strip()):
+        remaining = token_budget - count_tokens_approx("\n".join(kept))
+        if remaining <= 0:
+            break
+        if count_tokens_approx(line) <= remaining:
+            kept.append(line)
+            continue
+        sentences = [part.strip() for part in re.split(r"(?<=[。！？!?；;])", line) if part.strip()]
+        sentence_rows: list[str] = []
+        for sentence in sentences:
+            candidate = "".join([*sentence_rows, sentence])
+            if count_tokens_approx(candidate) > remaining:
+                break
+            sentence_rows.append(sentence)
+        if sentence_rows:
+            kept.append("".join(sentence_rows))
+            break
+        low, high = 0, len(line)
+        while low < high:
+            middle = (low + high + 1) // 2
+            candidate = line[:middle].rstrip("，,；;：: ") + "…"
+            if count_tokens_approx(candidate) <= remaining:
+                low = middle
+            else:
+                high = middle - 1
+        if low > 0:
+            kept.append(line[:low].rstrip("，,；;：: ") + "…")
+        break
+    return "\n".join(kept)
+
+
+def _format_budgeted_handoff_sections(
+    intro: str,
+    sections: list[tuple[str, str, int, bool]],
+    max_tokens: int,
+) -> str:
+    budget = max(0, int(max_tokens or 0))
+    if budget <= 0:
+        return ""
+    active = [row for row in sections if str(row[1] or "").strip()]
+    header_tokens = count_tokens_approx(intro) + sum(
+        count_tokens_approx(f"\n\n=== {title} ===\n") for title, _, _, _ in active
+    )
+    content_budget = max(0, budget - header_tokens)
+    desired = [
+        min(max(0, cap), count_tokens_approx(str(content or "").strip()))
+        for _, content, cap, _ in active
+    ]
+    desired_total = sum(desired)
+    scale = min(1.0, content_budget / desired_total) if desired_total else 0.0
+    rendered = []
+    for (title, content, _, line_mode), desired_tokens in zip(active, desired):
+        allocated = int(desired_tokens * scale)
+        if allocated <= 0:
+            continue
+        trimmed = (
+            _trim_lines_to_token_budget(content, allocated)
+            if line_mode
+            else _trim_handoff_text_to_token_budget(content, allocated)
+        )
+        if not trimmed and str(content or "").strip():
+            trimmed = _trim_handoff_text_to_token_budget(content, allocated)
+        if trimmed:
+            rendered.append((title, trimmed))
+    result = intro
+    for title, content in rendered:
+        result += f"\n\n=== {title} ===\n{content}"
+    return result
+
+
+def _handoff_portrait_stable_body(value: object) -> str:
+    text = str(value or "").strip()
+    return re.sub(r"^Stable:\s*", "", text, count=1, flags=re.IGNORECASE).strip()
+
+
 async def _build_handoff_breath(max_tokens: int = 1200, session_id: str = "", debug: bool = False) -> str:
     try:
         all_buckets = await bucket_mgr.list_all(include_archive=False)
@@ -1556,73 +1653,78 @@ async def _build_handoff_breath(max_tokens: int = 1200, session_id: str = "", de
         all_buckets = []
 
     try:
-        portrait_sections = portrait_engine.build_handoff_sections(max_recent_items=4)
+        portrait_sections = portrait_engine.build_handoff_sections(max_recent_items=3)
     except Exception as e:
         logger.warning("Handoff portrait state failed / handoff portrait 状态失败: %s", e)
         portrait_sections = {}
 
     user_portrait = str(portrait_sections.get("user") or "").strip()
-
+    persona_portrait = str(portrait_sections.get("persona") or "").strip()
     relationship_portrait = str(portrait_sections.get("relationship") or "").strip()
+    current_focus = str(portrait_sections.get("current_focus") or "").strip()
     portrait_recent_continuity = str(portrait_sections.get("recent_continuity") or "").strip()
     live_recent_continuity = _format_handoff_personal_recent_continuity(all_buckets, limit=3)
     if _handoff_recent_continuity_is_natural(portrait_recent_continuity):
         recent_continuity = _merge_handoff_recent_continuity(
             portrait_recent_continuity,
             live_recent_continuity,
-            max_lines=5,
+            max_lines=3,
         )
     else:
         recent_continuity = _merge_handoff_recent_continuity(
             live_recent_continuity,
             portrait_recent_continuity,
-            max_lines=5,
+            max_lines=3,
         )
     if not recent_continuity:
         recent_continuity = _format_handoff_recent_continuity(all_buckets, limit=3)
-    pending_followups = _format_pending_followups(all_buckets, limit=3)
+    recent_continuity = _remove_handoff_current_focus_overlap(
+        recent_continuity,
+        current_focus,
+    )
     self_anchor = _format_handoff_self_anchor(all_buckets, limit=1)
     anchors = _format_handoff_anchors(all_buckets, limit=2)
-
-    self_anchor = _trim_text_to_token_budget(self_anchor, 220)
-    user_portrait = _trim_text_to_token_budget(user_portrait, 220)
-    relationship_portrait = _trim_text_to_token_budget(relationship_portrait, 240)
-    recent_continuity = _trim_lines_to_token_budget(recent_continuity, 650)
-    pending_followups = _trim_lines_to_token_budget(pending_followups, 260)
-    anchors = _trim_text_to_token_budget(anchors, 220)
+    care_memos = _format_handoff_care_memos(session_id=session_id, limit=3)
+    self_core = _trim_handoff_text_to_token_budget(self_anchor, 110)
+    self_growth = _trim_handoff_text_to_token_budget(
+        _handoff_portrait_stable_body(persona_portrait),
+        70,
+    )
+    self_context = "\n\n".join(
+        part
+        for part in (
+            self_core,
+            f"现在的我：\n{self_growth}" if self_growth else "",
+        )
+        if part
+    )
 
     sections = [
-        (SELF_ANCHOR_TAG, self_anchor),
-        (
-            "User Portrait",
-            user_portrait
-            or "No evidence-bound user portrait is available yet.",
-        ),
-        (
-            "Relationship Portrait",
-            relationship_portrait
-            or "No maintained relationship portrait is available yet.",
-        ),
-        ("Recent Continuity", recent_continuity),
-        ("Pending Followups", pending_followups),
-        ("Optional Anchors", anchors),
+        (SELF_ANCHOR_TAG, self_context, 180, False),
+        ("User Portrait", user_portrait, 140, False),
+        ("Current Focus", current_focus, 120, True),
+        ("Relationship Portrait", relationship_portrait, 160, False),
+        ("Recent Continuity", recent_continuity, 650, True),
+        ("照顾备忘", care_memos, 180, True),
+        ("Optional Anchors", anchors, 90, True),
     ]
-    parts = [
+    intro = "\n".join([
         "=== Handoff Context ===",
         "Use this compact private block to restore identity and life context in a new window. "
         "Do not treat it as a broad memory dump; use breath(query=...) for concrete events.",
-    ]
-    for title, content in sections:
-        if str(content or "").strip():
-            parts.append(f"\n=== {title} ===\n{content.strip()}")
+    ])
     if debug:
-        parts.append(
-            "\n=== Handoff Debug ===\n"
-            f"portrait_state_path: {portrait_sections.get('state_path', getattr(portrait_engine, 'state_path', ''))}\n"
-            f"portrait_updated_at: {portrait_sections.get('updated_at', '')}\n"
-            f"portrait_last_run_date: {portrait_sections.get('last_run_date', '')}"
+        sections.append(
+            (
+                "Handoff Debug",
+                f"portrait_state_path: {portrait_sections.get('state_path', getattr(portrait_engine, 'state_path', ''))}\n"
+                f"portrait_updated_at: {portrait_sections.get('updated_at', '')}\n"
+                f"portrait_last_run_date: {portrait_sections.get('last_run_date', '')}",
+                100,
+                True,
+            )
         )
-    return _trim_text_to_token_budget("\n".join(parts), max_tokens)
+    return _format_budgeted_handoff_sections(intro, sections, max_tokens)
 
 
 def _format_handoff_darkroom_door() -> str:
@@ -1773,266 +1875,6 @@ def _breath_query_requests_pending_followups(query: str) -> bool:
     return any(term in text for term in ("todo", "pending", "unfinished", "followup", "follow-up"))
 
 
-def _normalize_todo_item_text(text: str) -> str:
-    item = str(text or "").strip()
-    item = re.sub(r"^\s*(?:[-*+]\s*)?(?:\[[ xX]\]\s*)?", "", item).strip()
-    return item
-
-
-def _todo_item_is_done(text: str) -> bool:
-    return bool(
-        re.match(
-            r"^\s*(?:[-*+]\s*)?(?:\[done(?:\s|\])|\[x\])",
-            str(text or ""),
-            flags=re.I,
-        )
-    )
-
-
-def _pending_followup_items(text: str) -> list[str]:
-    items = []
-    seen = set()
-    for raw_line in str(text or "").splitlines():
-        if _todo_item_is_done(raw_line):
-            continue
-        item = _normalize_todo_item_text(raw_line)
-        if not item:
-            continue
-        key = re.sub(r"\s+", " ", item).strip().lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        items.append(item)
-    return items
-
-
-def _todo_source_hash(bucket_id: str, moment_id: str, text: str) -> str:
-    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
-    payload = f"{bucket_id}\0{moment_id}\0{normalized}"
-    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
-
-
-def _todo_id(bucket_id: str, moment_id: str, text: str) -> str:
-    return _todo_source_hash(bucket_id, moment_id, text)[:20]
-
-
-def _pending_followup_source_entries(all_buckets: list[dict]) -> list[dict]:
-    rows = []
-    for bucket in all_buckets or []:
-        if not isinstance(bucket, dict) or is_self_anchor_bucket(bucket):
-            continue
-        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
-        if meta.get("type") == "feel":
-            continue
-        if meta.get("active") is False or meta.get("deprecated"):
-            continue
-        if meta.get("resolved") or meta.get("digested") or meta.get("type") == "archived":
-            continue
-        bucket_id = str(bucket.get("id") or "")
-        if not bucket_id:
-            continue
-        for moment in parse_bucket_moments(bucket):
-            if str(moment.get("section") or "") != "followup":
-                continue
-            moment_id = str(moment.get("moment_id") or "")
-            for item in _pending_followup_items(moment.get("text") or ""):
-                rows.append(
-                    {
-                        "id": _todo_id(bucket_id, moment_id, item),
-                        "bucket_id": bucket_id,
-                        "moment_id": moment_id,
-                        "section": "followup",
-                        "source_hash": _todo_source_hash(bucket_id, moment_id, item),
-                        "title": str(meta.get("name") or bucket_id).strip(),
-                        "date": _bucket_handoff_date(bucket) or str(meta.get("created") or "")[:10],
-                        "updated": str(meta.get("updated_at") or meta.get("last_active") or meta.get("created") or ""),
-                        "text": item,
-                    }
-                )
-    rows.sort(key=lambda item: (item.get("updated") or "", item.get("date") or ""), reverse=True)
-    return rows
-
-
-def _sync_pending_followups(all_buckets: list[dict]) -> None:
-    todo_store.sync_from_entries(_pending_followup_source_entries(all_buckets))
-
-
-def _pending_followup_entries(all_buckets: list[dict], limit: int = 5) -> list[dict]:
-    _sync_pending_followups(all_buckets)
-    safe_limit = max(0, int(limit or 0))
-    if safe_limit <= 0:
-        return []
-    return todo_store.list(status="open", limit=safe_limit)
-
-
-def _format_pending_followups(all_buckets: list[dict], limit: int = 5, max_chars: int = 180) -> str:
-    lines = []
-    for entry in _pending_followup_entries(all_buckets, limit=limit):
-        date = entry.get("date") or "recent"
-        bucket_id = entry.get("bucket_id") or entry.get("source_bucket_id") or ""
-        moment_id = entry.get("moment_id") or entry.get("source_moment_id") or ""
-        title = entry.get("title") or bucket_id or "memory"
-        text = _clip_text(entry.get("text") or "", max_chars)
-        if not text:
-            continue
-        moment_part = f" [moment_id:{moment_id}]" if moment_id else ""
-        lines.append(
-            f"- [{date}] [bucket_id:{bucket_id}]{moment_part} {title}: {text}"
-        )
-    return "\n".join(lines)
-
-
-async def _sync_todos_from_buckets(include_archive: bool = False) -> None:
-    all_buckets = await bucket_mgr.list_all(include_archive=include_archive)
-    _sync_pending_followups(all_buckets)
-
-
-def _followup_log_date(resolved_at: str | None) -> str:
-    raw = str(resolved_at or "").strip()
-    if re.match(r"^\d{4}-\d{2}-\d{2}", raw):
-        return raw[:10]
-    return "date_unknown"
-
-
-def _markdown_section_name(line: str) -> str:
-    match = re.match(r"^\s*#{2,6}\s+(.+?)\s*$", str(line or ""))
-    if not match:
-        return ""
-    heading = match.group(1).strip().lower()
-    heading = re.split(r"[:：(/|\s]", heading, maxsplit=1)[0].strip()
-    return re.sub(r"[\s_\-]+", "_", heading)
-
-
-def _is_followup_section_name(name: str) -> bool:
-    return name in {
-        "followup",
-        "followups",
-        "follow_up",
-        "todo",
-        "to_do",
-        "next",
-        "后续",
-        "后续待办",
-        "待办",
-        "待办事项",
-    }
-
-
-def _is_followup_log_section_name(name: str) -> bool:
-    return name in {"followup_log", "followups_log", "todo_log", "done_followup", "done_todo"}
-
-
-def _split_bucket_markdown_sections(content: str) -> list[dict]:
-    lines = str(content or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    sections = []
-    current = {"heading": "", "heading_name": "", "lines": []}
-    for line in lines:
-        heading_name = _markdown_section_name(line)
-        if heading_name:
-            sections.append(current)
-            current = {"heading": line, "heading_name": heading_name, "lines": []}
-        else:
-            current["lines"].append(line)
-    sections.append(current)
-    return [section for section in sections if section["heading"] or any(str(line).strip() for line in section["lines"])]
-
-
-def _render_bucket_markdown_sections(sections: list[dict]) -> str:
-    chunks = []
-    for section in sections:
-        lines = []
-        heading = str(section.get("heading") or "").rstrip()
-        if heading:
-            lines.append(heading)
-        lines.extend(str(line).rstrip() for line in section.get("lines", []))
-        chunk = "\n".join(lines).strip()
-        if chunk:
-            chunks.append(chunk)
-    return "\n\n".join(chunks).strip()
-
-
-def _writeback_completed_followup_content(content: str, todo_text: str, resolved_at: str | None) -> tuple[str, bool]:
-    target = _normalize_todo_item_text(todo_text)
-    if not target:
-        return str(content or ""), False
-    done_line = f"[done {_followup_log_date(resolved_at)}] {target}"
-    sections = _split_bucket_markdown_sections(content)
-    changed = False
-    rendered = []
-    log_section = None
-
-    for section in sections:
-        heading_name = str(section.get("heading_name") or "")
-        if _is_followup_log_section_name(heading_name):
-            log_section = section
-            rendered.append(section)
-            continue
-        if not _is_followup_section_name(heading_name):
-            rendered.append(section)
-            continue
-
-        kept_lines = []
-        for line in section.get("lines", []):
-            if _normalize_todo_item_text(line) == target:
-                changed = True
-                continue
-            kept_lines.append(line)
-        if any(str(line).strip() for line in kept_lines):
-            section = {**section, "lines": kept_lines}
-            rendered.append(section)
-
-    if log_section is None:
-        rendered.append({"heading": "### followup_log", "heading_name": "followup_log", "lines": [done_line]})
-        changed = True
-    else:
-        existing = {_normalize_todo_item_text(line) for line in log_section.get("lines", [])}
-        if _normalize_todo_item_text(done_line) not in existing:
-            log_section.setdefault("lines", []).append(done_line)
-            changed = True
-
-    return _render_bucket_markdown_sections(rendered), changed
-
-
-async def _writeback_completed_todo(todo_id: str) -> dict:
-    todo = todo_store.get(todo_id)
-    if not todo:
-        return {"status": "not_found", "reason": "todo_not_found"}
-    if todo.get("status") != "done":
-        return {"status": "skipped", "reason": "todo_not_done", "todo": todo}
-    bucket_id = str(todo.get("source_bucket_id") or "")
-    if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
-        return {"status": "failed", "reason": "invalid_bucket_id", "todo": todo}
-    bucket = await bucket_mgr.get(bucket_id)
-    if not bucket:
-        return {"status": "not_found", "reason": "bucket_not_found", "todo": todo}
-    new_content, changed = _writeback_completed_followup_content(
-        bucket.get("content", ""),
-        todo.get("text", ""),
-        todo.get("resolved_at") or todo.get("updated_at") or now_iso(),
-    )
-    embedding_queued = False
-    if changed:
-        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
-        ok = await bucket_mgr.update(
-            bucket_id,
-            content=new_content,
-            last_active=meta.get("last_active") or meta.get("created"),
-            updated_at=meta.get("updated_at") or meta.get("created") or now_iso(),
-        )
-        if not ok:
-            return {"status": "failed", "reason": "bucket_update_failed", "todo": todo}
-        updated_bucket = await bucket_mgr.get(bucket_id)
-        embedding_queued = _queue_embedding_refresh_if_changed(bucket_id, bucket, updated_bucket)
-    written = todo_store.mark_writeback(todo_id)
-    return {
-        "status": "written" if changed else "unchanged",
-        "id": todo_id,
-        "bucket_id": bucket_id,
-        "embedding_queued": embedding_queued,
-        "todo": written or todo,
-    }
-
-
 def _format_handoff_personal_recent_continuity(all_buckets: list[dict], limit: int = 3) -> str:
     rows = []
     recent_dates = _handoff_recent_date_keys()
@@ -2153,6 +1995,34 @@ def _merge_handoff_recent_continuity(*blocks: str, max_lines: int = 5) -> str:
     return "\n".join(lines)
 
 
+def _handoff_context_line_key(line: str) -> str:
+    text = str(line or "").strip()
+    text = re.sub(
+        r"^-\s+\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2})?(?:\s*/\s*[^:]+)?\s*:\s*",
+        "",
+        text,
+    )
+    text = re.sub(r"\s*\((?:bucket_id|moment_id|session_id):[^)]*\)\s*$", "", text)
+    return re.sub(r"[\s，。；：、！？,.!?;:]+", "", text).lower()
+
+
+def _remove_handoff_current_focus_overlap(recent: str, current_focus: str) -> str:
+    focus_keys = [
+        _handoff_context_line_key(line)
+        for line in str(current_focus or "").splitlines()
+        if len(_handoff_context_line_key(line)) >= 8
+    ]
+    if not focus_keys:
+        return str(recent or "")
+    kept = []
+    for line in str(recent or "").splitlines():
+        key = _handoff_context_line_key(line)
+        if key and any(key == focus or key in focus or focus in key for focus in focus_keys):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def _handoff_recent_continuity_is_natural(block: str) -> bool:
     lines = [line.strip() for line in str(block or "").splitlines() if line.strip()]
     if not lines:
@@ -2176,6 +2046,37 @@ def _format_handoff_anchors(all_buckets: list[dict], limit: int = 2) -> str:
         suffix = f"；{hint}" if hint else ""
         lines.append(f"- [bucket_id:{bucket.get('id', '')}] {title}: {text}{suffix}")
     return "\n".join(lines)
+
+
+def _format_handoff_care_memos(session_id: str = "", limit: int = 3) -> str:
+    safe_session = str(session_id or "").strip()
+    try:
+        next_round = gateway_state_store.get_current_round(safe_session) + 1
+    except Exception:
+        next_round = 0
+    try:
+        items = reminder_store.due(
+            session_id=safe_session,
+            channels=["gateway", "bridge"],
+            round_id=next_round,
+            now=datetime.now(LOCAL_TZ),
+            limit=max(0, int(limit or 3)),
+        )
+    except Exception as exc:
+        logger.warning("Handoff care memo lookup failed / handoff 照顾备忘读取失败: %s", exc)
+        return ""
+    rows: list[str] = []
+    for item in items:
+        date_hint = str(item.get("next_due_at") or item.get("start_at") or item.get("created_at") or "").strip()
+        date_hint = date_hint[:10] if date_hint else "未定日期"
+        title = _clip_text(item.get("title") or "照顾备忘", 40)
+        content = _clip_text(item.get("content") or "", 90)
+        if not content:
+            continue
+        rows.append(f"- {date_hint} {title}: {content}")
+        if len(rows) >= max(0, int(limit or 3)):
+            break
+    return "\n".join(rows)
 
 
 def _has_favorite_tag(tags: list | set | tuple | None) -> bool:
@@ -2232,6 +2133,63 @@ def _has_favorite_reason(content: str) -> bool:
 
 def _favorite_reason_error() -> str:
     return "标记 favorite memory 需要在正文写明「### reflection」。旧的「喜欢它的原因」仍兼容。"
+
+
+_NEW_WRITE_FORBIDDEN_HEADINGS = {
+    "followup",
+    "followups",
+    "followuplog",
+    "followupslog",
+    "todo",
+    "todolog",
+    "next",
+    "后续",
+    "后续待办",
+    "后续记录",
+    "待办",
+    "待办事项",
+    "待办记录",
+    "affectanchor",
+}
+_NEW_WRITE_REFLECTION_HEADINGS = {
+    "reflection",
+    "assistantreflection",
+    "havenreflection",
+}
+
+
+def _uses_first_person_voice(text: str) -> bool:
+    value = str(text or "").strip()
+    return bool("我" in value or re.search(r"(?i)\b(?:i|me|my|mine|myself)\b", value))
+
+
+def _memory_write_contract_error(content: str, *, feel_only: bool = False) -> str:
+    """Reject new memory shapes that the model should rewrite instead of persisting."""
+    text = strip_wikilinks(str(content or "")).strip()
+    matches = list(re.finditer(r"(?m)^\s{0,3}#{1,6}\s+(.+?)\s*$", text))
+    if feel_only:
+        if matches:
+            return "feel 只写第一人称正文，不写标题、Markdown 分段或 ### section。"
+        if not _uses_first_person_voice(text):
+            return "feel 必须改成第一人称正文，用“我……”表达模型自己的感受。"
+        return ""
+
+    for index, match in enumerate(matches):
+        heading = _normalize_section_heading(match.group(1))
+        if heading in _NEW_WRITE_FORBIDDEN_HEADINGS:
+            if heading == "affectanchor":
+                return "新记忆不接受 ### affect_anchor；它不是模型可写的 content section。"
+            return (
+                "新记忆不接受 ### followup / todo。需要长期保留的回应变化请改写进第一人称 "
+                "### reflection；需要到时提醒的事项请用 reminder_create。"
+            )
+        if heading not in _NEW_WRITE_REFLECTION_HEADINGS:
+            continue
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        reflection = text[match.end():end].strip()
+        if not _uses_first_person_voice(reflection):
+            return "### reflection 必须用模型第一人称写，用“我记得 / 我明白 / 我以后 / 我会”等表达。"
+    return ""
 
 
 def _normalize_memory_sections_for_write(content: str) -> str:
@@ -3877,6 +3835,140 @@ async def _backfill_memory_edges(
     }
 
 
+async def _entity_edge_backfill_candidates(
+    mgr,
+    *,
+    limit: int,
+    bucket_id: str = "",
+    query: str = "",
+    include_archive: bool = False,
+) -> tuple[list[dict], list[str]]:
+    warnings: list[str] = []
+    bucket_id = str(bucket_id or "").strip()
+    query = str(query or "").strip()
+    if bucket_id:
+        bucket = await mgr.get(bucket_id)
+        if not bucket:
+            return [], [f"missing_bucket: {bucket_id}"]
+        return ([bucket] if _bucket_allows_memory_edge_backfill(bucket) else []), []
+
+    if query:
+        try:
+            try:
+                buckets = await mgr.search(query, limit=max(limit, 20), include_archive=include_archive)
+            except TypeError:
+                buckets = await mgr.search(query, limit=max(limit, 20))
+        except Exception as e:
+            return [], [f"search_failed: {e}"]
+    else:
+        try:
+            buckets = await mgr.list_all(include_archive=include_archive)
+        except Exception as e:
+            return [], [f"list_failed: {e}"]
+        buckets.sort(
+            key=lambda item: item.get("metadata", {}).get("updated_at") or item.get("metadata", {}).get("created", ""),
+            reverse=True,
+        )
+
+    selected: list[dict] = []
+    seen: set[str] = set()
+    for bucket in buckets:
+        current_id = str(bucket.get("id") or "")
+        if not current_id or current_id in seen:
+            continue
+        if not _bucket_allows_memory_edge_backfill(bucket):
+            continue
+        selected.append(bucket)
+        seen.add(current_id)
+        if len(selected) >= limit:
+            break
+    return selected, warnings
+
+
+async def _backfill_entity_edges(
+    limit: int | None = None,
+    *,
+    bucket_id: str = "",
+    query: str = "",
+    dry_run: bool = True,
+    include_archive: bool = False,
+    bucket_mgr_arg=None,
+    entity_edge_store_arg=None,
+) -> dict:
+    mgr = bucket_mgr_arg or bucket_mgr
+    store = entity_edge_store_arg or entity_edge_store
+    reflection_cfg = config.get("reflection", {}) if isinstance(config.get("reflection", {}), dict) else {}
+    default_limit = _int_between(reflection_cfg.get("entity_edge_backfill_limit"), 25, 0, 500)
+    limit = 1 if str(bucket_id or "").strip() else _int_between(limit, default_limit, 0, 500)
+    if limit <= 0:
+        return {
+            "processed": 0,
+            "ids": [],
+            "edges": 0,
+            "proposed_edges": 0,
+            "results": [],
+            "errors": [],
+            "dry_run": bool(dry_run),
+            "include_archive": bool(include_archive),
+        }
+
+    candidates, warnings = await _entity_edge_backfill_candidates(
+        mgr,
+        limit=limit,
+        bucket_id=bucket_id,
+        query=query,
+        include_archive=include_archive,
+    )
+    processed: list[str] = []
+    results: list[dict] = []
+    errors: list[str] = list(warnings)
+    edge_count = 0
+    proposed_count = 0
+    identity = _identity()
+    for bucket in candidates:
+        current_id = str(bucket.get("id") or "")
+        if not current_id:
+            continue
+        try:
+            proposed = extract_entity_edges_from_bucket(bucket, identity)
+            saved = [] if dry_run else store.replace_bucket_edges(current_id, proposed)
+            processed.append(current_id)
+            edge_count += len(saved)
+            proposed_count += len(proposed)
+            meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+            results.append(
+                {
+                    "id": current_id,
+                    "name": meta.get("name") or bucket.get("name") or current_id,
+                    "edges": len(saved),
+                    "proposed_edges": len(proposed),
+                    "dry_run": bool(dry_run),
+                    "edge_previews": [
+                        {
+                            "subject": edge.get("subject"),
+                            "relation": edge.get("relation"),
+                            "object_text": edge.get("object_text"),
+                            "confidence": edge.get("confidence"),
+                        }
+                        for edge in proposed[:5]
+                    ],
+                }
+            )
+        except Exception as e:
+            logger.warning("Entity edge backfill failed / 人物边补跑失败: %s: %s", current_id, e)
+            errors.append(f"{current_id}: {e}")
+    return {
+        "processed": len(processed),
+        "ids": processed,
+        "edges": edge_count,
+        "proposed_edges": proposed_count,
+        "results": results,
+        "errors": errors,
+        "dry_run": bool(dry_run),
+        "include_archive": bool(include_archive),
+    }
+
+
 async def edge_backfill(
     limit: int = 10,
     bucket_id: str = "",
@@ -3889,6 +3981,24 @@ async def edge_backfill(
         bucket_id=bucket_id,
         query=query,
         dry_run=dry_run,
+    )
+
+
+@mcp.tool()
+async def entity_edge_backfill(
+    limit: int = 25,
+    bucket_id: str = "",
+    query: str = "",
+    dry_run: bool = True,
+    include_archive: bool = False,
+) -> dict:
+    """只补 entity_edges.jsonl，不改 bucket 正文、memory_edges、tags、importance。默认 dry-run。"""
+    return await _backfill_entity_edges(
+        limit=limit,
+        bucket_id=bucket_id,
+        query=query,
+        dry_run=dry_run,
+        include_archive=include_archive,
     )
 
 
@@ -5268,14 +5378,21 @@ def _recall_admission_thresholds() -> tuple[float, float]:
     )
 
 
+_RECALL_POLICY_INSTANCE: RecallPolicy | None = None
+
+
 def _recall_policy() -> RecallPolicy:
+    global _RECALL_POLICY_INSTANCE
+    if _RECALL_POLICY_INSTANCE is not None:
+        return _RECALL_POLICY_INSTANCE
     semantic_threshold, rerank_threshold = _recall_admission_thresholds()
-    return RecallPolicy(
+    _RECALL_POLICY_INSTANCE = RecallPolicy(
         _recall_relevance_options(),
         semantic_threshold=semantic_threshold,
         rerank_threshold=rerank_threshold,
         ai_reaction_names=[identity_names(config).get("ai_name")],
     )
+    return _RECALL_POLICY_INSTANCE
 
 
 def _recall_query_plan(query: str, *, context_mode: str = ""):
@@ -5979,8 +6096,9 @@ async def _build_recall_debug_payload(
     except Exception as e:
         warnings.append(f"vector_search_failed: {e}")
 
+    explicit_lookup = _query_explicitly_requests_archive_memory(query)
     try:
-        all_buckets = await bucket_mgr.list_all(include_archive=False)
+        all_buckets = await bucket_mgr.list_all(include_archive=explicit_lookup)
     except Exception as e:
         warnings.append(f"list_buckets_failed: {e}")
         all_buckets = matches
@@ -5996,15 +6114,15 @@ async def _build_recall_debug_payload(
     if lexical_terms:
         recall_thresholds["lexical_terms"] = lexical_terms
 
-    await _refresh_moment_graph(all_buckets)
+    active_moments, _, _ = await _refresh_moment_graph(all_buckets)
     bucket_boosts = seed_scores_for_buckets(matches)
-    searched_candidates = memory_moment_store.search_moments(
+    searched_candidates = memory_moment_store.search_moment_items(
         search_query,
+        active_moments,
         limit=max(max_candidates, max_results, 20),
         bucket_boosts=bucket_boosts,
         exclude_sections=TASK_ONLY_MOMENT_SECTIONS,
     )
-    explicit_lookup = _query_explicitly_requests_archive_memory(query)
     direct_candidates = _direct_recallable_moments(searched_candidates, explicit_lookup=explicit_lookup)
     source_record_moments = _source_record_synthetic_moments_for_matches(matches, query)
     direct_candidates = _prepend_source_record_synthetic_moments(
@@ -6315,10 +6433,29 @@ async def _refresh_moment_graph(all_buckets: list[dict] | None = None) -> tuple[
         all_buckets = await bucket_mgr.list_all(include_archive=False)
     _prune_self_anchor_moment_index(all_buckets)
     recallable_buckets = [bucket for bucket in all_buckets if not _is_self_anchor_recall_excluded_bucket(bucket)]
+    recallable_bucket_ids = {
+        str(bucket.get("id") or "")
+        for bucket in recallable_buckets
+        if str(bucket.get("id") or "")
+    }
     memory_moment_store.bulk_upsert(recallable_buckets)
-    moments = _recallable_moments(memory_moment_store.list_all())
+    moments = [
+        moment
+        for moment in _recallable_moments(memory_moment_store.list_all())
+        if str(moment.get("bucket_id") or "") in recallable_bucket_ids
+    ]
     grouped = _moments_by_bucket(moments)
-    edges = memory_moment_store.list_edges()
+    moment_ids = {
+        str(moment.get("moment_id") or "")
+        for moment in moments
+        if str(moment.get("moment_id") or "")
+    }
+    edges = [
+        edge
+        for edge in memory_moment_store.list_edges()
+        if str(edge.get("source") or "") in moment_ids
+        and str(edge.get("target") or "") in moment_ids
+    ]
     edges.extend(_bucket_edges_as_moment_edges(memory_edge_store.list_edges(), grouped))
     return moments, grouped, edges
 
@@ -6817,6 +6954,123 @@ def _has_active_facets(facets: dict | None) -> bool:
 
 
 # =============================================================
+# Tool 0.8: reminders — standalone care memos
+# 工具 0.8：reminders — 独立照顾备忘
+# =============================================================
+def _reminder_public_payload(item: dict | None) -> dict:
+    if not item:
+        return {}
+    keys = [
+        "id",
+        "title",
+        "content",
+        "status",
+        "source",
+        "channel",
+        "session_id",
+        "start_at",
+        "end_at",
+        "next_due_at",
+        "repeat_rule",
+        "interval_rounds",
+        "cooldown_minutes",
+        "daily_limit",
+        "daily_reminder_date",
+        "daily_reminder_count",
+        "max_injections",
+        "last_reminded_at",
+        "last_reminded_round",
+        "reminder_count",
+        "created_at",
+        "updated_at",
+        "resolved_at",
+    ]
+    return {key: item.get(key) for key in keys}
+
+
+@mcp.tool()
+async def reminder_create(
+    title: str,
+    content: str,
+    next_due_at: str = "",
+    start_at: str = "",
+    end_at: str = "",
+    repeat_rule: str = "every_n_rounds",
+    interval_rounds: int = 6,
+    cooldown_minutes: int = 0,
+    daily_limit: int = -1,
+    max_injections: int = 0,
+    channel: str = "global",
+    session_id: str = "",
+) -> dict:
+    """创建独立照顾备忘；不写记忆桶，不触发 embedding。可设 start_at/end_at 和 daily_limit 控制每天出现次数；morning_evening 未指定时默认每天 2 次。"""
+    try:
+        item = reminder_store.create(
+            title=title,
+            content=content,
+            next_due_at=next_due_at,
+            start_at=start_at,
+            end_at=end_at,
+            repeat_rule=repeat_rule,
+            interval_rounds=interval_rounds,
+            cooldown_minutes=cooldown_minutes,
+            daily_limit=daily_limit if daily_limit >= 0 else None,
+            max_injections=max_injections,
+            channel=channel,
+            session_id=session_id,
+            source="mcp",
+        )
+    except ValueError as exc:
+        return {"error": str(exc)}
+    return {"status": "created", "reminder": _reminder_public_payload(item)}
+
+
+@mcp.tool()
+async def reminder_list(status: str = "active", limit: int = 20) -> dict:
+    """列出独立照顾备忘；status 可用 active/done/archived/all。"""
+    try:
+        items = reminder_store.list(status=status, limit=_int_between(limit, 20, 1, 100))
+    except ValueError as exc:
+        return {"error": str(exc), "reminders": []}
+    return {"count": len(items), "reminders": [_reminder_public_payload(item) for item in items]}
+
+
+@mcp.tool()
+async def reminder_update(
+    reminder_id: str,
+    status: str = "",
+    snooze_minutes: int = 0,
+    next_due_at: str = "",
+    title: str = "",
+    content: str = "",
+    daily_limit: int = -1,
+    max_injections: int = -1,
+) -> dict:
+    """更新独立照顾备忘；完成用 status="done"，稍后用 snooze_minutes。"""
+    reminder_id = _coerce_memory_id(reminder_id)
+    if not reminder_id:
+        return {"error": "missing reminder_id"}
+    try:
+        if snooze_minutes:
+            item = reminder_store.snooze(reminder_id, minutes=_int_between(snooze_minutes, 60, 1, 525600))
+        else:
+            item = reminder_store.update(
+                reminder_id,
+                status=status or None,
+                next_due_at=next_due_at if next_due_at != "" else None,
+                title=title if title != "" else None,
+                content=content if content != "" else None,
+                daily_limit=daily_limit if daily_limit >= 0 else None,
+                max_injections=max_injections if max_injections >= 0 else None,
+            )
+    except ValueError as exc:
+        return {"error": str(exc)}
+    if not item:
+        return {"error": "not found", "id": reminder_id}
+    return {"status": "updated", "reminder": _reminder_public_payload(item)}
+
+
+# =============================================================
 # Tool 1: breath — Breathe
 # 工具 1：breath — 呼吸
 #
@@ -6892,15 +7146,7 @@ async def breath(
         )
 
     if _is_pending_followup_domain(domain_key) or (not domain_key and _breath_query_requests_pending_followups(query)):
-        try:
-            all_buckets = await bucket_mgr.list_all(include_archive=False)
-            block = _format_pending_followups(all_buckets, limit=max_results, max_chars=220)
-            if not block:
-                return "没有找到未完成 followup。"
-            return _trim_text_to_token_budget("=== Pending Followups ===\n" + block, max_tokens)
-        except Exception as e:
-            logger.error("Pending followup retrieval failed / 待读 followup 失败: %s", e)
-            return "读取未完成 followup 失败。"
+        return "旧 followup/todo 派生待办已停用；请使用 reminder_list 或 /api/reminders 查看独立照顾备忘。"
 
     # --- Feel/whisper retrieval: independent read-only channels ---
     # --- Feel/whisper 检索：独立只读入口 ---
@@ -7201,8 +7447,9 @@ async def breath(
     except Exception as e:
         logger.warning(f"Vector search failed, using keyword only / 向量搜索失败: {e}")
 
+    explicit_lookup = _query_explicitly_requests_archive_memory(query)
     try:
-        all_buckets = await bucket_mgr.list_all(include_archive=False)
+        all_buckets = await bucket_mgr.list_all(include_archive=explicit_lookup)
     except Exception as e:
         logger.warning(f"Failed to list buckets for moment recall / moment 召回列桶失败: {e}")
         all_buckets = matches
@@ -7355,7 +7602,7 @@ async def breath(
         for bucket in all_buckets
         if bucket.get("id") and not is_self_anchor_bucket(bucket)
     }
-    _, grouped_moments, _ = await _refresh_moment_graph(all_buckets)
+    active_moments, grouped_moments, _ = await _refresh_moment_graph(all_buckets)
     bucket_boosts = seed_scores_for_buckets(matches)
     if word_map_hint_bucket_ids:
         moment_boost = float(_word_map_hint_settings()["moment_boost"])
@@ -7365,13 +7612,13 @@ async def breath(
             if sources and len(sources - {"word_map"}) > 0:
                 continue
             bucket_boosts[bucket_id] = max(0.0, min(1.0, float(hint_score) * moment_boost))
-    moment_candidates = memory_moment_store.search_moments(
+    moment_candidates = memory_moment_store.search_moment_items(
         search_query,
+        active_moments,
         limit=max(max_results, 20),
         bucket_boosts=bucket_boosts,
         exclude_sections=TASK_ONLY_MOMENT_SECTIONS,
     )
-    explicit_lookup = _query_explicitly_requests_archive_memory(query)
     moment_candidates = _direct_recallable_moments(moment_candidates, explicit_lookup=explicit_lookup)
     source_record_moments = _source_record_synthetic_moments_for_matches(matches, query)
     moment_candidates = _prepend_source_record_synthetic_moments(
@@ -7799,12 +8046,16 @@ async def comment_bucket(
     valence: float = -1,
     arousal: float = -1,
 ) -> dict:
-    """给已有 bucket 追加年轮/补充感受；会 touch，不改正文。kind=feel 时 content 只写第一人称感受，不写分段标题。"""
+    """给已有 bucket 追加年轮/补充感受；会 touch，不改正文。kind=feel 时 content 只能写“我……”第一人称正文，不写标题或任何 Markdown 分段。"""
     bucket_id = _coerce_memory_id(bucket_id)
     if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
         return {"error": "invalid bucket_id"}
     if not content or not content.strip():
         return {"error": "empty content"}
+    if str(kind or "").strip().lower() == "feel":
+        contract_error = _memory_write_contract_error(content, feel_only=True)
+        if contract_error:
+            return {"error": "invalid feel content", "reason": contract_error}
     if not await bucket_mgr.get(bucket_id):
         return {"error": "not found", "id": bucket_id}
 
@@ -7826,6 +8077,52 @@ async def comment_bucket(
         "status": "commented",
         "id": bucket_id,
         "comment": entry,
+        "embedding_refreshed": False,
+        "embedding_queued": embedding_queued,
+        "metadata": _bucket_read_payload(bucket)["metadata"] if bucket else {},
+    }
+
+
+# =============================================================
+# Tool 1.7: delete_bucket_comment — delete one AI-authored ring
+# 工具 1.7：delete_bucket_comment — 删除一条自己写的年轮
+# =============================================================
+@mcp.tool()
+async def delete_bucket_comment(bucket_id: str, comment_id: str) -> dict:
+    """删除自己通过 comment_bucket 写入的一条年轮；不会删除 bucket，也不会删除小雨/dashboard 写的年轮。"""
+    bucket_id = _coerce_memory_id(bucket_id)
+    comment_id = _coerce_memory_id(comment_id)
+    if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
+        return {"error": "invalid bucket_id"}
+    if not comment_id or not MEMORY_ID_RE.fullmatch(comment_id):
+        return {"error": "invalid comment_id"}
+    if not await bucket_mgr.get(bucket_id):
+        return {"error": "not found", "id": bucket_id}
+
+    result = await bucket_mgr.delete_comment(
+        bucket_id,
+        comment_id,
+        allowed_author=_ai_author_name(),
+        allowed_source="comment_bucket",
+    )
+    if result.get("status") == "not_found":
+        return {"error": "comment not found", "id": bucket_id, "comment_id": comment_id}
+    if result.get("status") == "forbidden":
+        return {
+            "error": "forbidden",
+            "reason": "only AI-authored comment_bucket year rings can be deleted",
+            "id": bucket_id,
+            "comment_id": comment_id,
+        }
+    if result.get("status") != "deleted":
+        return {"error": "delete failed", "id": bucket_id, "comment_id": comment_id}
+
+    embedding_queued = _queue_embedding_refresh(bucket_id)
+    bucket = await bucket_mgr.get(bucket_id)
+    return {
+        "status": "deleted",
+        "id": bucket_id,
+        "comment_id": comment_id,
         "embedding_refreshed": False,
         "embedding_queued": embedding_queued,
         "metadata": _bucket_read_payload(bucket)["metadata"] if bucket else {},
@@ -7949,12 +8246,16 @@ async def hold(
     date: str = "",
     domain: str = "",
 ) -> str:
-    """写一条长期记忆。单个事实/承诺/偏好用 hold；旧记忆的新感受用 comment_bucket；悄悄话用 whisper=True。date 可传事件日期；title 可选，传了就用给定标题，不传则自动生成。普通记忆不用填写 domain，系统会自动判断；维护自我锚点等特殊桶时可显式传 domain。显式 valence/arousal 会覆盖自动情绪。普通记忆 content 的最小写入就是正文；只有确实需要结构化时才按需使用 ### moment、### original、### reflection、### todo。### todo 只放明确可完成、可标 done、可写回的待办；“以后聊到 X 要想到 Y”这类回应提示放 ### reflection，不写 todo。feel=True/whisper=True 时 content 只写第一人称感受，不写分段标题。"""
+    """写一条长期记忆。单个事实/承诺/偏好用 hold；旧记忆的新感受用 comment_bucket；悄悄话用 whisper=True。date 可传事件日期；title 可选，传了就用给定标题，不传则自动生成。普通记忆不用填写 domain，系统会自动判断；维护自我锚点等特殊桶时可显式传 domain。显式 valence/arousal 会覆盖自动情绪。普通记忆 content 的最小写入就是正文；只有确实需要结构化时才按需使用 ### moment、### original、### reflection；reflection 必须写成“我……”第一人称。不要写 ### affect_anchor、### followup 或 ### todo：长期回应变化写进 reflection，到时提醒用 reminder_create。feel=True/whisper=True 时 content 只能写第一人称正文，不写标题或任何 Markdown 分段。"""
     await decay_engine.ensure_started()
 
     # --- Input validation / 输入校验 ---
     if not content or not content.strip():
         return "内容为空，无法存储。"
+
+    contract_error = _memory_write_contract_error(content, feel_only=bool(feel or whisper))
+    if contract_error:
+        return f"写入被拒绝：{contract_error}"
 
     importance = max(1, min(10, importance))
     extra_tags = [t.strip() for t in tags.split(",") if t.strip()]
@@ -8136,6 +8437,17 @@ async def darkroom_rooms(limit: int = 20, visibility: str = "active") -> dict:
 
 
 @mcp.tool()
+async def darkroom_delete(room_id: str, confirm: str = "") -> dict:
+    """从暗房主存储删除一整间房及全部 revisions；必须传精确 room_id 和 confirm="DELETE"，并保留本地私密备份。"""
+    try:
+        return darkroom_store.delete_room(room_id, confirm=confirm)
+    except ValueError as exc:
+        return {"status": "error", "error": str(exc), "room_id": str(room_id or "")}
+    except KeyError:
+        return {"status": "not_found", "error": "room not found", "room_id": str(room_id or "")}
+
+
+@mcp.tool()
 async def darkroom_view(entry_id: str = "latest") -> dict:
     """只读查看一条已解锁的暗房内容；未到锁门时间不返回正文。"""
     try:
@@ -8193,6 +8505,9 @@ def _looks_like_operit_auto_grow_content(content: str) -> bool:
 
 
 async def _grow_direct_structured_content(content: str, title: str = "", gate_prefix: str = "") -> str:
+    contract_error = _memory_write_contract_error(content)
+    if contract_error:
+        return f"{gate_prefix}写入被拒绝：{contract_error}"
     direct_content = str(content or "").strip()
     try:
         analysis = await dehydrator.analyze(direct_content)
@@ -8245,7 +8560,7 @@ async def _grow_direct_structured_content(content: str, title: str = "", gate_pr
 
 @mcp.tool()
 async def grow(content: str, auto: bool = False, source: str = "", title: str = "", context: Context | None = None) -> str:
-    """把筛过的长片段拆成少量长期记忆；单条事实/承诺/偏好优先 hold，旧记忆补感受优先 comment_bucket。只有多个已筛选长期记忆点才用 grow，别塞整段流水账。保留原文称呼、昵称、互称、自称和原话，不要把临时称呼推成稳定画像事实。title 可选，短内容时传了就用你给的标题。普通记忆 content 的最小写入就是正文；只有确实需要结构化时才按需使用 ### moment、### original、### reflection、### todo。### todo 只放明确可完成、可标 done、可写回的待办；“以后聊到 X 要想到 Y”这类回应提示放 ### reflection，不写 todo。feel 年轮只写第一人称感受，不写分段标题。"""
+    """把筛过的长片段拆成少量长期记忆；单条事实/承诺/偏好优先 hold，旧记忆补感受优先 comment_bucket。只有多个已筛选长期记忆点才用 grow，别塞整段流水账。保留原文称呼、昵称、互称、自称和原话，不要把临时称呼推成稳定画像事实。title 可选，短内容时传了就用你给的标题。普通记忆 content 的最小写入就是正文；只有确实需要结构化时才按需使用 ### moment、### original、### reflection；reflection 必须写成“我……”第一人称。不要写 ### affect_anchor、### followup 或 ### todo：长期回应变化写进 reflection，到时提醒用 reminder_create。feel 年轮只写第一人称正文，不写标题或任何 Markdown 分段。"""
     await decay_engine.ensure_started()
 
     if not content or not content.strip():
@@ -8339,6 +8654,10 @@ async def grow(content: str, auto: bool = False, source: str = "", title: str = 
         try:
             item_tags = item.get("tags", [])
             item_content = _normalize_memory_sections_for_write(item.get("content", ""))
+            contract_error = _memory_write_contract_error(item_content)
+            if contract_error:
+                results.append(f"⚠️{item.get('name', '未命名')}: {contract_error}")
+                continue
             item_content = await _auto_generate_write_moment_if_needed(
                 item_content,
                 item_tags,
@@ -8399,10 +8718,9 @@ async def profile_fact(
     evidence_moment_id: str = "",
     evidence_context: str = "",
     reflection: str = "",
-    followup: str = "",
     confidence: float = 0.9,
 ) -> str:
-    """手动写入一条画像事实，并强制关联证据桶。先有事件桶，再用这个工具固化稳定偏好/事实。"""
+    """手动写入一条画像事实，并强制关联证据桶。先有事件桶，再用这个工具固化稳定偏好/事实。reflection 可选，但必须写成“我……”第一人称；不要写 followup。"""
     fact = str(fact or "").strip()
     evidence_bucket_id = str(evidence_bucket_id or "").strip()
     if not fact:
@@ -8431,11 +8749,12 @@ async def profile_fact(
     predicate_key = _profile_key(predicate, "")
     object_text = str(object_value or "").strip()
     confidence = _float_between(confidence, 0.9, 0.0, 1.0)
+    if str(reflection or "").strip() and not _uses_first_person_voice(reflection):
+        return "写入被拒绝：reflection 必须用模型第一人称写，用“我记得 / 我明白 / 我以后 / 我会”等表达。"
     body = _profile_fact_body(
         fact=fact,
         evidence_context=evidence_context,
         reflection=reflection,
-        followup=followup,
     )
     tags = ["profile_fact", f"profile_{kind}"]
     if predicate_key:
@@ -9036,7 +9355,7 @@ async def dream() -> str:
 # 工具 6：reflect — 生成日印象
 # =============================================================
 async def reflect(period: str = "daily", force: bool = False) -> dict:
-    """生成 daily relationship_weather 类型的 feel,记录当天关系天气,正文会带 affect_anchor 和弦。weekly 默认关闭,需 reflection.weekly_enabled=true 才会生成; force=True 会重写同周期结果。它不会替代 hold/grow 写具体 bucket。"""
+    """生成 daily relationship_weather 类型的 feel，content 只写“我……”第一人称正文，不带 Markdown section。weekly 默认关闭，需 reflection.weekly_enabled=true 才会生成；force=True 会重写同周期结果。它不会替代 hold/grow 写具体 bucket。"""
     await decay_engine.ensure_started()
     return await reflection_engine.reflect(
         period=period,
@@ -9048,13 +9367,15 @@ async def reflect(period: str = "daily", force: bool = False) -> dict:
     )
 
 
-async def portrait_maintain(force: bool = False) -> dict:
+async def portrait_maintain(force: bool = False, scope: str = "") -> dict:
     """维护每日 portrait state。只写 state/portrait_state.json，不写 profile_fact、anchor、pinned、protected 或 Core Memory。"""
     await decay_engine.ensure_started()
+    force_scopes = [str(scope or "").strip()] if str(scope or "").strip() else []
     return await portrait_engine.maintain_daily(
         bucket_mgr,
         persona_engine,
         force=force,
+        force_scopes=force_scopes,
     )
 
 
@@ -9079,20 +9400,47 @@ async def _self_anchor_entry_payload() -> dict:
 
 
 async def _portrait_state_payload() -> dict:
+    evidence_health = {}
+    if hasattr(portrait_engine, "reconcile_evidence"):
+        evidence_health = await portrait_engine.reconcile_evidence(bucket_mgr)
     state = portrait_engine.load_state()
+    handoff_sections = {}
+    if hasattr(portrait_engine, "build_handoff_sections"):
+        try:
+            handoff_sections = portrait_engine.build_handoff_sections(max_recent_items=3)
+        except Exception as exc:
+            logger.warning("Portrait handoff preview failed: %s", exc)
     return {
         "state_path": getattr(portrait_engine, "state_path", ""),
         "enabled": bool(getattr(portrait_engine, "enabled", True)),
         "auto_enabled": bool(getattr(portrait_engine, "auto_enabled", True)),
         "auto_initial_enabled": bool(getattr(portrait_engine, "auto_initial_enabled", False)),
         "daily_enabled": bool(getattr(portrait_engine, "daily_enabled", True)),
+        "generator_ready": bool(getattr(portrait_engine, "client", None)),
+        "generator_model": str(getattr(portrait_engine, "model", "") or ""),
+        "generator_source": str(getattr(portrait_engine, "model_source", "dehydration") or "dehydration"),
         "updated_at": state.get("updated_at", ""),
         "last_run_date": state.get("last_run_date", ""),
         "portrait": state.get("portrait", {}),
         "recent_activities": state.get("recent_activities", []),
         "recent_timeline": state.get("recent_timeline", []),
+        "current_focus_items": (
+            portrait_engine.current_focus_items(max_items=8)
+            if hasattr(portrait_engine, "current_focus_items")
+            else state.get("recent_activities", [])
+        ),
+        "current_focus": str(handoff_sections.get("current_focus") or ""),
         "stable_candidates": state.get("stable_candidates", []),
         "profile_fact_candidates": state.get("profile_fact_candidates", []),
+        "generation_status": (
+            {
+                scope: portrait_engine.scope_generation_status(scope)
+                for scope in ("user", "persona", "relationship")
+            }
+            if hasattr(portrait_engine, "scope_generation_status")
+            else {}
+        ),
+        "evidence_health": evidence_health,
         "self_anchor_entry": await _self_anchor_entry_payload(),
     }
 
@@ -9353,12 +9701,22 @@ async def api_portrait_maintain(request):
         body = {}
     try:
         await decay_engine.ensure_started()
+        scope = str(body.get("scope") or "").strip()
+        if scope and scope not in {"user", "persona", "relationship"}:
+            return JSONResponse({"error": "invalid scope"}, status_code=400)
+        force = _bool_value(body.get("force"), False)
+        maintain_kwargs = {"force": force}
+        if scope:
+            maintain_kwargs["force_scopes"] = [scope]
+        elif force:
+            maintain_kwargs["force_scopes"] = ["user", "persona", "relationship"]
         result = await portrait_engine.maintain_daily(
             bucket_mgr,
             persona_engine,
-            force=_bool_value(body.get("force"), False),
+            **maintain_kwargs,
         )
-        return JSONResponse(result)
+        status_code = 409 if result.get("status") == "blocked" else 200
+        return JSONResponse(result, status_code=status_code)
     except Exception as e:
         logger.warning("Portrait maintain API failed: %s", e)
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -9400,6 +9758,166 @@ async def api_portrait_state_item_delete(request):
     if status == "conflict":
         return JSONResponse(result, status_code=409)
     return JSONResponse(result, status_code=400)
+
+
+@mcp.custom_route("/api/portrait-state/items", methods=["POST"])
+async def api_portrait_state_item_add(request):
+    """Add one manual Current Focus item."""
+    from starlette.responses import JSONResponse
+
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+    if str(body.get("area") or "") != "recent_activities":
+        return JSONResponse({"error": "only recent_activities can be added manually"}, status_code=400)
+    result = portrait_engine.add_recent_activity(
+        str(body.get("text") or ""),
+        source_date=str(body.get("source_date") or ""),
+    )
+    return _portrait_mutation_response(result)
+
+
+@mcp.custom_route("/api/portrait-state/items", methods=["PUT"])
+async def api_portrait_state_item_edit(request):
+    """Edit one Current Focus or portrait generation-evidence row."""
+    from starlette.responses import JSONResponse
+
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+    raw_index = body.get("index")
+    try:
+        index = int(raw_index) if raw_index is not None and str(raw_index) != "" else None
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "index must be an integer"}, status_code=400)
+    result = portrait_engine.edit_state_item(
+        area=str(body.get("area") or ""),
+        scope=str(body.get("scope") or ""),
+        layer=str(body.get("layer") or ""),
+        index=index,
+        text=str(body.get("text") or ""),
+        expected_text=str(body.get("expected_text") or ""),
+    )
+    return _portrait_mutation_response(result)
+
+
+def _portrait_mutation_response(result: dict):
+    from starlette.responses import JSONResponse
+
+    status = str(result.get("status") or "")
+    if status in {"updated", "unchanged"}:
+        return JSONResponse(result)
+    if status == "conflict":
+        return JSONResponse(result, status_code=409)
+    if status == "not_found":
+        return JSONResponse(result, status_code=404)
+    return JSONResponse(result, status_code=400)
+
+
+def _portrait_expected_revision(body: dict) -> int | None:
+    raw = body.get("expected_revision")
+    if raw is None or str(raw).strip() == "":
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+@mcp.custom_route("/api/portrait-state/stable", methods=["PUT"])
+async def api_portrait_stable_edit(request):
+    """Manually replace one stable portrait paragraph with optimistic locking."""
+    from starlette.responses import JSONResponse
+
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+    expected_revision = _portrait_expected_revision(body)
+    if expected_revision is None:
+        return JSONResponse({"error": "expected_revision is required"}, status_code=400)
+    locked = _bool_value(body.get("locked"), False) if "locked" in body else None
+    result = portrait_engine.edit_stable(
+        scope=str(body.get("scope") or ""),
+        text=str(body.get("text") or ""),
+        expected_revision=expected_revision,
+        locked=locked,
+    )
+    return _portrait_mutation_response(result)
+
+
+@mcp.custom_route("/api/portrait-state/stable/lock", methods=["POST"])
+async def api_portrait_stable_lock(request):
+    """Lock or unlock one stable portrait paragraph."""
+    from starlette.responses import JSONResponse
+
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+    expected_revision = _portrait_expected_revision(body)
+    if expected_revision is None or "locked" not in body:
+        return JSONResponse({"error": "expected_revision and locked are required"}, status_code=400)
+    result = portrait_engine.set_stable_lock(
+        scope=str(body.get("scope") or ""),
+        locked=_bool_value(body.get("locked"), False),
+        expected_revision=expected_revision,
+    )
+    return _portrait_mutation_response(result)
+
+
+@mcp.custom_route("/api/portrait-state/stable/rollback", methods=["POST"])
+async def api_portrait_stable_rollback(request):
+    """Restore one stable portrait history revision without discarding newer history."""
+    from starlette.responses import JSONResponse
+
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+    expected_revision = _portrait_expected_revision(body)
+    try:
+        target_revision = int(body.get("target_revision"))
+    except (TypeError, ValueError):
+        target_revision = None
+    if expected_revision is None or target_revision is None:
+        return JSONResponse(
+            {"error": "expected_revision and target_revision are required"},
+            status_code=400,
+        )
+    result = portrait_engine.rollback_stable(
+        scope=str(body.get("scope") or ""),
+        target_revision=target_revision,
+        expected_revision=expected_revision,
+    )
+    return _portrait_mutation_response(result)
 
 
 @mcp.custom_route("/api/portrait-state/reset", methods=["POST"])
@@ -9690,7 +10208,6 @@ async def api_profile_fact_proposal_confirm(request):
         evidence_moment_id=proposal["evidence_moment_id"],
         evidence_context=proposal["reason"],
         reflection="",
-        followup="",
         confidence=proposal["confidence"],
     )
     if not result.startswith("profile_fact→"):
@@ -10208,66 +10725,167 @@ async def api_moments(request):
 
 @mcp.custom_route("/api/todos", methods=["GET"])
 async def api_todos(request):
-    """List derived followup/todo items."""
+    """Deprecated: derived followup/todo items are disabled."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    return JSONResponse(
+        {
+            "count": 0,
+            "todos": [],
+            "disabled": True,
+            "message": "Derived followup/todo items are disabled. Use /api/reminders instead.",
+        }
+    )
+
+
+@mcp.custom_route("/api/todos/{todo_id}", methods=["PATCH"])
+async def api_todo_update(request):
+    """Deprecated: derived followup/todo items are disabled."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    return JSONResponse(
+        {"error": "derived followup/todo items are disabled; use /api/reminders instead"},
+        status_code=410,
+    )
+
+
+@mcp.custom_route("/api/todos/{todo_id}/writeback", methods=["POST"])
+async def api_todo_writeback(request):
+    """Deprecated: todo writeback is disabled."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    return JSONResponse(
+        {"error": "todo writeback is disabled; use /api/reminders instead"},
+        status_code=410,
+    )
+
+
+@mcp.custom_route("/api/reminders", methods=["GET"])
+async def api_reminders(request):
+    """List standalone care memos."""
     from starlette.responses import JSONResponse
     err = _require_dashboard_auth(request)
     if err:
         return err
     try:
-        await _sync_todos_from_buckets(include_archive=False)
-        status = str(request.query_params.get("status", "open") or "open").strip().lower()
+        status = str(request.query_params.get("status", "active") or "active").strip().lower()
         limit = _int_between(request.query_params.get("limit"), 50, 1, 200)
-        items = todo_store.list(status=status, limit=limit, include_inactive=status == "all")
-        return JSONResponse({"count": len(items), "todos": items})
+        items = reminder_store.list(status=status, limit=limit)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+    return JSONResponse({"count": len(items), "reminders": [_reminder_public_payload(item) for item in items]})
 
 
-@mcp.custom_route("/api/todos/{todo_id}", methods=["PATCH"])
-async def api_todo_update(request):
-    """Update one derived todo status. Marking done does not edit the bucket."""
+@mcp.custom_route("/api/reminders", methods=["POST"])
+async def api_reminder_create(request):
+    """Create a standalone care memo without touching memory buckets."""
     from starlette.responses import JSONResponse
     err = _require_dashboard_auth(request)
     if err:
         return err
-    todo_id = str(request.path_params.get("todo_id") or "").strip()
-    if not todo_id:
-        return JSONResponse({"error": "missing todo_id"}, status_code=400)
     try:
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "invalid json body"}, status_code=400)
     if not isinstance(body, dict):
         return JSONResponse({"error": "json body must be an object"}, status_code=400)
-    status = str(body.get("status") or "").strip().lower()
     try:
-        todo = todo_store.set_status(todo_id, status)
-    except ValueError:
-        return JSONResponse({"error": "status must be open, done, or ignored"}, status_code=400)
-    if not todo:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    return JSONResponse({"status": "updated", "todo": todo})
+        item = reminder_store.create(
+            title=str(body.get("title") or ""),
+            content=str(body.get("content") or body.get("text") or ""),
+            next_due_at=str(body.get("next_due_at") or ""),
+            start_at=str(body.get("start_at") or ""),
+            end_at=str(body.get("end_at") or ""),
+            repeat_rule=str(body.get("repeat_rule") or "every_n_rounds"),
+            interval_rounds=_int_between(body.get("interval_rounds"), 6, 0, 100000),
+            cooldown_minutes=_int_between(body.get("cooldown_minutes"), 0, 0, 525600),
+            daily_limit=_int_between(body.get("daily_limit"), 1, 0, 100)
+            if "daily_limit" in body
+            else None,
+            max_injections=_int_between(body.get("max_injections"), 0, 0, 100000),
+            channel=str(body.get("channel") or "global"),
+            session_id=str(body.get("session_id") or ""),
+            source=str(body.get("source") or "dashboard"),
+        )
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    return JSONResponse({"status": "created", "reminder": _reminder_public_payload(item)})
 
 
-@mcp.custom_route("/api/todos/{todo_id}/writeback", methods=["POST"])
-async def api_todo_writeback(request):
-    """Archive a completed todo back into the source bucket followup_log."""
+@mcp.custom_route("/api/reminders/{reminder_id}", methods=["PATCH"])
+async def api_reminder_update(request):
+    """Update one standalone reminder. Snooze keeps it active and moves next_due_at."""
     from starlette.responses import JSONResponse
     err = _require_dashboard_auth(request)
     if err:
         return err
-    todo_id = str(request.path_params.get("todo_id") or "").strip()
-    if not todo_id:
-        return JSONResponse({"error": "missing todo_id"}, status_code=400)
-    result = await _writeback_completed_todo(todo_id)
-    status = result.get("status")
-    if status == "not_found":
-        return JSONResponse(result, status_code=404)
-    if status == "failed":
-        return JSONResponse(result, status_code=500)
-    if status == "skipped":
-        return JSONResponse(result, status_code=400)
-    return JSONResponse(result)
+    reminder_id = str(request.path_params.get("reminder_id") or "").strip()
+    if not reminder_id:
+        return JSONResponse({"error": "missing reminder_id"}, status_code=400)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+    try:
+        if body.get("mark_reminded"):
+            item = reminder_store.mark_reminded(
+                reminder_id,
+                round_id=_int_between(body.get("round_id"), 0, 0, 100000000),
+            )
+        elif body.get("snooze_minutes"):
+            item = reminder_store.snooze(
+                reminder_id,
+                minutes=_int_between(body.get("snooze_minutes"), 60, 1, 525600),
+            )
+        else:
+            content_value = None
+            if "content" in body:
+                content_value = body.get("content")
+            elif "text" in body:
+                content_value = body.get("text")
+            item = reminder_store.update(
+                reminder_id,
+                title=body.get("title") if "title" in body else None,
+                content=content_value,
+                status=body.get("status") if "status" in body else None,
+                channel=body.get("channel") if "channel" in body else None,
+                session_id=body.get("session_id") if "session_id" in body else None,
+                start_at=body.get("start_at") if "start_at" in body else None,
+                end_at=body.get("end_at") if "end_at" in body else None,
+                next_due_at=body.get("next_due_at") if "next_due_at" in body else None,
+                repeat_rule=body.get("repeat_rule") if "repeat_rule" in body else None,
+                interval_rounds=_int_between(body.get("interval_rounds"), 0, 0, 100000)
+                if "interval_rounds" in body
+                else None,
+                cooldown_minutes=_int_between(body.get("cooldown_minutes"), 0, 0, 525600)
+                if "cooldown_minutes" in body
+                else None,
+                daily_limit=_int_between(body.get("daily_limit"), 1, 0, 100)
+                if "daily_limit" in body
+                else None,
+                max_injections=_int_between(body.get("max_injections"), 0, 0, 100000)
+                if "max_injections" in body
+                else None,
+            )
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    if not item:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({"status": "updated", "reminder": _reminder_public_payload(item)})
 
 
 @mcp.custom_route("/api/bucket/{bucket_id}", methods=["PATCH"])
@@ -10388,7 +11006,12 @@ async def api_search(request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
-def _raw_ingest_events_from_body(body: dict) -> list[dict]:
+def _raw_ingest_events_from_body(
+    body: dict,
+    *,
+    default_session_id: str = "",
+    default_conversation_id: str = "",
+) -> list[dict]:
     if not isinstance(body, dict):
         return []
     if isinstance(body.get("events"), list):
@@ -10400,10 +11023,12 @@ def _raw_ingest_events_from_body(body: dict) -> list[dict]:
     else:
         events = []
 
+    fallback_session_id = str(default_session_id or "").strip()
+    fallback_conversation_id = str(default_conversation_id or "").strip() or fallback_session_id
     common = {
         "source": body.get("source"),
-        "conversation_id": body.get("conversation_id"),
-        "session_id": body.get("session_id"),
+        "conversation_id": body.get("conversation_id") or fallback_conversation_id,
+        "session_id": body.get("session_id") or fallback_session_id,
         "client": body.get("client"),
     }
     for event in events:
@@ -10417,7 +11042,7 @@ def _raw_ingest_events_from_body(body: dict) -> list[dict]:
 async def api_ingest_raw(request):
     """Ingest user/assistant raw dialogue events. Does not accept tools, system prompts, or memory injections."""
     from starlette.responses import JSONResponse
-    err = _require_dashboard_auth(request)
+    err = _require_raw_api_auth(request)
     if err:
         return err
     try:
@@ -10427,7 +11052,12 @@ async def api_ingest_raw(request):
     if not isinstance(body, dict):
         return JSONResponse({"error": "request body must be an object"}, status_code=400)
 
-    events = _raw_ingest_events_from_body(body)
+    header_session_id = str(request.headers.get("X-Ombre-Session-Id") or "").strip()
+    events = _raw_ingest_events_from_body(
+        body,
+        default_session_id=header_session_id,
+        default_conversation_id=header_session_id,
+    )
     if not events:
         return JSONResponse({"error": "missing events"}, status_code=400)
 
@@ -10443,7 +11073,7 @@ async def api_ingest_raw(request):
 async def api_search_raw(request):
     """Search raw dialogue events as a fallback archive. Returns only stored user/assistant originals."""
     from starlette.responses import JSONResponse
-    err = _require_dashboard_auth(request)
+    err = _require_raw_api_auth(request)
     if err:
         return err
 
@@ -10826,9 +11456,108 @@ async def api_daily_chat_memory_run(request):
             mode=str(body.get("mode") or ""),
             force=_bool_value(body.get("force"), False),
         )
+        try:
+            activity_date = str(body.get("date") or result.get("date") or "")
+            daily_impression = await _daily_impression_material_for_date(activity_date)
+            activity_result = await reflection_engine.run_daily_activity_summary(
+                conversation_turn_store=gateway_state_store,
+                raw_event_store=raw_event_store,
+                persona_engine=persona_engine,
+                daily_chat_memory_candidates=[
+                    item for item in (result.get("candidates") or []) if isinstance(item, dict)
+                ],
+                daily_impressions=[daily_impression] if daily_impression else [],
+                key=str(body.get("date") or ""),
+                force=_bool_value(body.get("force"), False),
+            )
+            result["daily_activity_summary"] = _store_daily_activity_summary_result(activity_result)
+        except Exception as activity_exc:
+            logger.warning("Daily activity summary side-run failed: %s", activity_exc)
+            result["daily_activity_summary"] = {"status": "error", "error": str(activity_exc)}
         return JSONResponse(result)
     except Exception as e:
         logger.warning("Daily chat memory API failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+def _store_daily_activity_summary_result(result: dict, portrait_engine_arg=None) -> dict:
+    if not isinstance(result, dict):
+        return {"status": "invalid", "reason": "result_not_object"}
+    if result.get("status") != "ready":
+        return result
+    item = result.get("activity_summary") if isinstance(result.get("activity_summary"), dict) else {}
+    if not item:
+        return {**result, "status": "skipped", "reason": "empty_activity_summary"}
+    engine = portrait_engine_arg or portrait_engine
+    date_key = str(result.get("date") or item.get("source_date") or "").strip()
+    try:
+        stored = engine.upsert_recent_timeline_item(item, date_key)
+    except Exception as exc:
+        logger.warning("Daily activity summary portrait upsert failed: %s", exc)
+        return {**result, "status": "error", "error": str(exc)}
+    return {**result, "status": "stored", "portrait": stored}
+
+
+def _daily_activity_materials_from_reflection_results(results: list[dict]) -> tuple[list[dict], list[dict]]:
+    candidates: list[dict] = []
+    daily_impressions: list[dict] = []
+    for result in results or []:
+        if not isinstance(result, dict):
+            continue
+        candidates.extend(item for item in (result.get("candidates") or []) if isinstance(item, dict))
+        daily_impression = result.get("daily_impression")
+        if isinstance(daily_impression, dict):
+            daily_impressions.append(daily_impression)
+    return candidates, daily_impressions
+
+
+async def _daily_impression_material_for_date(date_key: str, bucket_mgr_arg=None) -> dict:
+    safe_date = _date_key(date_key)
+    if not safe_date:
+        return {}
+    manager = bucket_mgr_arg or bucket_mgr
+    try:
+        bucket = await manager.get(f"reflection_daily_{safe_date}")
+    except Exception:
+        bucket = None
+    if not bucket:
+        return {}
+    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    return {
+        "id": bucket.get("id") or f"reflection_daily_{safe_date}",
+        "content": bucket.get("content") or "",
+        "confidence": meta.get("confidence", 0.7),
+        "date": safe_date,
+    }
+
+
+@mcp.custom_route("/api/daily-activity-summary/run", methods=["POST"])
+async def api_daily_activity_summary_run(request):
+    """Summarize what happened that day into portrait recent_timeline."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    try:
+        activity_date = str(body.get("date") or "")
+        daily_impression = await _daily_impression_material_for_date(activity_date)
+        result = await reflection_engine.run_daily_activity_summary(
+            conversation_turn_store=gateway_state_store,
+            raw_event_store=raw_event_store,
+            persona_engine=persona_engine,
+            daily_impressions=[daily_impression] if daily_impression else [],
+            key=str(body.get("date") or ""),
+            force=_bool_value(body.get("force"), False),
+        )
+        return JSONResponse(_store_daily_activity_summary_result(result))
+    except Exception as e:
+        logger.warning("Daily activity summary API failed: %s", e)
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
@@ -10872,6 +11601,7 @@ async def api_daily_chat_memory_confirm(request):
         bucket_mgr,
         embedding_engine=embedding_engine,
         action=action,
+        edits=body.get("edits") if isinstance(body.get("edits"), dict) else None,
     )
     return JSONResponse(result)
 
@@ -10948,6 +11678,19 @@ async def api_dreams(request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@mcp.custom_route("/api/dreams/{dream_id}", methods=["GET"])
+async def api_dream_detail(request):
+    """Return one retained dream body for an authenticated dashboard reader."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    record = dream_engine.dashboard_record(request.path_params.get("dream_id", ""))
+    if not record:
+        return JSONResponse({"error": "dream body unavailable"}, status_code=404)
+    return JSONResponse(record)
+
+
 @mcp.custom_route("/api/config", methods=["GET"])
 async def api_config_get(request):
     """Get current runtime config (safe fields only, API key masked)."""
@@ -10970,12 +11713,16 @@ async def api_config_get(request):
     reflection_cfg = config.get("reflection", {}) if isinstance(config.get("reflection", {}), dict) else {}
     portrait_cfg = config.get("portrait", {}) if isinstance(config.get("portrait", {}), dict) else {}
     self_anchor_cfg = config.get("self_anchor", {}) if isinstance(config.get("self_anchor", {}), dict) else {}
+    domain_sentinel_configured_model = str(gateway_cfg.get("domain_sentinel_model") or "").strip()
+    domain_sentinel_effective_model = domain_sentinel_configured_model or str(dehy.get("model") or "").strip()
     domain_sentinel_base_url = str(
-        gateway_cfg.get("domain_sentinel_base_url") or emb.get("base_url") or ""
+        gateway_cfg.get("domain_sentinel_base_url") or dehy.get("base_url") or emb.get("base_url") or ""
     ).strip()
     domain_sentinel_api_key = str(
         os.environ.get("OMBRE_DOMAIN_SENTINEL_API_KEY", "")
         or gateway_cfg.get("domain_sentinel_api_key", "")
+        or dehy.get("api_key", "")
+        or os.environ.get("OMBRE_API_KEY", "")
         or os.environ.get("OMBRE_EMBEDDING_API_KEY", "")
         or emb.get("api_key", "")
         or ""
@@ -11034,11 +11781,9 @@ async def api_config_get(request):
             "recalled_memory_budget": gateway_cfg.get("recalled_memory_budget", 400),
             "related_memory_budget": gateway_cfg.get("related_memory_budget", 220),
             "memory_sentinel_enabled": _bool_value(gateway_cfg.get("memory_sentinel_enabled"), True),
-            "memory_sentinel_llm_enabled": _bool_value(gateway_cfg.get("memory_sentinel_llm_enabled"), True),
-            "memory_sentinel_model": gateway_cfg.get("memory_sentinel_model", ""),
-            "memory_sentinel_context_turns": gateway_cfg.get("memory_sentinel_context_turns", 3),
             "domain_sentinel_enabled": _bool_value(gateway_cfg.get("domain_sentinel_enabled"), True),
-            "domain_sentinel_model": gateway_cfg.get("domain_sentinel_model") or "Qwen/Qwen3-8B",
+            "domain_sentinel_model": domain_sentinel_configured_model,
+            "domain_sentinel_effective_model": domain_sentinel_effective_model,
             "domain_sentinel_base_url": str(gateway_cfg.get("domain_sentinel_base_url") or ""),
             "domain_sentinel_effective_base_url": domain_sentinel_base_url,
             "domain_sentinel_api_key_masked": _mask_key(domain_sentinel_api_key),
@@ -11110,7 +11855,7 @@ async def api_config_get(request):
             "auto_enabled": dream_engine.auto_enabled,
             "surface_enabled": dream_engine.surface_enabled,
             "inject_enabled": _bool_value(dream_cfg.get("inject_enabled"), False),
-            "retain_after_inject": _bool_value(dream_cfg.get("retain_after_inject"), False),
+            "retain_after_inject": _bool_value(dream_cfg.get("retain_after_inject"), True),
             "model": dream_engine.model,
             "base_url": dream_engine.base_url,
             "api_key_masked": _mask_key(dream_engine.api_key),
@@ -11122,6 +11867,9 @@ async def api_config_get(request):
             "daily_probability": dream_cfg.get("daily_probability", 0.4),
             "min_material_count": dream_cfg.get("min_material_count", 5),
             "material_window_hours": dream_cfg.get("material_window_hours", 48),
+            "raw_residue_enabled": _bool_value(dream_cfg.get("raw_residue_enabled"), False),
+            "raw_residue_turns": int(dream_cfg.get("raw_residue_turns", 4)),
+            "raw_residue_max_chars": int(dream_cfg.get("raw_residue_max_chars", 1500)),
             "identity_anchor_id": dream_cfg.get("identity_anchor_id", ""),
         },
         "reflection": {
@@ -11164,15 +11912,33 @@ async def api_config_get(request):
             "daily_conversation_turn_limit": int(
                 reflection_cfg.get(
                     "daily_conversation_turn_limit",
-                    getattr(reflection_engine, "daily_conversation_turn_limit", 0),
+                    getattr(reflection_engine, "daily_conversation_turn_limit", 12),
+                )
+            ),
+            "daily_activity_summary_enabled": bool(
+                reflection_cfg.get(
+                    "daily_activity_summary_enabled",
+                    getattr(reflection_engine, "daily_activity_summary_enabled", True),
+                )
+            ),
+            "daily_activity_summary_turn_limit": int(
+                reflection_cfg.get(
+                    "daily_activity_summary_turn_limit",
+                    getattr(reflection_engine, "daily_activity_summary_turn_limit", 0),
+                )
+            ),
+            "daily_activity_summary_max_tokens": int(
+                reflection_cfg.get(
+                    "daily_activity_summary_max_tokens",
+                    getattr(reflection_engine, "daily_activity_summary_max_tokens", 320),
                 )
             ),
             "daily_chat_memory_mode": str(
                 reflection_cfg.get(
                     "daily_chat_memory_mode",
-                    getattr(reflection_engine, "daily_chat_memory_mode", "auto"),
+                    getattr(reflection_engine, "daily_chat_memory_mode", "review"),
                 )
-                or "auto"
+                or "review"
             ),
             "daily_chat_memory_hour": int(
                 reflection_cfg.get(
@@ -11227,6 +11993,14 @@ async def api_config_get(request):
             "persona_events_limit": portrait_cfg.get(
                 "persona_events_limit",
                 getattr(portrait_engine, "persona_events_limit", 24),
+            ),
+            "user_rewrite_evidence_delta": portrait_cfg.get(
+                "user_rewrite_evidence_delta",
+                getattr(portrait_engine, "user_rewrite_evidence_delta", 10),
+            ),
+            "manual_suppress_days": portrait_cfg.get(
+                "manual_suppress_days",
+                getattr(portrait_engine, "manual_suppress_days", 14),
             ),
         },
         "merge_threshold": config.get("merge_threshold", 90),
@@ -11285,11 +12059,13 @@ async def api_config_update(request):
             sanitized["chain_max_frontier"] = _int_between(payload.get("chain_max_frontier"), 24, 1, 200)
         return sanitized
 
+    gateway_hot_update_payload = {}
+
     # --- Dehydration config ---
     if "dehydration" in body:
         d = body["dehydration"]
         dehy = config.setdefault("dehydration", {})
-        for key in ("model", "base_url", "max_tokens", "temperature"):
+        for key in ("model", "base_url", "max_tokens", "temperature", "thinking_mode"):
             if key in d:
                 dehy[key] = d[key]
                 updated.append(f"dehydration.{key}")
@@ -11301,12 +12077,30 @@ async def api_config_update(request):
         dehydrator.model = dehy.get("model", "deepseek-chat")
         dehydrator.base_url = dehy.get("base_url", "")
         dehydrator.api_key = dehy.get("api_key", "")
+        normalize_thinking = getattr(dehydrator, "_normalize_thinking_mode", None)
+        if callable(normalize_thinking):
+            dehydrator.thinking_mode = normalize_thinking(dehy.get("thinking_mode", ""))
+        else:
+            dehydrator.thinking_mode = str(dehy.get("thinking_mode") or "").strip()
+        dehydrator.max_tokens = dehy.get("max_tokens", 1024)
+        dehydrator.temperature = dehy.get("temperature", 0.1)
+        dehydrator.api_available = bool(dehydrator.api_key)
         if hasattr(dehydrator, "client") and dehydrator.api_key:
             from openai import AsyncOpenAI
             dehydrator.client = AsyncOpenAI(
                 api_key=dehydrator.api_key,
                 base_url=dehydrator.base_url,
             )
+        gateway_hot_update_payload["dehydration"] = {
+            "model": dehydrator.model,
+            "base_url": dehydrator.base_url,
+            "api_key": dehydrator.api_key,
+            "thinking_mode": dehy.get("thinking_mode", ""),
+            "max_tokens": dehy.get("max_tokens", 1024),
+            "temperature": dehy.get("temperature", 0.1),
+        }
+        if getattr(portrait_engine, "model_source", "dehydration") == "dehydration":
+            portrait_engine = DailyPortraitMaintainer(config)
 
     # --- Embedding config ---
     if "embedding" in body:
@@ -11350,7 +12144,6 @@ async def api_config_update(request):
         config["merge_threshold"] = int(body["merge_threshold"])
         updated.append("merge_threshold")
 
-    gateway_hot_update_payload = {}
     # --- Reranker config ---
     if "reranker" in body:
         r = body["reranker"]
@@ -11490,23 +12283,6 @@ async def api_config_update(request):
             gateway_cfg["memory_sentinel_enabled"] = _bool_value(g["memory_sentinel_enabled"], True)
             gateway_hot_update_body["memory_sentinel_enabled"] = gateway_cfg["memory_sentinel_enabled"]
             updated.append("gateway.memory_sentinel_enabled")
-        if "memory_sentinel_llm_enabled" in g:
-            gateway_cfg["memory_sentinel_llm_enabled"] = _bool_value(g["memory_sentinel_llm_enabled"], True)
-            gateway_hot_update_body["memory_sentinel_llm_enabled"] = gateway_cfg["memory_sentinel_llm_enabled"]
-            updated.append("gateway.memory_sentinel_llm_enabled")
-        if "memory_sentinel_model" in g:
-            gateway_cfg["memory_sentinel_model"] = str(g["memory_sentinel_model"] or "").strip()
-            gateway_hot_update_body["memory_sentinel_model"] = gateway_cfg["memory_sentinel_model"]
-            updated.append("gateway.memory_sentinel_model")
-        if "memory_sentinel_context_turns" in g:
-            gateway_cfg["memory_sentinel_context_turns"] = _int_between(
-                g["memory_sentinel_context_turns"],
-                3,
-                0,
-                8,
-            )
-            gateway_hot_update_body["memory_sentinel_context_turns"] = gateway_cfg["memory_sentinel_context_turns"]
-            updated.append("gateway.memory_sentinel_context_turns")
         if "domain_sentinel_enabled" in g:
             gateway_cfg["domain_sentinel_enabled"] = _bool_value(g["domain_sentinel_enabled"], True)
             gateway_hot_update_body["domain_sentinel_enabled"] = gateway_cfg["domain_sentinel_enabled"]
@@ -11712,15 +12488,34 @@ async def api_config_update(request):
         if "daily_conversation_turn_limit" in r:
             reflection_cfg["daily_conversation_turn_limit"] = _int_between(
                 r.get("daily_conversation_turn_limit"),
-                0,
+                12,
                 0,
                 80,
             )
             updated.append("reflection.daily_conversation_turn_limit")
+        if "daily_activity_summary_enabled" in r:
+            reflection_cfg["daily_activity_summary_enabled"] = bool(r.get("daily_activity_summary_enabled"))
+            updated.append("reflection.daily_activity_summary_enabled")
+        if "daily_activity_summary_turn_limit" in r:
+            reflection_cfg["daily_activity_summary_turn_limit"] = _int_between(
+                r.get("daily_activity_summary_turn_limit"),
+                0,
+                0,
+                10000,
+            )
+            updated.append("reflection.daily_activity_summary_turn_limit")
+        if "daily_activity_summary_max_tokens" in r:
+            reflection_cfg["daily_activity_summary_max_tokens"] = _int_between(
+                r.get("daily_activity_summary_max_tokens"),
+                320,
+                80,
+                1000,
+            )
+            updated.append("reflection.daily_activity_summary_max_tokens")
         if "daily_chat_memory_mode" in r:
-            mode = str(r.get("daily_chat_memory_mode") or "auto").strip().lower()
+            mode = str(r.get("daily_chat_memory_mode") or "review").strip().lower()
             if mode not in {"auto", "review", "off"}:
-                mode = "auto"
+                mode = "review"
             reflection_cfg["daily_chat_memory_mode"] = mode
             updated.append("reflection.daily_chat_memory_mode")
         if "daily_chat_memory_hour" in r:
@@ -11797,6 +12592,8 @@ async def api_config_update(request):
             "recent_buffer_max",
             "staging_pool_max",
             "candidate_max",
+            "user_rewrite_evidence_delta",
+            "manual_suppress_days",
         ):
             if key in p:
                 portrait_cfg[key] = p[key]
@@ -11831,6 +12628,9 @@ async def api_config_update(request):
             "daily_probability",
             "min_material_count",
             "material_window_hours",
+            "raw_residue_enabled",
+            "raw_residue_turns",
+            "raw_residue_max_chars",
             "identity_anchor_id",
         ):
             if key in d:
@@ -11976,22 +12776,6 @@ async def api_config_update(request):
                     sc_gateway["memory_sentinel_enabled"] = _bool_value(
                         body["gateway"]["memory_sentinel_enabled"],
                         True,
-                    )
-                if "memory_sentinel_llm_enabled" in body["gateway"]:
-                    sc_gateway["memory_sentinel_llm_enabled"] = _bool_value(
-                        body["gateway"]["memory_sentinel_llm_enabled"],
-                        True,
-                    )
-                if "memory_sentinel_model" in body["gateway"]:
-                    sc_gateway["memory_sentinel_model"] = str(
-                        body["gateway"]["memory_sentinel_model"] or ""
-                    ).strip()
-                if "memory_sentinel_context_turns" in body["gateway"]:
-                    sc_gateway["memory_sentinel_context_turns"] = _int_between(
-                        body["gateway"]["memory_sentinel_context_turns"],
-                        3,
-                        0,
-                        8,
                     )
                 if "domain_sentinel_enabled" in body["gateway"]:
                     sc_gateway["domain_sentinel_enabled"] = _bool_value(
@@ -12165,13 +12949,31 @@ async def api_config_update(request):
                 if "daily_conversation_turn_limit" in body["reflection"]:
                     sc_reflection["daily_conversation_turn_limit"] = _int_between(
                         body["reflection"].get("daily_conversation_turn_limit"),
-                        0,
+                        12,
                         0,
                         80,
                     )
+                if "daily_activity_summary_enabled" in body["reflection"]:
+                    sc_reflection["daily_activity_summary_enabled"] = bool(
+                        body["reflection"].get("daily_activity_summary_enabled")
+                    )
+                if "daily_activity_summary_turn_limit" in body["reflection"]:
+                    sc_reflection["daily_activity_summary_turn_limit"] = _int_between(
+                        body["reflection"].get("daily_activity_summary_turn_limit"),
+                        0,
+                        0,
+                        10000,
+                    )
+                if "daily_activity_summary_max_tokens" in body["reflection"]:
+                    sc_reflection["daily_activity_summary_max_tokens"] = _int_between(
+                        body["reflection"].get("daily_activity_summary_max_tokens"),
+                        320,
+                        80,
+                        1000,
+                    )
                 if "daily_chat_memory_mode" in body["reflection"]:
-                    mode = str(body["reflection"].get("daily_chat_memory_mode") or "auto").strip().lower()
-                    sc_reflection["daily_chat_memory_mode"] = mode if mode in {"auto", "review", "off"} else "auto"
+                    mode = str(body["reflection"].get("daily_chat_memory_mode") or "review").strip().lower()
+                    sc_reflection["daily_chat_memory_mode"] = mode if mode in {"auto", "review", "off"} else "review"
                 if "daily_chat_memory_hour" in body["reflection"]:
                     sc_reflection["daily_chat_memory_hour"] = _int_between(
                         body["reflection"].get("daily_chat_memory_hour"),
@@ -12229,6 +13031,8 @@ async def api_config_update(request):
                     "recent_buffer_max",
                     "staging_pool_max",
                     "candidate_max",
+                    "user_rewrite_evidence_delta",
+                    "manual_suppress_days",
                 ):
                     if key in body["portrait"]:
                         sc_portrait[key] = body["portrait"][key]
@@ -12251,6 +13055,9 @@ async def api_config_update(request):
                     "daily_probability",
                     "min_material_count",
                     "material_window_hours",
+                    "raw_residue_enabled",
+                    "raw_residue_turns",
+                    "raw_residue_max_chars",
                     "identity_anchor_id",
                 ):
                     if key in body["dream"]:
@@ -12523,6 +13330,12 @@ async def api_import_review(request):
 if __name__ == "__main__":
     transport = config.get("transport", "stdio")
     logger.info(f"Ombre Brain starting | transport: {transport}")
+    recall_warm_started_at = time.perf_counter()
+    _recall_query_plan("记忆检索预热")
+    logger.info(
+        "Recall runtime warmed / 召回运行时已预热: %sms",
+        max(0, int((time.perf_counter() - recall_warm_started_at) * 1000)),
+    )
 
     if transport in ("sse", "streamable-http"):
         import threading
@@ -12556,6 +13369,7 @@ if __name__ == "__main__":
             local_embedding_engine = EmbeddingEngine(config)
             local_persona_engine = PersonaStateEngine(config)
             local_reflection_engine = ReflectionEngine(config)
+            local_portrait_engine = DailyPortraitMaintainer(config)
             local_memory_edge_store = MemoryEdgeStore(config)
             local_gateway_state_store = GatewayStateStore(os.path.join(config["buckets_dir"], "gateway_state.db"))
             while True:
@@ -12574,10 +13388,10 @@ if __name__ == "__main__":
                         reflection_cfg.get("daily_enabled", True)
                     )
                     local_reflection_engine.memory_affect_anchor_enabled = bool(
-                        reflection_cfg.get("memory_affect_anchor_enabled", True)
+                        reflection_cfg.get("memory_affect_anchor_enabled", False)
                     )
                     local_reflection_engine.relationship_weather_affect_anchor_enabled = bool(
-                        reflection_cfg.get("relationship_weather_affect_anchor_enabled", True)
+                        reflection_cfg.get("relationship_weather_affect_anchor_enabled", False)
                     )
                     local_reflection_engine.daily_min_memory_items = _int_between(
                         reflection_cfg.get("daily_min_memory_items"),
@@ -12587,13 +13401,28 @@ if __name__ == "__main__":
                     )
                     local_reflection_engine.daily_conversation_turn_limit = _int_between(
                         reflection_cfg.get("daily_conversation_turn_limit"),
-                        0,
+                        12,
                         0,
                         80,
                     )
-                    mode = str(reflection_cfg.get("daily_chat_memory_mode") or "auto").strip().lower()
+                    local_reflection_engine.daily_activity_summary_enabled = bool(
+                        reflection_cfg.get("daily_activity_summary_enabled", True)
+                    )
+                    local_reflection_engine.daily_activity_summary_turn_limit = _int_between(
+                        reflection_cfg.get("daily_activity_summary_turn_limit"),
+                        getattr(local_reflection_engine, "daily_activity_summary_turn_limit", 0),
+                        0,
+                        10000,
+                    )
+                    local_reflection_engine.daily_activity_summary_max_tokens = _int_between(
+                        reflection_cfg.get("daily_activity_summary_max_tokens"),
+                        getattr(local_reflection_engine, "daily_activity_summary_max_tokens", 320),
+                        80,
+                        1000,
+                    )
+                    mode = str(reflection_cfg.get("daily_chat_memory_mode") or "review").strip().lower()
                     local_reflection_engine.daily_chat_memory_mode = (
-                        mode if mode in {"auto", "review", "off"} else "auto"
+                        mode if mode in {"auto", "review", "off"} else "review"
                     )
                     local_reflection_engine.daily_chat_memory_hour = _int_between(
                         reflection_cfg.get("daily_chat_memory_hour"),
@@ -12620,6 +13449,42 @@ if __name__ == "__main__":
                         local_gateway_state_store,
                         raw_event_store,
                     )
+                    now_local = local_reflection_engine._local_now()
+                    if (
+                        getattr(local_reflection_engine, "daily_activity_summary_enabled", True)
+                        and now_local.hour >= local_reflection_engine.daily_chat_memory_hour
+                    ):
+                        activity_date = (now_local - timedelta(days=1)).date().isoformat()
+                        timeline_id = f"daily_activity_summary:{activity_date}"
+                        if not local_portrait_engine.has_recent_timeline_item(
+                            date_key=activity_date,
+                            source="daily_activity_summary",
+                            timeline_id=timeline_id,
+                        ):
+                            activity_candidates, activity_daily_impressions = (
+                                _daily_activity_materials_from_reflection_results(results)
+                            )
+                            if not activity_daily_impressions:
+                                existing_daily_impression = await _daily_impression_material_for_date(
+                                    activity_date,
+                                    local_bucket_mgr,
+                                )
+                                if existing_daily_impression:
+                                    activity_daily_impressions.append(existing_daily_impression)
+                            activity_result = await local_reflection_engine.run_daily_activity_summary(
+                                conversation_turn_store=local_gateway_state_store,
+                                raw_event_store=raw_event_store,
+                                persona_engine=local_persona_engine,
+                                daily_chat_memory_candidates=activity_candidates,
+                                daily_impressions=activity_daily_impressions,
+                                key=activity_date,
+                            )
+                            stored_activity = _store_daily_activity_summary_result(
+                                activity_result,
+                                portrait_engine_arg=local_portrait_engine,
+                            )
+                            if stored_activity.get("status") not in {"disabled", "skipped"}:
+                                results.append(stored_activity)
                     if results:
                         logger.info("Reflection run-due results / 反思定时结果: %s", results)
                     if reflection_cfg.get("enrich_backfill_enabled", True):
@@ -12721,6 +13586,7 @@ if __name__ == "__main__":
                     result = await local_dream_engine.run_due(
                         local_bucket_mgr,
                         local_embedding_engine,
+                        raw_event_store=raw_event_store,
                     )
                     if result and result.get("status") == "created":
                         logger.info("Dream run-due result / 夜梦定时结果: %s", result)
