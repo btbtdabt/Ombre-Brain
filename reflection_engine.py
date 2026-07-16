@@ -15,7 +15,7 @@ from memory_edges import RELATION_TYPES, MemoryEdgeStore
 from memory_metadata import domain_prompt_options_text, normalize_domain_key
 from persona_event_selection import select_persona_events
 from self_anchor import is_self_anchor_bucket
-from utils import bucket_text_for_embedding, strip_wikilinks
+from utils import bucket_text_for_embedding, parse_first_json_value, strip_wikilinks
 
 logger = logging.getLogger("ombre_brain.reflection")
 
@@ -4436,11 +4436,8 @@ class ReflectionEngine:
 
     def _parse_json_object(self, raw: str) -> dict:
         try:
-            cleaned = raw.strip()
-            if cleaned.startswith("```"):
-                cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0]
-            parsed = json.loads(cleaned)
-        except (json.JSONDecodeError, IndexError, ValueError):
+            parsed = parse_first_json_value(raw)
+        except (TypeError, ValueError):
             logger.warning("Reflection JSON parse failed: %s", raw[:200])
             return {}
         return parsed if isinstance(parsed, dict) else {}

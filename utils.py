@@ -9,6 +9,7 @@
 # 被谁依赖：server.py, bucket_manager.py, dehydrator.py, decay_engine.py
 # ============================================================
 
+import json
 import os
 import re
 import uuid
@@ -16,10 +17,29 @@ import yaml
 import logging
 from pathlib import Path
 from datetime import datetime, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
 
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def parse_first_json_value(raw: str) -> Any:
+    """Parse the first JSON object or array embedded in an LLM response."""
+    text = str(raw or "").strip()
+    if not text:
+        raise ValueError("empty_json_response")
+
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char not in "{[":
+            continue
+        try:
+            value, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        return value
+    raise ValueError("no_json_object_or_array_found")
 
 
 def _date_hint(year: int, month: int, day: int, label: str, tz=LOCAL_TZ) -> dict[str, str] | None:

@@ -5,6 +5,20 @@ from reflection_engine import ReflectionEngine
 from utils import parse_first_json_value
 
 
+@pytest.fixture
+def test_config(tmp_path):
+    buckets_dir = tmp_path / "buckets"
+    state_dir = tmp_path / "state"
+    buckets_dir.mkdir()
+    state_dir.mkdir()
+    return {
+        "buckets_dir": str(buckets_dir),
+        "state_dir": str(state_dir),
+        "dehydration": {"api_key": ""},
+        "reflection": {"enabled": False},
+    }
+
+
 def test_parse_first_json_value_accepts_fenced_object_with_tail():
     parsed = parse_first_json_value('```json\n{"domain":["饮食"],"valence":0.7}\n```\n说明')
 
@@ -33,7 +47,7 @@ def test_dehydrator_parse_analysis_uses_first_json_value(test_config):
         '\n```\n说明'
     )
 
-    assert parsed["domain"] == ["饮食"]
+    assert parsed["domain"] == ["life"]
     assert parsed["valence"] == 0.8
     assert parsed["tags"] == ["海鲜"]
     assert parsed["suggested_name"] == "海鲜偏好"
@@ -55,7 +69,7 @@ def test_dehydrator_parse_digest_uses_first_json_value(test_config):
 
     assert len(parsed) == 1
     assert parsed[0]["name"] == "海鲜偏好"
-    assert parsed[0]["domain"] == ["饮食"]
+    assert parsed[0]["domain"] == ["life"]
     assert parsed[0]["memory_subject"] == "user"
 
 

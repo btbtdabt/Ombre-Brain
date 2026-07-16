@@ -25,7 +25,6 @@
 
 import os
 import re
-import json
 import hashlib
 import sqlite3
 import logging
@@ -36,7 +35,7 @@ from openai import AsyncOpenAI
 from identity import generic_identity_names, identity_names, render_identity_template
 from memory_layers import normalize_write_classification
 from memory_metadata import domain_prompt_options_text, normalize_domain_key
-from utils import count_tokens_approx
+from utils import count_tokens_approx, parse_first_json_value
 
 logger = logging.getLogger("ombre_brain.dehydrator")
 
@@ -151,7 +150,7 @@ DIGEST_PROMPT_TEMPLATE = """你是一个长期记忆摘记专家。用户会发�
    - ### reflection：{ai_name} 对这件事的理解、以后该怎么回应、哪里需要克制或记住。
 14. ### moment 可以用第三人称客观记录；### reflection 必须保留为 {ai_name} 的第一人称反思，使用“我记得 / 我明白 / 我以后 / 我喜欢 / 我会”等表达，不要改写成“{ai_name} 应记住 / {ai_name} 需要 / 关于 {ai_name} 的说明”。
 
-输出格式（纯 JSON 数组，无其他内容）：
+输出格式（必须按照此格式输出）：
 [
   {
     "name": "条目标题（10字以内）",
@@ -173,7 +172,9 @@ domain 必须从下面的新主域里选最精确的 1 个；只有确实横跨�
 {domain_options_text}
 importance: 1-10，根据内容重要程度判断
 valence: 0~1（0=消极, 0.5=中性, 1=积极）
-arousal: 0~1（0=平静, 0.5=普通, 1=激动）"""
+arousal: 0~1（0=平静, 0.5=普通, 1=激动）
+
+输出必须是一个合法 JSON array。"""
 
 
 def _render_dehydrator_template(template: str, names: dict) -> str:
@@ -237,7 +238,7 @@ ANALYZE_PROMPT_TEMPLATE = """你是一个内容分析器。请分析以下文本
 8. 在 tags 和 suggested_name 中不要使用 [[]] 双链标记
 9. 禁止生成系统边界标签：self_anchor、self_identity、self-identity、first_person_anchor、first-person-anchor、自我；这些只能由上游显式写入，不能由自动打标模型补。
 
-输出格式（纯 JSON，无其他内容）：
+输出格式（必须按照此格式输出）：
 {
   "domain": ["主题域1", "主题域2"],
   "valence": 0.7,
@@ -246,7 +247,9 @@ ANALYZE_PROMPT_TEMPLATE = """你是一个内容分析器。请分析以下文本
   "suggested_name": "简短标题",
   "memory_subject": "event",
   "memory_layer": "process_event"
-}"""
+}
+
+输出必须是一个合法 JSON object。"""
 
 ANALYZE_PROMPT = ANALYZE_PROMPT_TEMPLATE.replace("{domain_options_text}", domain_prompt_options_text())
 
@@ -599,13 +602,8 @@ class Dehydrator:
         解析并校验 API 返回的打标结果。
         """
         try:
-            # Handle potential markdown code block wrapping
-            # 处理可能的 markdown 代码块包裹
-            cleaned = raw.strip()
-            if cleaned.startswith("```"):
-                cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0]
-            result = json.loads(cleaned)
-        except (json.JSONDecodeError, IndexError, ValueError):
+            result = parse_first_json_value(raw)
+        except (TypeError, ValueError):
             logger.warning(f"API tagging JSON parse failed / JSON 解析失败: {raw[:200]}")
             return self._default_analysis()
 
@@ -760,11 +758,8 @@ class Dehydrator:
         解析并校验 API 返回的日记整理结果。
         """
         try:
-            cleaned = raw.strip()
-            if cleaned.startswith("```"):
-                cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0]
-            items = json.loads(cleaned)
-        except (json.JSONDecodeError, IndexError, ValueError):
+            items = parse_first_json_value(raw)
+        except (TypeError, ValueError):
             logger.warning(f"Memory digest JSON parse failed / JSON 解析失败: {raw[:200]}")
             return []
 
