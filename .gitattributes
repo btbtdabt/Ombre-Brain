@@ -3,3 +3,4 @@
 # the Dockerfile COPYs and runs as ENTRYPOINT. Enforce LF on every checkout/build host.
 *.sh text eol=lf
 entrypoint.sh text eol=lf
+ob text eol=lf
