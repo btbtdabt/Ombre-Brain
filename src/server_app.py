@@ -12,11 +12,15 @@ import asyncio
 import contextlib
 import json
 import os
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Mapping
 import httpx
 from starlette.middleware.cors import CORSMiddleware
+from starlette.applications import Starlette
+from starlette.routing import Mount
+from starlette.types import ASGIApp
 
 from public_origin import configured_public_origin, normalize_public_origin
 from utils import parse_bool
@@ -36,6 +40,34 @@ DEFAULT_KEEPALIVE_INTERVAL_SECONDS = 60.0
 
 TokenValidator = Callable[..., bool]
 AsyncCallback = Callable[[], Awaitable[Any]]
+
+
+def build_remote_transport_app(
+    inner_app: ASGIApp,
+    startup_handler: Callable[[], Awaitable[None]],
+    *,
+    transport_lifespan: Callable[[], AbstractAsyncContextManager[Any]] | None = None,
+) -> Starlette:
+    """Mount a transport app while preserving its required parent lifespan.
+
+    FastMCP's streamable HTTP session manager must run in the parent app when
+    its Starlette application is mounted. This compatibility factory keeps the
+    current-production startup contract available without replacing the richer
+    :func:`build_http_app` middleware and lifecycle assembly.
+    """
+
+    @asynccontextmanager
+    async def lifespan(_app: Starlette) -> AsyncIterator[None]:
+        if transport_lifespan is None:
+            await startup_handler()
+            yield
+            return
+
+        async with transport_lifespan():
+            await startup_handler()
+            yield
+
+    return Starlette(routes=[Mount("/", app=inner_app)], lifespan=lifespan)
 
 
 @dataclass(frozen=True)
