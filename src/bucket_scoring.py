@@ -27,7 +27,7 @@ from datetime import datetime
 from typing import Optional
 
 from rapidfuzz import fuzz
-from utils import parse_iso_datetime
+from utils import parse_iso_datetime, strip_followup_sections
 
 # --- topic 文本维度权重 ---
 TOPIC_NAME_W = 3.0
@@ -75,7 +75,10 @@ def calc_topic_score(query: str, bucket: dict, content_weight: float = 1.0) -> f
         )
         * TOPIC_TAG_W
     )
-    content_score = fuzz.partial_ratio(query, bucket.get("content", "")[:TOPIC_BODY_SLICE]) * content_weight
+    recall_content = strip_followup_sections(str(bucket.get("content", "")))
+    content_score = (
+        fuzz.partial_ratio(query, recall_content[:TOPIC_BODY_SLICE]) * content_weight
+    )
 
     return (name_score + domain_score + tag_score + content_score) / (
         100 * (TOPIC_NAME_W + TOPIC_DOMAIN_W + TOPIC_TAG_W + content_weight)
