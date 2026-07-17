@@ -33,6 +33,44 @@ git commit -m "<message>"
 git push fork main
 ```
 
+## Dual-Upstream Update Policy
+
+The two author remotes are not symmetric update targets:
+
+- `origin` (`Yinglianchun/Ombre-Brain`) is the executable root-runtime base.
+  Integrate its new commits with a normal Git merge on a temporary sync branch.
+- `p0luz` (`P0luz/Ombre-Brain`) is a selective feature source. Do not merge or
+  pull `p0luz/main` wholesale because it contains a parallel `src/ombrebrain`
+  runtime and distributed architecture that would create two implementations.
+- Push only to `fork` unless Amy explicitly requests otherwise.
+
+For a dual-upstream refresh:
+
+1. Start from a clean, aligned local `main` and create
+   `codex/upstream-sync-YYYYMMDD`.
+2. Fetch both histories with pruning.
+3. Merge `origin/main` first. Resolve conflicts manually; preserve the current
+   Gateway, relay, prompt, MCP, persona, runtime-data, and production contracts
+   while accepting compatible author improvements. Do not resolve broad
+   conflicts by blindly choosing all of `ours` or all of `theirs`.
+4. Read `docs/upstream-integration.md`, then inspect only P0luz commits after
+   its recorded compatibility baseline. Port compatible features into the
+   existing root runtime with focused regression tests; leave architecture
+   migrations unmerged.
+5. Check for duplicate implementations after integration. Keep intentional
+   protocol adapters and bounded/streaming alternatives when their semantics
+   differ; consolidate only proven behavioral duplication.
+6. Run root pytest discovery, changed-file lint/type checks, compilation or
+   build checks where applicable, and an independent review.
+7. Advance the P0luz baseline in `docs/upstream-integration.md` only after all
+   reviewed commits have been handled and verification passes.
+8. Merge the verified sync branch into local `main`, push `fork/main`, deploy
+   or sync that exact commit to the VPS, and run the required production
+   alignment checks.
+
+Use `git fetch`, not `git pull`, while inspecting upstreams so no remote history
+is merged into `main` before review.
+
 ## Runtime Files And Secrets
 
 These files are intentionally gitignored and may contain secrets or deployment-local values:
