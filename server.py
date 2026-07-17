@@ -53,7 +53,8 @@ import secrets
 import tempfile
 import time
 from base64 import b64decode
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -68,6 +69,9 @@ import httpx
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mcp.server.fastmcp import Context, FastMCP
+from starlette.applications import Starlette
+from starlette.routing import Mount
+from starlette.types import ASGIApp
 
 from bucket_manager import BucketManager
 from backup_archive import BackupArchiveError, MAX_ARCHIVE_BYTES
@@ -4035,24 +4039,26 @@ async def _ensure_decay_engine_started_for_transport(transport_name: str) -> Non
         logger.warning("Decay engine startup failed / 衰减引擎启动失败: %s", e)
 
 
-def _install_app_startup_handler(
-    app: Any,
-    handler: Callable[[], Awaitable[None]],
-) -> bool:
-    router = getattr(app, "router", None)
-    original_lifespan_context: Any = getattr(router, "lifespan_context", None)
-    if not callable(original_lifespan_context):
-        return False
-    lifespan_context: Any = original_lifespan_context
-
+def _build_remote_transport_app(
+    inner_app: ASGIApp,
+    startup_handler: Callable[[], Awaitable[None]],
+    *,
+    transport_lifespan: Callable[[], AbstractAsyncContextManager[Any]] | None = None,
+) -> Starlette:
+    # Mounted Starlette apps do not run child lifespans. FastMCP's documented
+    # streamable-HTTP mount pattern enters session_manager.run() in the parent.
     @asynccontextmanager
-    async def lifespan(app_instance):
-        async with lifespan_context(app_instance) as state:
-            await handler()
-            yield state
+    async def lifespan(_app: Starlette) -> AsyncIterator[None]:
+        if transport_lifespan is None:
+            await startup_handler()
+            yield
+            return
 
-    setattr(router, "lifespan_context", lifespan)
-    return True
+        async with transport_lifespan():
+            await startup_handler()
+            yield
+
+    return Starlette(routes=[Mount("/", app=inner_app)], lifespan=lifespan)
 
 
 async def _merge_or_create(
@@ -13927,16 +13933,23 @@ if __name__ == "__main__":
 
         # --- Add CORS middleware so remote clients (Cloudflare Tunnel / ngrok) can connect ---
         # --- 添加 CORS 中间件，让远程客户端（Cloudflare Tunnel / ngrok）能正常连接 ---
-        if transport == "streamable-http":
-            _app = mcp.streamable_http_app()
-        else:
-            _app = mcp.sse_app()
         async def _start_decay_engine_on_app_startup():
             await _ensure_decay_engine_started_for_transport(transport)
             await embedding_outbox.start(reconcile=True)
 
-        if not _install_app_startup_handler(_app, _start_decay_engine_on_app_startup):
-            raise RuntimeError("ASGI app does not expose a lifespan context")
+        if transport == "streamable-http":
+            _inner_app = mcp.streamable_http_app()
+            _app = _build_remote_transport_app(
+                _inner_app,
+                _start_decay_engine_on_app_startup,
+                transport_lifespan=mcp.session_manager.run,
+            )
+        else:
+            _inner_app = mcp.sse_app()
+            _app = _build_remote_transport_app(
+                _inner_app,
+                _start_decay_engine_on_app_startup,
+            )
         _app.add_middleware(
             CORSMiddleware,
             allow_origins=["*"],

@@ -2,16 +2,22 @@ import asyncio
 from contextlib import asynccontextmanager
 from decimal import Decimal
 from pathlib import Path
-from types import SimpleNamespace
 
 import frontmatter
+import pytest
+from mcp.server.fastmcp import FastMCP
+from starlette.applications import Starlette
+from starlette.middleware.cors import CORSMiddleware
+from starlette.responses import PlainTextResponse
+from starlette.routing import Route
+from starlette.testclient import TestClient
 
 from bucket_manager import BucketManager
 from dehydrator import Dehydrator
 from dream_engine import _clamp
 from memory_nodes import _facet_keywords_for_config
 from portrait_engine import DailyPortraitMaintainer
-from server import _install_app_startup_handler
+from server import _build_remote_transport_app
 
 
 def _config(tmp_path: Path) -> dict:
@@ -91,25 +97,95 @@ def test_optional_llm_clients_fail_with_explicit_runtime_errors(tmp_path: Path) 
         raise AssertionError(f"{type(component).__name__} accepted a missing LLM client")
 
 
-def test_startup_handler_wraps_existing_asgi_lifespan() -> None:
+def test_remote_transport_app_runs_fastmcp_and_ombre_lifespans() -> None:
+    events: list[str] = []
+    probe = FastMCP("quality-hardening-probe")
+    inner_app = probe.streamable_http_app()
+
+    async def ombre_startup() -> None:
+        events.append("ombre-start")
+
+    app = _build_remote_transport_app(
+        inner_app,
+        ombre_startup,
+        transport_lifespan=probe.session_manager.run,
+    )
+    with TestClient(app, base_url="http://localhost:8000") as client:
+        response = client.post(
+            "/mcp",
+            headers={"Accept": "application/json, text/event-stream"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test-client", "version": "1.0"},
+                },
+            },
+        )
+        assert response.status_code == 200
+        assert "serverInfo" in response.text
+        events.append("serving")
+
+    assert events == ["ombre-start", "serving"]
+
+
+def test_remote_transport_app_unwinds_transport_when_ombre_startup_fails() -> None:
     events: list[str] = []
 
     @asynccontextmanager
-    async def original_lifespan(_app):
-        events.append("original-start")
-        yield {"ready": True}
-        events.append("original-stop")
+    async def transport_lifespan():
+        events.append("transport-start")
+        try:
+            yield
+        finally:
+            events.append("transport-stop")
 
-    async def startup_handler() -> None:
+    async def failing_ombre_startup() -> None:
+        events.append("ombre-start")
+        raise RuntimeError("startup failed")
+
+    async def health(_request):
+        return PlainTextResponse("ok")
+
+    inner_app = Starlette(routes=[Route("/health", health)])
+    app = _build_remote_transport_app(
+        inner_app,
+        failing_ombre_startup,
+        transport_lifespan=transport_lifespan,
+    )
+
+    with pytest.raises(RuntimeError, match="startup failed"):
+        with TestClient(app):
+            pass
+
+    assert events == ["transport-start", "ombre-start", "transport-stop"]
+
+
+def test_remote_transport_app_preserves_fastmcp_sse_routes_and_middleware() -> None:
+    events: list[str] = []
+    probe = FastMCP("quality-hardening-sse-probe")
+
+    async def ombre_startup() -> None:
         events.append("ombre-start")
 
-    app = SimpleNamespace(router=SimpleNamespace(lifespan_context=original_lifespan))
-    assert _install_app_startup_handler(app, startup_handler) is True
+    app = _build_remote_transport_app(probe.sse_app(), ombre_startup)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
-    async def run_lifespan() -> None:
-        async with app.router.lifespan_context(app) as state:
-            assert state == {"ready": True}
-            events.append("serving")
+    with TestClient(app, base_url="http://localhost:8000") as client:
+        responses = [
+            client.post("/messages/", headers={"Origin": "https://client.example"})
+            for _ in range(2)
+        ]
 
-    asyncio.run(run_lifespan())
-    assert events == ["original-start", "ombre-start", "serving", "original-stop"]
+    assert all(response.status_code == 400 for response in responses)
+    assert all(response.text == "Invalid Content-Type header" for response in responses)
+    assert all(response.headers["access-control-allow-origin"] == "*" for response in responses)
+    assert events == ["ombre-start"]
