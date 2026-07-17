@@ -37,8 +37,10 @@ import threading
 import time
 import tempfile
 import uuid
+from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import date, datetime
+from functools import wraps
 
 # 统一错误体系：越界 clamp 时上报 OB-W001/OB-W002（rule.md §11）
 try:
@@ -92,19 +94,33 @@ async def _filesystem_turn(base_dir: str, key: str, timeout_seconds: float = 30.
     lock_path = lock_dir / f"{lock_id}.lock"
     token = f"{os.getpid()}:{threading.get_ident()}:{uuid.uuid4().hex}"
     deadline = time.monotonic() + timeout_seconds
-    flags = os.O_RDWR | os.O_CREAT
-    if hasattr(os, "O_CLOEXEC"):
-        flags |= os.O_CLOEXEC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    descriptor = os.open(lock_path, flags, 0o600)
-    handle = os.fdopen(descriptor, "r+b", buffering=0)
+    extra_flags = getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    initialize_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | extra_flags
+    try:
+        initializer = os.open(str(lock_path), initialize_flags, 0o600)
+    except FileExistsError:
+        # The exclusive creator writes the byte before opening the lease. A
+        # concurrent process may observe the directory entry first, so wait
+        # until initialization is visible instead of racing a write against an
+        # already-held Windows byte-range lock.
+        while True:
+            try:
+                if lock_path.stat().st_size >= 1:
+                    break
+            except FileNotFoundError:
+                pass
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"timed out initializing filesystem lease {lock_id}")
+            await asyncio.sleep(0.01)
+    else:
+        try:
+            os.write(initializer, b"\0")
+            os.fsync(initializer)
+        finally:
+            os.close(initializer)
 
-    # Windows byte-range locks require the byte to exist.  Creating it before
-    # attempting the lease is harmless on POSIX, where flock locks the file.
-    handle.seek(0, os.SEEK_END)
-    if handle.tell() == 0:
-        handle.write(b"\0")
+    descriptor = os.open(str(lock_path), os.O_RDWR | extra_flags, 0o600)
+    handle = os.fdopen(descriptor, "r+b", buffering=0)
     handle.seek(0)
 
     def _try_acquire() -> bool:
@@ -181,6 +197,15 @@ async def _filesystem_turn(base_dir: str, key: str, timeout_seconds: float = 30.
             handle.close()
 
 
+def _serialized_bucket_method(method):
+    @wraps(method)
+    async def wrapped(self, bucket_id: str, *args, **kwargs):
+        async with self._bucket_turn(bucket_id):
+            return await method(self, bucket_id, *args, **kwargs)
+
+    return wrapped
+
+
 def _clamp_importance(v, source: str) -> int:
     """importance 越界 → clamp 到 [1,10]，并产生 OB-W001 提示。"""
     try:
@@ -212,13 +237,45 @@ def _clamp_unit(v, field: str, source: str) -> float:
     return fv
 
 
+def _metadata_float(value: object) -> float:
+    """Read historical numeric metadata without rejecting YAML strings."""
+    try:
+        parsed = float(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    if not math.isfinite(parsed) or parsed < 0:
+        return 0.0
+    return parsed
+
+
+def _increment_activation_count(value: object) -> int | float:
+    return _metadata_float(value) + 1
+
+
+def _markdown_body_start_line(text: str) -> int:
+    """Return the one-based first nonblank body line after YAML frontmatter."""
+    lines = str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    if not lines or lines[0].strip() != "---":
+        return 1
+    for index, line in enumerate(lines[1:], start=2):
+        if line.strip() != "---":
+            continue
+        body_start = index + 1
+        while body_start <= len(lines) and not lines[body_start - 1].strip():
+            body_start += 1
+        return max(1, body_start)
+    return 1
+
+
 from pathlib import Path
 from typing import Any, Optional
 
 import frontmatter
+import jieba
 
 from utils import (
     atomic_write_text,
+    bucket_content_for_recall,
     generate_bucket_id,
     sanitize_name,
     safe_path,
@@ -226,6 +283,13 @@ from utils import (
     parse_bool,
     parse_iso_datetime,
 )
+from identity import identity_names
+from memory_relevance import (
+    content_terms_for_query,
+    memory_relevance_options_from_config,
+    recall_topic_query,
+)
+from query_terms import GENERIC_LEXICAL_STOPWORDS
 from media_store import MediaStore
 from bucket_scoring import (
     calc_topic_score,
@@ -247,8 +311,20 @@ except ImportError:
 
 logger = logging.getLogger("ombre_brain.bucket")
 
+LexicalSignature = tuple[str, str, str, str, str, float]
+LexicalProfile = tuple[LexicalSignature, dict[str, float], float, tuple[str, ...]]
 
+
+_ORIGINAL_ATOMIC_WRITE_TEXT = atomic_write_text
 _atomic_write_text = atomic_write_text  # Backward-compatible private alias.
+
+
+def _write_atomic_text(path: str, text: str) -> None:
+    """Honor both historical public and P0 private writer patch points."""
+    writer = _atomic_write_text
+    if writer is _ORIGINAL_ATOMIC_WRITE_TEXT:
+        writer = atomic_write_text
+    writer(path, text)
 
 
 def _atomic_create_text(path: str, text: str) -> None:
@@ -393,6 +469,7 @@ class BucketManager:
             self.base_dir,
             str(config.get("media_dir") or os.path.join(self.base_dir, "_media")),
             max_bytes=int(config.get("media_max_bytes") or 25 * 1024 * 1024),
+            allowed_source_dirs=config.get("media_allowed_source_dirs"),
         )
         self.permanent_dir = os.path.join(self.base_dir, "permanent")
         self.dynamic_dir = os.path.join(self.base_dir, "dynamic")
@@ -400,6 +477,7 @@ class BucketManager:
         self.feel_dir = os.path.join(self.base_dir, "feel")
         self.plan_dir = os.path.join(self.base_dir, "plans")
         self.letter_dir = os.path.join(self.base_dir, "letters")
+        self.tombstone_dir = os.path.join(self.base_dir, ".tombstones")
         self.fuzzy_threshold = config.get("matching", {}).get("fuzzy_threshold", 50)
         self.max_results = config.get("matching", {}).get("max_results", 5)
 
@@ -417,6 +495,8 @@ class BucketManager:
         self.w_semantic = scoring.get("semantic_weight", 2.5)
         # BM25: TF-IDF 加权关键词匹配（rank_bm25+jieba，软依赖）
         self.w_bm25 = scoring.get("bm25_weight", 1.5)
+        self.lexical_stop_terms = self._build_lexical_stop_terms(config)
+        self._lexical_profile_cache: dict[str, LexicalProfile] = {}
 
         # --- Optional embedding engine for pre-filtering / 可选 embedding 引擎，用于预筛候选集 ---
         self.embedding_engine = embedding_engine
@@ -581,9 +661,9 @@ class BucketManager:
     # ---------------------------------------------------------
     @property
     def _active_dirs(self) -> list[str]:
-        """不含 archive 的活跃桶目录（list_all/_collect_all_tags/查找均使用）。。。顺序不可随意调整：feel/plan/letter 在 dynamic 之后是为了与原代码扫描顺序保持一致。"""
+        """Active memory stores used by ordinary scans; letters stay isolated."""
         return [self.permanent_dir, self.dynamic_dir,
-                self.feel_dir, self.plan_dir, self.letter_dir]
+                self.feel_dir, self.plan_dir]
 
     def _iter_md_files(self, dirs: list[str]):
         """递归遍历多个目录下的 *.md，yield (root, filename, full_path)。
@@ -1022,6 +1102,18 @@ class BucketManager:
         meaning: str = "",
         media: Any = None,
         test_data: bool = False,
+        bucket_id: str | None = None,
+        source: str | None = None,
+        created: Any = None,
+        last_active: Any = None,
+        updated_at: Any = None,
+        anchor: bool = False,
+        resolved: bool = False,
+        digested: bool = False,
+        confidence: float | None = None,
+        period: str | None = None,
+        date: str | None = None,
+        extra_metadata: dict | None = None,
     ) -> str:
         """
         Create a new memory bucket, return bucket ID.
@@ -1053,7 +1145,17 @@ class BucketManager:
         # write while holding that exact ID's normal bucket turn.  The value
         # here is provisional so metadata normalization can include a useful
         # source label without doing an unsafe check-then-write.
-        preferred_bucket_id = (
+        requested_bucket_id = str(bucket_id or "").strip()
+        if requested_bucket_id:
+            if (
+                len(requested_bucket_id) > 200
+                or any(ord(char) < 32 for char in requested_bucket_id)
+                or any(char in requested_bucket_id for char in ("/", "\\", ":"))
+            ):
+                raise ValueError("bucket_id contains unsafe path characters")
+            if bucket_id_override and requested_bucket_id != str(bucket_id_override).strip():
+                raise ValueError("bucket_id and bucket_id_override disagree")
+        preferred_bucket_id = requested_bucket_id or (
             sanitize_name(bucket_id_override) or generate_bucket_id()
             if bucket_id_override
             else generate_bucket_id()
@@ -1063,7 +1165,25 @@ class BucketManager:
         # 使用连字符替代冒号，避免 sanitize_name 后续编辑时把冒号去掉破坏可读性。
         _ts = datetime.now().strftime("%Y-%m-%d %H-%M-%S")
         _clean = sanitize_name(name) if name else ""
-        bucket_name = (f"{_ts} {_clean}" if (_clean and _clean != "unnamed") else _ts)[:80]
+        compatibility_metadata = any(
+            value is not None
+            for value in (
+                source,
+                created,
+                last_active,
+                updated_at,
+                confidence,
+                period,
+                date,
+                extra_metadata,
+            )
+        ) or bool(requested_bucket_id or anchor or resolved or digested)
+        if compatibility_metadata and _clean and _clean != "unnamed":
+            bucket_name = _clean[:80]
+        else:
+            bucket_name = (
+                f"{_ts} {_clean}" if (_clean and _clean != "unnamed") else _ts
+            )[:80]
         # feel buckets are allowed to have empty domain; others default to ["未分类"]
         if bucket_type == "feel":
             domain = domain if domain is not None else []
@@ -1090,6 +1210,16 @@ class BucketManager:
 
         # --- Build YAML frontmatter metadata / 构建元数据 ---
         # 越界不静默 clamp：会产生 OB-W001/OB-W002 提示走到 MCP 返回末尾
+        created_at = (
+            self._normalize_metadata_value(created)
+            if created is not None
+            else now_iso()
+        )
+        last_active_at = (
+            self._normalize_metadata_value(last_active)
+            if last_active is not None
+            else created_at
+        )
         metadata = {
             "id": bucket_id,
             "name": bucket_name,
@@ -1099,10 +1229,30 @@ class BucketManager:
             "arousal": _clamp_unit(arousal, "arousal", f"create:{bucket_id}"),
             "importance": _clamp_importance(importance, f"create:{bucket_id}"),
             "type": bucket_type,
-            "created": now_iso(),
-            "last_active": now_iso(),
+            "created": created_at,
+            "last_active": last_active_at,
             "activation_count": 0,
         }
+        if updated_at is not None or compatibility_metadata:
+            metadata["updated_at"] = (
+                self._normalize_metadata_value(updated_at)
+                if updated_at is not None
+                else created_at
+            )
+        if source:
+            metadata["source"] = self._sanitize_text(str(source)).strip()[:128]
+        if anchor:
+            metadata["anchor"] = True
+        if resolved:
+            metadata["resolved"] = True
+        if digested:
+            metadata["digested"] = True
+        if confidence is not None:
+            metadata["confidence"] = _clamp01(confidence, 0.0)
+        if period:
+            metadata["period"] = self._sanitize_text(str(period)).strip()[:128]
+        if date:
+            metadata["date"] = self._sanitize_text(str(date)).strip()[:128]
         if test_data:
             metadata["provenance"] = {
                 "kind": "test",
@@ -1123,6 +1273,14 @@ class BucketManager:
             metadata["source_tool"] = str(source_tool).strip()[:_SOURCE_TOOL_MAX]
         if grow_batch_id:
             metadata["grow_batch_id"] = str(grow_batch_id).strip()[:_GROW_BATCH_ID_MAX]
+
+        if extra_metadata:
+            normalized_extra = self._normalize_metadata_value(dict(extra_metadata))
+            reserved = set(metadata) | {"content"}
+            for key, value in normalized_extra.items():
+                if key in reserved or value is None:
+                    continue
+                metadata[str(key)] = value
 
         # --- iter 1.8: 让记忆带「为什么记得」 / why this is worth remembering ---
         # 自由文本字段。模型 / 人类手写。不参与评分，只参与展示与搜索。
@@ -1439,7 +1597,7 @@ class BucketManager:
         Existing destination files are never overwritten.
         """
         if self._same_path(file_path, target_path):
-            _atomic_write_text(file_path, serialized)
+            _write_atomic_text(file_path, serialized)
             return file_path
 
         if os.path.exists(target_path):
@@ -1447,7 +1605,7 @@ class BucketManager:
                 f"bucket migration target already exists: {target_path}"
             )
 
-        _atomic_write_text(target_path, serialized)
+        _write_atomic_text(target_path, serialized)
         try:
             os.remove(file_path)
         except Exception:
@@ -1765,6 +1923,52 @@ class BucketManager:
             post["digested"] = kwargs["digested"]
         if "model_valence" in kwargs:
             post["model_valence"] = _clamp01(kwargs["model_valence"], _DEFAULT_VALENCE)
+        if "facets" in kwargs:
+            post["facets"] = (
+                self._normalize_metadata_value(kwargs["facets"])
+                if isinstance(kwargs["facets"], list)
+                else []
+            )
+        if "source" in kwargs:
+            post["source"] = self._sanitize_text(str(kwargs["source"])).strip()[:128]
+        if "confidence" in kwargs:
+            post["confidence"] = _clamp01(kwargs["confidence"], 0.0)
+        for field in (
+            "period",
+            "date",
+            "profile_kind",
+            "subject",
+            "predicate",
+            "object",
+        ):
+            if field in kwargs:
+                post[field] = self._sanitize_text(str(kwargs[field])).strip()[:500]
+        for field in ("active", "deprecated"):
+            if field in kwargs:
+                post[field] = parse_bool(kwargs[field])
+        if "comments" in kwargs:
+            post["comments"] = (
+                self._normalize_metadata_value(kwargs["comments"])
+                if isinstance(kwargs["comments"], list)
+                else []
+            )
+        if "comment_count" in kwargs:
+            try:
+                post["comment_count"] = max(0, int(kwargs["comment_count"]))
+            except (TypeError, ValueError, OverflowError):
+                post["comment_count"] = 0
+        for field in (
+            "evidence",
+            "source_bucket_ids",
+            "source_persona_event_ids",
+            "source_conversation_turn_ids",
+        ):
+            if field in kwargs:
+                post[field] = (
+                    self._normalize_metadata_value(kwargs[field])
+                    if isinstance(kwargs[field], list)
+                    else []
+                )
         if "media" in kwargs:
             # Miss: 整体覆盖写入（trace media_replace）；空列表清空该字段。
             if kwargs["media"]:
@@ -1855,6 +2059,38 @@ class BucketManager:
                     else:
                         post[k] = kwargs[k]
 
+        if isinstance(kwargs.get("extra_metadata"), dict):
+            normalized_extra = self._normalize_metadata_value(
+                dict(kwargs["extra_metadata"])
+            )
+            reserved = {
+                "id",
+                "name",
+                "content",
+                "created",
+                "last_active",
+                "updated_at",
+                "type",
+                "domain",
+            }
+            for key, value in normalized_extra.items():
+                if key in reserved:
+                    continue
+                if value is None:
+                    post.metadata.pop(key, None)
+                else:
+                    post[key] = value
+
+        post["updated_at"] = (
+            self._normalize_metadata_value(kwargs["updated_at"])
+            if kwargs.get("updated_at") is not None
+            else now_iso()
+        )
+        if kwargs.get("last_active") is not None and not bump_active:
+            post["last_active"] = self._normalize_metadata_value(
+                kwargs["last_active"]
+            )
+
         # --- 激活时间 / 激活次数 ---
         # last_active 只代表「最后一次真实激活/召回」，并作为衰减 recency 打分的输入。
         # 元数据编辑（trace / plan / anchor / 后台自动 resolve 等）**不算「活跃」**：
@@ -1864,7 +2100,9 @@ class BucketManager:
         # 同步刷新 last_active 并累加 activation_count，语义与 touch() 一致。
         if bump_active:
             post["last_active"] = now_iso()
-            post["activation_count"] = int(post.get("activation_count") or 0) + 1
+            post["activation_count"] = _increment_activation_count(
+                post.get("activation_count", 0)
+            )
 
         final_type = str(post.get("type") or current_type).strip().lower()
         target_path = file_path
@@ -1927,6 +2165,194 @@ class BucketManager:
         )
 
         return True
+
+    async def add_comment(
+        self,
+        bucket_id: str,
+        content: str,
+        **kwargs,
+    ) -> Optional[dict]:
+        """Append a comment/ring without changing the bucket body."""
+        touch = parse_bool(kwargs.get("touch", True), default=True)
+        async with self._bucket_turn(bucket_id):
+            entry = await self._add_comment_locked(
+                bucket_id,
+                content,
+                **kwargs,
+            )
+        if entry and touch:
+            bucket = await self.get(bucket_id)
+            metadata = (bucket or {}).get("metadata", {})
+            try:
+                reference_time = parse_iso_datetime(
+                    metadata.get("created") or metadata.get("last_active")
+                )
+            except (TypeError, ValueError):
+                reference_time = datetime.now()
+            await self._time_ripple(bucket_id, reference_time)
+        return entry
+
+    async def _add_comment_locked(
+        self,
+        bucket_id: str,
+        content: str,
+        *,
+        author: str | None = None,
+        kind: str = "comment",
+        valence: float | None = None,
+        arousal: float | None = None,
+        source: str | None = None,
+        created: Any = None,
+        touch: bool = True,
+    ) -> Optional[dict]:
+        clean_content = self._sanitize_text(str(content or "")).strip()
+        if not clean_content:
+            return None
+        file_path = self._find_bucket_file(bucket_id)
+        if not file_path:
+            return None
+        try:
+            post = frontmatter.load(file_path)
+        except Exception as exc:
+            logger.warning(
+                "Failed to load bucket for comment / 加载评论目标失败: %s: %s",
+                file_path,
+                exc,
+            )
+            return None
+        if post.get("deleted_at") or parse_bool(
+            post.get("tombstone"), default=False
+        ):
+            return None
+
+        comments = post.get("comments")
+        if not isinstance(comments, list):
+            comments = []
+        now = now_iso()
+        identity_config = self.config.get("identity", {}) or {}
+        default_author = str(identity_config.get("ai_name") or "AI")
+        entry: dict[str, Any] = {
+            "id": generate_bucket_id(),
+            "created": (
+                self._normalize_metadata_value(created)
+                if created is not None
+                else now
+            ),
+            "author": self._sanitize_text(str(author or default_author)).strip()[:120],
+            "kind": self._sanitize_text(str(kind or "comment")).strip()[:32],
+            "content": clean_content,
+        }
+        if source:
+            entry["source"] = self._sanitize_text(str(source)).strip()[:128]
+        if valence is not None:
+            entry["valence"] = _clamp_unit(
+                valence,
+                "valence",
+                f"comment:{bucket_id}",
+            )
+            if entry["kind"] == "feel":
+                post["model_valence"] = entry["valence"]
+        if arousal is not None:
+            entry["arousal"] = _clamp_unit(
+                arousal,
+                "arousal",
+                f"comment:{bucket_id}",
+            )
+
+        comments.append(entry)
+        post["comments"] = comments
+        post["comment_count"] = len(comments)
+        post["updated_at"] = now
+        if parse_bool(touch, default=True):
+            post["last_active"] = now
+            post["activation_count"] = _increment_activation_count(
+                post.get("activation_count", 0)
+            )
+        try:
+            self._commit_bucket_update(
+                file_path,
+                file_path,
+                frontmatter.dumps(post),
+            )
+        except (OSError, ValueError) as exc:
+            logger.error(
+                "Failed to write bucket comment / 写入桶评论失败: %s: %s",
+                file_path,
+                exc,
+            )
+            return None
+        self._invalidate_bm25()
+        logger.info("Added bucket comment / 已追加年轮: %s#%s", bucket_id, entry["id"])
+        return entry
+
+    async def delete_comment(
+        self,
+        bucket_id: str,
+        comment_id: str,
+        *,
+        allowed_author: str | None = None,
+        allowed_source: str | None = None,
+    ) -> dict:
+        """Delete one authorized comment while preserving concurrent metadata."""
+        async with self._bucket_turn(bucket_id):
+            file_path = self._find_bucket_file(bucket_id)
+            if not file_path or not str(comment_id or "").strip():
+                return {"status": "not_found"}
+            try:
+                post = frontmatter.load(file_path)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to load bucket for comment delete / "
+                    "加载评论删除目标失败: %s: %s",
+                    file_path,
+                    exc,
+                )
+                return {"status": "not_found"}
+
+            comments = post.get("comments")
+            if not isinstance(comments, list):
+                return {"status": "not_found"}
+            kept: list[Any] = []
+            target: dict | None = None
+            for comment in comments:
+                if (
+                    target is None
+                    and isinstance(comment, dict)
+                    and str(comment.get("id") or "") == str(comment_id)
+                ):
+                    target = comment
+                else:
+                    kept.append(comment)
+            if target is None:
+                return {"status": "not_found"}
+            if allowed_author is not None and target.get("author") != allowed_author:
+                return {"status": "forbidden", "comment": target}
+            if allowed_source is not None and target.get("source") != allowed_source:
+                return {"status": "forbidden", "comment": target}
+
+            post["comments"] = kept
+            post["comment_count"] = len(kept)
+            post["updated_at"] = now_iso()
+            try:
+                self._commit_bucket_update(
+                    file_path,
+                    file_path,
+                    frontmatter.dumps(post),
+                )
+            except (OSError, ValueError) as exc:
+                logger.error(
+                    "Failed to delete bucket comment / 删除桶评论失败: %s: %s",
+                    file_path,
+                    exc,
+                )
+                return {"status": "failed", "comment": target}
+            self._invalidate_bm25()
+            logger.info(
+                "Deleted bucket comment / 已删除年轮: %s#%s",
+                bucket_id,
+                comment_id,
+            )
+            return {"status": "deleted", "comment": target}
 
     async def hard_delete_test_bucket(self, bucket_id: str, *, reason: str = "") -> dict:
         """Erase only a bucket born as test data, with an explicit audit reason."""
@@ -1995,6 +2421,57 @@ class BucketManager:
     # Delete bucket
     # 删除桶
     # ---------------------------------------------------------
+    def _build_tombstone(
+        self,
+        bucket_id: str,
+        file_path: str,
+        deleted_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Build the historical JSON marker alongside the P0 Markdown tombstone."""
+        deleted_at = deleted_at or now_iso()
+        tombstone: dict[str, Any] = {
+            "id": bucket_id,
+            "title": bucket_id,
+            "type": "archived",
+            "domain": ["deleted"],
+            "tags": ["deleted"],
+            "content": "",
+            "valence": 0.5,
+            "arousal": 0.5,
+            "importance": 1,
+            "pinned": False,
+            "resolved": True,
+            "digested": True,
+            "activation_count": 0,
+            "created": deleted_at,
+            "last_active": deleted_at,
+            "updated_at": deleted_at,
+            "source": "deleted",
+            "deleted_at": deleted_at,
+        }
+        try:
+            post = frontmatter.load(file_path)
+            tombstone.update(
+                {
+                    "title": post.get("name", bucket_id),
+                    "type": post.get("type", "archived"),
+                    "domain": post.get("domain", ["deleted"]) or ["deleted"],
+                    "created": post.get("created", deleted_at),
+                }
+            )
+        except Exception:
+            pass
+        return tombstone
+
+    def _write_tombstone(self, tombstone: dict[str, Any]) -> str:
+        os.makedirs(self.tombstone_dir, exist_ok=True)
+        path = safe_path(self.tombstone_dir, f"{tombstone['id']}.json")
+        _write_atomic_text(
+            str(path),
+            json.dumps(tombstone, ensure_ascii=False, indent=2, default=str) + "\n",
+        )
+        return str(path)
+
     async def delete(self, bucket_id: str) -> bool:
         """
         Soft-delete a memory bucket: move to archive/ and stamp `deleted_at`.
@@ -2013,6 +2490,11 @@ class BucketManager:
         try:
             post = frontmatter.load(file_path)
             tombstone_at = now_iso()
+            compatibility_tombstone = self._build_tombstone(
+                bucket_id,
+                file_path,
+                deleted_at=tombstone_at,
+            )
             post["deleted_at"] = tombstone_at
             post["tombstone"] = True
             post["tombstoned_at"] = tombstone_at
@@ -2025,11 +2507,31 @@ class BucketManager:
                     self.archive_dir,
                     f"{os.path.splitext(os.path.basename(file_path))[0]}_{bucket_id}.md",
                 )
-            self._commit_bucket_update(
-                file_path,
-                str(dest),
-                frontmatter.dumps(post),
+            compatibility_path = safe_path(
+                self.tombstone_dir,
+                f"{bucket_id}.json",
             )
+            previous_tombstone = (
+                Path(compatibility_path).read_text(encoding="utf-8")
+                if os.path.exists(compatibility_path)
+                else None
+            )
+            written_tombstone = self._write_tombstone(compatibility_tombstone)
+            try:
+                self._commit_bucket_update(
+                    file_path,
+                    str(dest),
+                    frontmatter.dumps(post),
+                )
+            except Exception:
+                try:
+                    if previous_tombstone is None:
+                        os.remove(written_tombstone)
+                    else:
+                        _write_atomic_text(written_tombstone, previous_tombstone)
+                except OSError:
+                    pass
+                raise
         except OSError as e:
             logger.error(f"Failed to soft-delete bucket / 软删除桶文件失败: {file_path}: {e}")
             return False
@@ -2095,9 +2597,11 @@ class BucketManager:
         try:
             post = frontmatter.load(file_path)
             post["last_active"] = now_iso()
-            post["activation_count"] = int(post.get("activation_count") or 0) + 1  # type: ignore[call-overload]
+            post["activation_count"] = _increment_activation_count(
+                post.get("activation_count", 0)
+            )
 
-            _atomic_write_text(file_path, frontmatter.dumps(post))
+            _write_atomic_text(file_path, frontmatter.dumps(post))
             self._cache_bump(
                 bucket_id,
                 last_active=post["last_active"],
@@ -2202,7 +2706,7 @@ class BucketManager:
                         current_count = 0.0
                     # Store as float for fractional increments; calculate_score handles it
                     post["activation_count"] = round(current_count + _RIPPLE_BOOST, 1)
-                    _atomic_write_text(file_path, frontmatter.dumps(post))
+                    _write_atomic_text(file_path, frontmatter.dumps(post))
                     self._cache_bump(
                         target_id,
                         activation_count=post["activation_count"],
@@ -2440,6 +2944,490 @@ class BucketManager:
     def _calc_time_score(self, meta: dict) -> float:
         return calc_time_score(meta)
 
+    @staticmethod
+    def _parse_iso_datetime(value) -> datetime | None:
+        """Return None for invalid historical timestamps."""
+        try:
+            return parse_iso_datetime(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    def calc_topic_scores(
+        self,
+        query: str,
+        buckets: list[dict],
+    ) -> dict[str, float]:
+        """Calculate model-independent lexical scores for a bucket batch."""
+        query = recall_topic_query(str(query or "").strip())
+        if not query or not buckets:
+            return {}
+
+        short_cjk_query = self._short_cjk_topic_query(query)
+        if short_cjk_query:
+            short_cjk_terms = self._short_cjk_topic_terms(short_cjk_query)
+            if not short_cjk_terms:
+                return {}
+            return {
+                str(bucket.get("id") or ""): max(
+                    self._calc_short_cjk_topic_score(
+                        term,
+                        bucket.get("metadata", {})
+                        if isinstance(bucket.get("metadata"), dict)
+                        else {},
+                        self._bucket_searchable_content(bucket),
+                    )
+                    for term in short_cjk_terms
+                )
+                for bucket in buckets
+                if bucket.get("id")
+            }
+
+        query_terms = self._lexical_query_terms(query)
+        if not query_terms:
+            return {}
+        query_phrase = self._lexical_query_phrase(query)
+        documents = []
+        document_frequency: Counter[str] = Counter()
+        for bucket in buckets:
+            bucket_id = str(bucket.get("id") or "")
+            if not bucket_id:
+                continue
+            term_frequency, document_length = self._bucket_lexical_profile(bucket)
+            phrase_score = self._lexical_phrase_boost(bucket, query_phrase)
+            documents.append(
+                (bucket_id, term_frequency, document_length, phrase_score)
+            )
+            present = set(term_frequency)
+            for term in query_terms:
+                if term in present:
+                    document_frequency[term] += 1
+        if not documents:
+            return {}
+
+        total_documents = len(documents)
+        average_length = max(
+            sum(item[2] for item in documents) / max(1, total_documents),
+            1.0,
+        )
+        k1 = 1.4
+        length_normalization = 0.72
+        scores: dict[str, float] = {}
+        for bucket_id, term_frequency, document_length, phrase_score in documents:
+            raw_score = 0.0
+            for term in query_terms:
+                frequency = float(term_frequency.get(term, 0.0))
+                if frequency <= 0:
+                    continue
+                frequency_documents = max(1, int(document_frequency.get(term, 0)))
+                inverse_frequency = math.log(
+                    1.0
+                    + (total_documents - frequency_documents + 0.5)
+                    / (frequency_documents + 0.5)
+                )
+                denominator = frequency + k1 * (
+                    1.0
+                    - length_normalization
+                    + length_normalization * document_length / average_length
+                )
+                if denominator > 0:
+                    raw_score += (
+                        inverse_frequency
+                        * frequency
+                        * (k1 + 1.0)
+                        / denominator
+                    )
+            if raw_score <= 0 and phrase_score <= 0:
+                continue
+            base_score = (
+                self._normalize_bm25_score(raw_score) if raw_score > 0 else 0.0
+            )
+            scores[bucket_id] = round(max(base_score, phrase_score), 4)
+        return scores
+
+    def filter_specific_lexical_terms(
+        self,
+        terms: list[str],
+        buckets: list[dict],
+        *,
+        preserve_terms: set[str] | None = None,
+        min_specificity: float = 0.34,
+        max_document_ratio: float = 0.45,
+    ) -> list[str]:
+        preserve = {
+            self._compact_lexical_phrase(term)
+            for term in (preserve_terms or set())
+            if self._compact_lexical_phrase(term)
+        }
+        ordered: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for term in terms or []:
+            cleaned = str(term or "").strip()
+            key = self._compact_lexical_phrase(cleaned)
+            if not cleaned or not key or key in seen:
+                continue
+            seen.add(key)
+            ordered.append((cleaned, key))
+        if not ordered:
+            return []
+        if not buckets:
+            return [term for term, _key in ordered]
+
+        haystacks = [
+            self._bucket_lexical_haystack(bucket)
+            for bucket in buckets
+            if isinstance(bucket, dict) and bucket.get("id")
+        ]
+        haystacks = [haystack for haystack in haystacks if haystack]
+        total_documents = len(haystacks)
+        if total_documents <= 0:
+            return [term for term, _key in ordered]
+
+        max_frequency = max(1, int(math.ceil(total_documents * max_document_ratio)))
+        if total_documents < 8:
+            max_frequency = max(1, total_documents // 2)
+        max_inverse_frequency = math.log(
+            1.0 + (total_documents + 0.5) / 0.5
+        )
+        kept: list[str] = []
+        for term, key in ordered:
+            if key in preserve:
+                kept.append(term)
+                continue
+            frequency = sum(1 for haystack in haystacks if key in haystack)
+            if frequency <= 0:
+                continue
+            inverse_frequency = math.log(
+                1.0
+                + (total_documents - frequency + 0.5) / (frequency + 0.5)
+            )
+            specificity = inverse_frequency / max(max_inverse_frequency, 1e-9)
+            if frequency <= max_frequency or specificity >= min_specificity:
+                kept.append(term)
+        return kept
+
+    def lexical_term_specificity_stats(
+        self,
+        terms: list[str],
+        buckets: list[dict],
+    ) -> dict[str, dict[str, float]]:
+        haystacks = [
+            self._bucket_lexical_haystack(bucket)
+            for bucket in buckets or []
+            if isinstance(bucket, dict) and bucket.get("id")
+        ]
+        haystacks = [haystack for haystack in haystacks if haystack]
+        total_documents = len(haystacks)
+        max_inverse_frequency = (
+            math.log(1.0 + (total_documents + 0.5) / 0.5)
+            if total_documents
+            else 1.0
+        )
+        stats: dict[str, dict[str, float]] = {}
+        seen: set[str] = set()
+        for term in terms or []:
+            cleaned = str(term or "").strip()
+            key = self._compact_lexical_phrase(cleaned)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            frequency = (
+                sum(1 for haystack in haystacks if key in haystack)
+                if total_documents
+                else 0
+            )
+            inverse_frequency = (
+                math.log(
+                    1.0
+                    + (total_documents - frequency + 0.5) / (frequency + 0.5)
+                )
+                if frequency > 0
+                else max_inverse_frequency
+            )
+            stats[cleaned] = {
+                "document_frequency": float(frequency),
+                "document_count": float(total_documents),
+                "specificity": round(
+                    inverse_frequency / max(max_inverse_frequency, 1e-9),
+                    4,
+                ),
+            }
+        return stats
+
+    def _bucket_lexical_haystack(self, bucket: dict) -> str:
+        metadata = (
+            bucket.get("metadata", {})
+            if isinstance(bucket.get("metadata"), dict)
+            else {}
+        )
+        text = " ".join(
+            [
+                str(metadata.get("name") or ""),
+                " ".join(str(item) for item in metadata.get("domain", []) or []),
+                " ".join(str(item) for item in metadata.get("tags", []) or []),
+                self._bucket_searchable_content(bucket),
+            ]
+        )
+        return self._compact_lexical_phrase(text)
+
+    @staticmethod
+    def _bucket_searchable_content(bucket: dict) -> str:
+        return bucket_content_for_recall(bucket)[:1000]
+
+    def _bucket_lexical_profile(
+        self,
+        bucket: dict,
+    ) -> tuple[dict[str, float], float]:
+        _signature, frequencies, weighted_length, _fields = (
+            self._bucket_lexical_cache_entry(bucket)
+        )
+        return frequencies, weighted_length
+
+    def warm_lexical_profiles(self, buckets: list[dict]) -> int:
+        warmed = 0
+        for bucket in buckets or []:
+            if not isinstance(bucket, dict) or not bucket.get("id"):
+                continue
+            self._bucket_lexical_cache_entry(bucket)
+            warmed += 1
+        return warmed
+
+    def _bucket_lexical_cache_entry(self, bucket: dict) -> LexicalProfile:
+        metadata = (
+            bucket.get("metadata", {})
+            if isinstance(bucket.get("metadata"), dict)
+            else {}
+        )
+        bucket_id = str(bucket.get("id") or metadata.get("id") or "")
+        name = str(metadata.get("name") or "")
+        domain = " ".join(str(item) for item in metadata.get("domain", []) or [])
+        tags = " ".join(str(item) for item in metadata.get("tags", []) or [])
+        content = self._bucket_searchable_content(bucket)
+        content_weight = float(self.content_weight or 1.0)
+        signature: LexicalSignature = (
+            bucket_id,
+            name,
+            domain,
+            tags,
+            content,
+            content_weight,
+        )
+        cache_key = bucket_id or f"anonymous:{hash(signature)}"
+        cached = self._lexical_profile_cache.get(cache_key)
+        if cached is not None and cached[0] == signature:
+            return cached
+        fields = (
+            ("name", name, 3.0),
+            ("domain", domain, 2.5),
+            ("tags", tags, 2.0),
+            ("content", content, content_weight),
+        )
+        frequencies: dict[str, float] = {}
+        weighted_length = 0.0
+        for field, text, weight in fields:
+            tokens = self._lexical_tokens(text)
+            if field != "content":
+                compact = self._compact_lexical_phrase(text)
+                if compact and not self._is_lexical_stop_term(compact):
+                    tokens.append(compact)
+            for token in tokens:
+                frequencies[token] = frequencies.get(token, 0.0) + weight
+            if tokens:
+                weighted_length += max(1, len(tokens)) * weight
+        value: LexicalProfile = (
+            signature,
+            frequencies,
+            max(weighted_length, 1.0),
+            tuple(
+                self._compact_lexical_phrase(text)
+                for _field, text, _weight in fields
+            ),
+        )
+        if len(self._lexical_profile_cache) >= 4096:
+            self._lexical_profile_cache.clear()
+        self._lexical_profile_cache[cache_key] = value
+        return value
+
+    def _lexical_query_terms(self, query: str) -> list[str]:
+        terms = self._lexical_tokens(query)
+        compact = self._lexical_query_phrase(query)
+        if compact:
+            terms.append(compact)
+        return list(dict.fromkeys(terms))
+
+    def _lexical_query_phrase(self, query: str) -> str:
+        compact = self._compact_lexical_phrase(query)
+        if not compact or len(compact) > 32 or self._is_lexical_stop_term(compact):
+            return ""
+        if re.fullmatch(r"[\u4e00-\u9fff]+", compact) and len(compact) < 3:
+            return ""
+        if re.fullmatch(r"[a-z0-9_.:-]+", compact):
+            if re.fullmatch(r"[\d.:-]+", compact):
+                return ""
+            if len(compact) < 3 and not re.search(r"\d", compact):
+                return ""
+        return compact
+
+    def _lexical_phrase_boost(self, bucket: dict, query_phrase: str) -> float:
+        if not query_phrase or len(query_phrase) < 3:
+            return 0.0
+        _signature, _frequencies, _weighted_length, fields = (
+            self._bucket_lexical_cache_entry(bucket)
+        )
+        best = 0.0
+        for compact, score in zip(fields, (0.95, 0.56, 0.54, 0.48)):
+            if compact and query_phrase in compact:
+                best = max(best, score)
+        return best
+
+    def _lexical_tokens(self, text: str) -> list[str]:
+        raw = str(text or "")
+        if not raw.strip():
+            return []
+        candidates = list(jieba.lcut(raw, cut_all=False))
+        candidates.extend(
+            re.findall(
+                r"[A-Za-z]+[A-Za-z0-9_.:-]*|\d+(?:\.\d+)+|[\u4e00-\u9fff]{2,}",
+                raw,
+            )
+        )
+        tokens: list[str] = []
+        for candidate in candidates:
+            token = self._normalize_lexical_term(candidate)
+            if token:
+                tokens.append(token)
+        return tokens
+
+    def _normalize_lexical_term(self, value: object) -> str:
+        term = str(value or "").strip().lower()
+        term = re.sub(
+            r"^[\s，。！？、,.!?:：;；~～♡❤♥（）()\[\]【】「」『』“”\"'`-]+",
+            "",
+            term,
+        )
+        term = re.sub(
+            r"[\s，。！？、,.!?:：;；~～♡❤♥（）()\[\]【】「」『』“”\"'`-]+$",
+            "",
+            term,
+        )
+        if not term or self._is_lexical_stop_term(term):
+            return ""
+        compact = re.sub(r"[^0-9a-z\u4e00-\u9fff_.:-]+", "", term)
+        if not compact or self._is_lexical_stop_term(compact):
+            return ""
+        if re.fullmatch(r"[\u4e00-\u9fff]+", compact) and len(compact) < 2:
+            return ""
+        if re.fullmatch(r"[a-z0-9_.:-]+", compact):
+            if re.fullmatch(r"[\d.:-]+", compact):
+                return ""
+            if len(compact) < 3 and not re.search(r"\d", compact):
+                return ""
+        return compact
+
+    @staticmethod
+    def _compact_lexical_phrase(value: object) -> str:
+        return re.sub(
+            r"[\s，。！？、,.!?:：;；~～♡❤♥（）()\[\]【】「」『』“”\"'`-]+",
+            "",
+            str(value or "").strip().lower(),
+        )
+
+    def _is_lexical_stop_term(self, value: object) -> bool:
+        term = self._compact_lexical_phrase(value)
+        return bool(term and term in self.lexical_stop_terms)
+
+    def _build_lexical_stop_terms(self, config: dict) -> set[str]:
+        values = set(GENERIC_LEXICAL_STOPWORDS)
+        values.update(getattr(self, "wikilink_stopwords", set()))
+        try:
+            values.update(memory_relevance_options_from_config(config).context_terms)
+        except Exception:
+            pass
+        try:
+            identity = identity_names(config)
+            values.update(identity.get("relationship_terms") or [])
+            values.update(identity.get("user_aliases") or [])
+        except Exception:
+            pass
+        return {
+            compact
+            for value in values
+            if (compact := self._compact_lexical_phrase(value))
+        }
+
+    @staticmethod
+    def _normalize_bm25_score(raw_score: float) -> float:
+        return max(0.0, min(1.0, 1.0 - math.exp(-float(raw_score) / 4.0)))
+
+    @staticmethod
+    def _short_cjk_topic_query(query: str) -> str:
+        compact = re.sub(
+            r"[\s，。！？、,.!?:：;；~～♡❤♥（）()\[\]【】「」『』“”\"'`-]+",
+            "",
+            str(query or ""),
+        )
+        return compact if re.fullmatch(r"[\u4e00-\u9fff]{1,3}", compact) else ""
+
+    def _short_cjk_topic_terms(self, query: str) -> list[str]:
+        terms: list[str] = []
+        for term in [query, *content_terms_for_query(query)]:
+            cleaned = str(term or "").strip()
+            if not re.fullmatch(r"[\u4e00-\u9fff]{1,3}", cleaned):
+                continue
+            if self._is_lexical_stop_term(cleaned):
+                continue
+            if cleaned not in terms:
+                terms.append(cleaned)
+        return terms
+
+    def _calc_short_cjk_topic_score(
+        self,
+        query: str,
+        metadata: dict,
+        searchable_content: str,
+    ) -> float:
+        def evidence(value: object) -> int:
+            text = str(value or "")
+            if query in text:
+                return 100
+            if len(query) < 3:
+                return 0
+            query_chars = {
+                character
+                for character in query
+                if "\u4e00" <= character <= "\u9fff"
+            }
+            if len(query_chars) < 3:
+                return 0
+            overlap = query_chars & {
+                character
+                for character in text
+                if "\u4e00" <= character <= "\u9fff"
+            }
+            coverage = len(overlap) / len(query_chars)
+            return 70 if len(overlap) >= 2 and coverage >= 0.67 else 0
+
+        domains = metadata.get("domain", []) or []
+        if isinstance(domains, str):
+            domains = [domains]
+        tags = metadata.get("tags", []) or []
+        if isinstance(tags, str):
+            tags = [tags]
+        name_score = evidence(metadata.get("name")) * 3
+        domain_score = max((evidence(item) for item in domains), default=0) * 2.5
+        tag_score = max((evidence(item) for item in tags), default=0) * 2
+        content_score = evidence(searchable_content) * self.content_weight
+        weighted = name_score + domain_score + tag_score + content_score
+        if weighted <= 0:
+            return 0.0
+        score = weighted / (100 * (3 + 2.5 + 2 + self.content_weight))
+        if content_score:
+            score = max(score, 0.36)
+        if domain_score or tag_score:
+            score = max(score, 0.45)
+        if name_score:
+            score = max(score, 0.50)
+        return min(1.0, score)
+
     def _calc_touch_score(self, meta: dict) -> float:
         return calc_touch_score(meta)
 
@@ -2646,6 +3634,20 @@ class BucketManager:
                     self._reconcile_external_changes(previous_cache, buckets)
                 return buckets
 
+    async def list_letters(self) -> list[dict]:
+        """List letter buckets through the historical isolated API."""
+        letters: list[dict] = []
+        for _root, _filename, file_path in self._iter_md_files([self.letter_dir]):
+            bucket = self._load_bucket(file_path)
+            if not bucket:
+                continue
+            metadata = bucket.get("metadata", {})
+            if metadata.get("deleted_at"):
+                continue
+            if str(metadata.get("type") or "").strip().lower() == "letter":
+                letters.append(bucket)
+        return letters
+
     # ---------------------------------------------------------
     # Statistics (counts per category + total size)
     # 统计信息（各分类桶数量 + 总体积）
@@ -2698,13 +3700,13 @@ class BucketManager:
     # Called by decay engine to simulate "forgetting"
     # 由衰减引擎调用，模拟"遗忘"
     # ---------------------------------------------------------
+    @_serialized_bucket_method
     async def archive(self, bucket_id: str) -> bool:
         """
         Move a bucket into the archive directory (preserving domain subdirs).
         将指定桶移入归档目录（保留域子目录结构）。
         """
-        async with self._bucket_turn(bucket_id):
-            return await self._archive_locked(bucket_id)
+        return await self._archive_locked(bucket_id)
 
     async def _archive_locked(self, bucket_id: str) -> bool:
         file_path = self._find_bucket_file(bucket_id)
@@ -2758,6 +3760,68 @@ class BucketManager:
             dict(post.metadata),
         )
         return True
+
+    async def activate(self, bucket_id: str) -> bool:
+        """Move an archived bucket back to dynamic storage."""
+        async with self._bucket_turn(bucket_id):
+            file_path = self._find_bucket_file(bucket_id)
+            if not file_path:
+                return False
+            try:
+                post = frontmatter.load(file_path)
+                if str(post.get("type") or "dynamic").strip().lower() != "archived":
+                    return True
+                domain = self._normalize_metadata_list(
+                    post.get("domain"),
+                    max_items=_MAX_DOMAINS,
+                    max_chars=_MAX_DOMAIN_CHARS,
+                ) or [_DEFAULT_DOMAIN_NAME]
+                primary_domain = self._primary_domain(domain)
+                target_dir = os.path.join(self.dynamic_dir, primary_domain)
+                os.makedirs(target_dir, exist_ok=True)
+                destination = safe_path(target_dir, os.path.basename(file_path))
+
+                post["type"] = "dynamic"
+                post["active"] = True
+                post["deprecated"] = False
+                post["resolved"] = False
+                post["updated_at"] = now_iso()
+                post["last_active"] = post.get("last_active") or post["updated_at"]
+                committed_path = self._commit_bucket_update(
+                    file_path,
+                    str(destination),
+                    frontmatter.dumps(post),
+                )
+            except Exception as exc:
+                logger.error(
+                    "Failed to activate bucket / 恢复桶失败: %s: %s",
+                    bucket_id,
+                    exc,
+                )
+                return False
+
+            self._invalidate_bm25()
+            self._record_v3_bucket_event(
+                "activate",
+                bucket_id,
+                "dynamic",
+                post.content or "",
+                dict(post.metadata),
+            )
+            self._record_ledger_event(
+                "TraceActivated",
+                bucket_id,
+                "dynamic",
+                post.content or "",
+                dict(post.metadata),
+                {"path": committed_path},
+            )
+            logger.info(
+                "Activated bucket / 恢复记忆桶: %s → dynamic/%s/",
+                bucket_id,
+                primary_domain,
+            )
+            return True
 
     # ---------------------------------------------------------
     # iter 1.8: 收集全库已有 tag 集合，用于 first_of_kind 检测
@@ -2999,7 +4063,8 @@ class BucketManager:
         解析 Markdown 文件，返回桶的结构化数据。
         """
         try:
-            post = frontmatter.load(file_path)
+            raw = Path(file_path).read_text(encoding="utf-8")
+            post = frontmatter.loads(raw)
             # Normalize the metadata object as one graph so aliases shared by
             # different top-level keys cannot reset the node/depth budgets.
             metadata = self._normalize_metadata_value(dict(post.metadata))
@@ -3044,6 +4109,7 @@ class BucketManager:
                 "metadata": metadata,
                 "content": post.content,
                 "path": file_path,
+                "content_start_line": _markdown_body_start_line(raw),
             }
         except Exception as e:
             logger.warning(

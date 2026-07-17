@@ -17,7 +17,7 @@ import time
 import uuid
 from typing import Any
 
-from utils import now_iso, parse_bool, positive_float
+from utils import bucket_text_for_embedding, now_iso, parse_bool, positive_float
 
 
 logger = logging.getLogger("ombre_brain.embedding_outbox")
@@ -44,7 +44,13 @@ class EmbeddingOutbox:
         self.config = config
         self.bucket_mgr = bucket_mgr
         self.embedding_engine = embedding_engine
-        self.path = os.path.join(config["buckets_dir"], _OUTBOX_FILENAME)
+        state_dir = str(config.get("state_dir") or config["buckets_dir"])
+        self.path = os.path.join(state_dir, _OUTBOX_FILENAME)
+        self._legacy_path = os.path.join(
+            str(config["buckets_dir"]),
+            _OUTBOX_FILENAME,
+        )
+        self._loaded_from_legacy = False
 
         embed_cfg = config.get("embedding", {}) or {}
         self.background_enabled = parse_bool(
@@ -83,9 +89,24 @@ class EmbeddingOutbox:
 
         self._lock = threading.RLock()
         self._items: dict[str, dict[str, Any]] = self._load_items()
+        if self._loaded_from_legacy:
+            try:
+                self._persist_locked()
+                logger.info(
+                    "Migrated embedding outbox into state_dir: %s",
+                    self.path,
+                )
+            except OSError as exc:
+                logger.warning(
+                    "Could not migrate embedding outbox into state_dir; "
+                    "the legacy queue remains authoritative: %s",
+                    exc,
+                )
         self._event: asyncio.Event | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._task: asyncio.Task | None = None
         self._running = False
+        self._starting = False
         self._processed = 0
         self._last_success = ""
         self._consecutive_failures = 0
@@ -241,10 +262,30 @@ class EmbeddingOutbox:
         self._wake()
         return changed
 
+    def ensure_started(self) -> bool:
+        """Schedule one background start from a running application loop."""
+        if not self.background_enabled or self._running or self._starting:
+            return False
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+        self._starting = True
+
+        async def start_once() -> None:
+            try:
+                await self.start()
+            finally:
+                self._starting = False
+
+        loop.create_task(start_once())
+        return True
+
     async def start(self, *, reconcile: bool = True) -> bool:
         if self._running or not self.background_enabled:
             return False
         self._running = True
+        self._loop = asyncio.get_running_loop()
         self._event = asyncio.Event()
         if reconcile:
             try:
@@ -272,6 +313,7 @@ class EmbeddingOutbox:
                 pass
         self._task = None
         self._event = None
+        self._loop = None
 
     async def reconcile(
         self,
@@ -438,35 +480,51 @@ class EmbeddingOutbox:
 
     async def _run(self) -> None:
         while self._running:
-            if self._event:
-                self._event.clear()
-            engine = self.embedding_engine
-            if not engine or not getattr(engine, "enabled", False):
-                await self._wait(_IDLE_POLL_SECONDS)
-                continue
-            circuit_delay = self._circuit_delay()
-            if circuit_delay > 0:
-                await self._wait(circuit_delay)
-                continue
-            bucket_id, item, delay = self._next_due()
-            if bucket_id and item is not None:
-                await self._process(bucket_id, item, engine)
-                continue
-            await self._wait(delay)
+            try:
+                if self._event:
+                    self._event.clear()
+                engine = self.embedding_engine
+                if not engine or not getattr(engine, "enabled", False):
+                    await self._wait(_IDLE_POLL_SECONDS)
+                    continue
+                circuit_delay = self._circuit_delay()
+                if circuit_delay > 0:
+                    await self._wait(circuit_delay)
+                    continue
+                bucket_id, item, delay = self._next_due()
+                if bucket_id and item is not None:
+                    await self._process(bucket_id, item, engine)
+                    continue
+                await self._wait(delay)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.exception("Embedding outbox worker error: %s", exc)
+                await self._wait(0.1)
 
     async def _process(self, bucket_id: str, item: dict[str, Any], engine: Any) -> None:
         bucket = await self.bucket_mgr.get(bucket_id)
         if not bucket:
             self.discard(bucket_id)
             return
-        content = str(bucket.get("content") or "")
-        if not content.strip():
+        body = str(bucket.get("content") or "")
+        if not body.strip():
             self.discard(bucket_id)
             return
-        digest = content_hash(content)
-        if digest != item.get("content_hash"):
-            self.enqueue(bucket_id, content)
+        queued_digest = str(item.get("content_hash") or "")
+        body_digest = content_hash(body)
+        historical_text = bucket_text_for_embedding(bucket)
+        historical_digest = content_hash(historical_text)
+        if queued_digest == body_digest:
+            content = body
+            historical_format = False
+        elif queued_digest == historical_digest:
+            content = historical_text
+            historical_format = True
+        else:
+            self.enqueue(bucket_id, body)
             return
+        digest = queued_digest
 
         try:
             ok = bool(await engine.generate_and_store(bucket_id, content))
@@ -485,7 +543,11 @@ class EmbeddingOutbox:
                 pass
             self.discard(bucket_id)
             return
-        latest_content = str(latest.get("content") or "")
+        latest_content = (
+            bucket_text_for_embedding(latest)
+            if historical_format
+            else str(latest.get("content") or "")
+        )
         if content_hash(latest_content) != digest:
             self.enqueue(bucket_id, latest_content)
             return
@@ -591,21 +653,36 @@ class EmbeddingOutbox:
             pass
 
     def _wake(self) -> None:
-        if self._event:
-            self._event.set()
+        event = self._event
+        loop = self._loop
+        if not event or not loop or loop.is_closed():
+            return
+        loop.call_soon_threadsafe(event.set)
 
     def _load_items(self) -> dict[str, dict[str, Any]]:
+        load_path = self.path
+        same_path = os.path.normcase(os.path.abspath(self.path)) == os.path.normcase(
+            os.path.abspath(self._legacy_path)
+        )
+        using_legacy = False
+        if not same_path and not os.path.exists(load_path) and os.path.isfile(
+            self._legacy_path
+        ):
+            load_path = self._legacy_path
+            using_legacy = True
         try:
-            with open(self.path, "r", encoding="utf-8") as handle:
+            with open(load_path, "r", encoding="utf-8") as handle:
                 payload = json.load(handle)
             raw_items = payload.get("items", {}) if isinstance(payload, dict) else {}
             if not isinstance(raw_items, dict):
                 return {}
-            return {
+            items = {
                 str(bucket_id): dict(item)
                 for bucket_id, item in raw_items.items()
                 if bucket_id and isinstance(item, dict) and item.get("content_hash")
             }
+            self._loaded_from_legacy = using_legacy
+            return items
         except FileNotFoundError:
             return {}
         except Exception as exc:

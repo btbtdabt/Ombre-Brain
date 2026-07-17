@@ -68,3 +68,8 @@ with their reason and regression evidence.
   and tests stay in the repository, but activation requires a separate migration
   because it changes storage, operations, and failure semantics rather than adding
   an isolated product feature.
+- Yinglianchun's active `wikilink:` example stanza is not retained. The shared
+  storage implementation deliberately stopped mutating saved content with
+  automatically generated links; it still reads author-supplied `[[wikilink]]`
+  values for graph features. The deprecated settings are documented in
+  `config.example.yaml` and ignored at runtime.

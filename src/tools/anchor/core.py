@@ -65,12 +65,22 @@ async def anchor_release(bucket_id: str) -> str:
 async def pulse(include_archive: Optional[bool] = False) -> str:
     if include_archive is None:
         include_archive = False
-    await rt.decay_engine.ensure_started()
+    ensure_started = getattr(rt.decay_engine, "ensure_started", None)
+    if callable(ensure_started):
+        await ensure_started()
     try:
         stats = await rt.bucket_mgr.get_stats()
     except Exception as e:
         return f"获取系统状态失败: {e}"
 
+    active_count = (
+        stats["permanent_count"]
+        + stats["dynamic_count"]
+        + stats.get("feel_count", 0)
+        + stats.get("letter_count", 0)
+    )
+    total_count = active_count + stats["archive_count"]
+    visible_count = total_count if include_archive else active_count
     status = (
         f"=== 我现在的记忆 ===\n"
         f"固化桶: {stats['permanent_count']} 个\n"
@@ -79,6 +89,9 @@ async def pulse(include_archive: Optional[bool] = False) -> str:
         f"feel 桶: {stats.get('feel_count', 0)} 条\n"
         f"plan 桶: {stats.get('plan_count', 0)} 条\n"
         f"letter 桶: {stats.get('letter_count', 0)} 封\n"
+        f"独立信件: {stats.get('letter_count', 0)} 封\n"
+        f"当前显示桶: {visible_count} 个\n"
+        f"全量记忆桶: {total_count} 个\n"
         f"总占用: {stats['total_size_kb']:.1f} KB\n"
         f"衰减引擎: {'运行中' if rt.decay_engine.is_running else '已停止'}\n"
     )
@@ -126,6 +139,7 @@ async def pulse(include_archive: Optional[bool] = False) -> str:
 
     try:
         buckets = await rt.bucket_mgr.list_all(include_archive=include_archive)
+        buckets.extend(await rt.bucket_mgr.list_letters())
     except Exception as e:
         return status + f"\n列出记忆桶失败: {e}"
 
@@ -148,7 +162,7 @@ async def pulse(include_archive: Optional[bool] = False) -> str:
         elif btype == "plan":
             icon = "📋"
         elif btype == "letter":
-            icon = "💌"
+            icon = "✉️"
         elif btype == "archived":
             icon = "🗄️"
         elif meta.get("resolved", False):

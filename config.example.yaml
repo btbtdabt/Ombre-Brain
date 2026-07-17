@@ -910,15 +910,3 @@ dream:
   #   OMBRE_DREAM_BASE_URL
   #   OMBRE_DREAM_MODEL
   #   OMBRE_DREAM_ENABLED
-
-# --- Scoring weights / 检索权重参数 ---
-# total = topic(×4) + emotion(×2) + time(×1.5) + importance(×1)
-
-wikilink:
-  enabled: true
-  use_tags: false
-  use_domain: true
-  use_auto_keywords: true
-  auto_top_k: 4
-  min_keyword_len: 3
-  exclude_keywords: []

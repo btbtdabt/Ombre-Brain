@@ -367,11 +367,47 @@ class GeminiNativeEmbeddingEngine(BaseEmbeddingEngine):
 class EmbeddingEngine:
     """SQLite 存储 + 搜索 + 元数据校验，持有一颗 BaseEmbeddingEngine。"""
 
+    @staticmethod
+    def _int_between(
+        value: Any,
+        default: int,
+        min_value: int,
+        max_value: int,
+    ) -> int:
+        try:
+            number = int(value)
+        except (TypeError, ValueError, OverflowError):
+            number = default
+        return max(min_value, min(max_value, number))
+
     def __init__(self, config: dict):
         self.v3_runtime = None
         # 进程内小容量 LRU：text -> embedding，去重短时间内的重复向量请求。
         self._query_cache: "OrderedDict[str, list[float]]" = OrderedDict()
         embed_cfg = config.get("embedding", {}) or {}
+        self.max_chars = self._int_between(
+            embed_cfg.get("max_chars", 6000),
+            6000,
+            500,
+            32000,
+        )
+        self.query_instruction = str(
+            embed_cfg.get("query_instruction")
+            or "Given a memory search query, retrieve relevant long-term memory passages."
+        ).strip()
+        self.document_instruction = str(
+            embed_cfg.get("document_instruction") or ""
+        ).strip()
+        self.query_cache_size = self._int_between(
+            embed_cfg.get("query_cache_size", 32),
+            32,
+            0,
+            256,
+        )
+        self._embedding_request_cache: "OrderedDict[tuple[str, str, str], list[float]]" = (
+            OrderedDict()
+        )
+        self.client: Any = None
         timeout_seconds = positive_float(embed_cfg.get("timeout_seconds"), _API_TIMEOUT_SECONDS)
 
         # 解析 backend：env > config > 默认 api
@@ -512,7 +548,12 @@ class EmbeddingEngine:
                     bucket_id TEXT PRIMARY KEY,
                     embedding TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    content_hash TEXT NOT NULL DEFAULT ''
+                    content_hash TEXT NOT NULL DEFAULT '',
+                    model TEXT,
+                    dimension INTEGER,
+                    meaning_embedding TEXT,
+                    meaning_model TEXT,
+                    meaning_dimension INTEGER
                 )
             """)
             columns = {
@@ -523,6 +564,10 @@ class EmbeddingEngine:
                 conn.execute(
                     "ALTER TABLE embeddings ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''"
                 )
+            if "model" not in columns:
+                conn.execute("ALTER TABLE embeddings ADD COLUMN model TEXT")
+            if "dimension" not in columns:
+                conn.execute("ALTER TABLE embeddings ADD COLUMN dimension INTEGER")
             if "meaning_embedding" not in columns:
                 # Miss: meaning 的向量独立存一列，不与 content 的 embedding 混合生成，
                 # 否则长 content 会稀释掉一句话 meaning 的语义信号。NULL = 该桶未写
@@ -530,12 +575,44 @@ class EmbeddingEngine:
                 conn.execute(
                     "ALTER TABLE embeddings ADD COLUMN meaning_embedding TEXT"
                 )
+            if "meaning_model" not in columns:
+                conn.execute("ALTER TABLE embeddings ADD COLUMN meaning_model TEXT")
+            if "meaning_dimension" not in columns:
+                conn.execute(
+                    "ALTER TABLE embeddings ADD COLUMN meaning_dimension INTEGER"
+                )
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS embeddings_meta (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 )
             """)
+            meta = {
+                str(key): str(value)
+                for key, value in conn.execute(
+                    "SELECT key, value FROM embeddings_meta"
+                ).fetchall()
+            }
+            old_model = meta.get("model_name", "").strip()
+            try:
+                old_dimension = int(meta.get("vector_dim", ""))
+            except (TypeError, ValueError):
+                old_dimension = 0
+            if old_model and old_dimension > 0:
+                conn.execute(
+                    """UPDATE embeddings
+                       SET model = COALESCE(model, ?),
+                           dimension = COALESCE(dimension, ?)
+                       WHERE TRIM(embedding) <> ''""",
+                    (old_model, old_dimension),
+                )
+                conn.execute(
+                    """UPDATE embeddings
+                       SET meaning_model = COALESCE(meaning_model, ?),
+                           meaning_dimension = COALESCE(meaning_dimension, ?)
+                       WHERE TRIM(COALESCE(meaning_embedding, '')) <> ''""",
+                    (old_model, old_dimension),
+                )
             conn.commit()
         finally:
             conn.close()
@@ -632,6 +709,40 @@ class EmbeddingEngine:
                 ),
             )
 
+    def _current_model_name(self) -> str:
+        if self._backend is not None:
+            model_name = getattr(self._backend, "model_name", None)
+            if callable(model_name):
+                return str(model_name() or "")
+        return str(self.model or "")
+
+    def _row_matches_current_model(
+        self,
+        model: str | None,
+        dimension: int | None,
+        embedding: list[float],
+    ) -> bool:
+        if not embedding:
+            return False
+        if self._backend is None:
+            return True
+        stored_model = str(model or "").strip()
+        if stored_model and _norm_model(stored_model) != _norm_model(
+            self._current_model_name()
+        ):
+            return False
+        try:
+            stored_dimension = int(dimension) if dimension is not None else 0
+        except (TypeError, ValueError):
+            return False
+        if stored_dimension and stored_dimension != len(embedding):
+            return False
+        try:
+            current_dimension = int(self._backend.vector_dim())
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            current_dimension = 0
+        return not current_dimension or current_dimension == len(embedding)
+
     # -------------------- 生成 + 存储 --------------------
 
     async def _generate_async(self, text: str) -> list[float]:
@@ -648,6 +759,55 @@ class EmbeddingEngine:
             if len(self._query_cache) > _QUERY_CACHE_MAXSIZE:
                 self._query_cache.popitem(last=False)
         return embedding
+
+    def _prepare_embedding_input(self, text: str, *, kind: str) -> str:
+        raw = str(text or "")
+        if kind == "query" and self.query_instruction:
+            return f"Instruct: {self.query_instruction}\nQuery: {raw}"
+        if kind == "document" and self.document_instruction:
+            return f"Instruct: {self.document_instruction}\nDocument: {raw}"
+        return raw
+
+    async def _generate_embedding(
+        self,
+        text: str,
+        *,
+        kind: str = "document",
+    ) -> list[float]:
+        """Generate a kind-aware vector through the historical compatibility API."""
+        normalized_kind = str(kind or "document")
+        prepared = self._prepare_embedding_input(text, kind=normalized_kind)
+        truncated = prepared[: self.max_chars]
+        cache_key = (normalized_kind, self.model, truncated)
+        cached = self._embedding_request_cache.get(cache_key)
+        if cached is not None:
+            self._embedding_request_cache.move_to_end(cache_key)
+            return list(cached)
+
+        try:
+            if self.client is not None:
+                response = await self.client.embeddings.create(
+                    model=self.model,
+                    input=truncated,
+                )
+                data = getattr(response, "data", None) or []
+                embedding = list(data[0].embedding) if data else []
+            else:
+                embedding = (
+                    await self._backend.generate_async(truncated)
+                    if self._backend is not None
+                    else []
+                )
+        except Exception as exc:
+            logger.warning("Embedding API call failed: %s", exc)
+            return []
+
+        if self.query_cache_size > 0 and embedding:
+            self._embedding_request_cache[cache_key] = list(embedding)
+            self._embedding_request_cache.move_to_end(cache_key)
+            while len(self._embedding_request_cache) > self.query_cache_size:
+                self._embedding_request_cache.popitem(last=False)
+        return list(embedding)
 
     async def generate_and_store(self, bucket_id: str, content: str) -> bool:
         """为内容生成 embedding 并存入 SQLite。成功返回 True。"""
@@ -674,13 +834,23 @@ class EmbeddingEngine:
         conn = sqlite3.connect(self.db_path)
         try:
             conn.execute(
-                """INSERT INTO embeddings (bucket_id, embedding, updated_at, content_hash)
-                   VALUES (?, ?, ?, ?)
+                """INSERT INTO embeddings
+                     (bucket_id, embedding, updated_at, content_hash, model, dimension)
+                   VALUES (?, ?, ?, ?, ?, ?)
                    ON CONFLICT(bucket_id) DO UPDATE SET
                      embedding=excluded.embedding,
                      updated_at=excluded.updated_at,
-                     content_hash=excluded.content_hash""",
-                (bucket_id, json.dumps(embedding), now_iso(), content_hash),
+                     content_hash=excluded.content_hash,
+                     model=excluded.model,
+                     dimension=excluded.dimension""",
+                (
+                    bucket_id,
+                    json.dumps(embedding),
+                    now_iso(),
+                    content_hash,
+                    self._current_model_name(),
+                    len(embedding),
+                ),
             )
             conn.commit()
         finally:
@@ -712,11 +882,21 @@ class EmbeddingEngine:
         conn = sqlite3.connect(self.db_path)
         try:
             conn.execute(
-                """INSERT INTO embeddings (bucket_id, embedding, updated_at, content_hash, meaning_embedding)
-                   VALUES (?, '', ?, '', ?)
+                """INSERT INTO embeddings
+                     (bucket_id, embedding, updated_at, content_hash,
+                      meaning_embedding, meaning_model, meaning_dimension)
+                   VALUES (?, '', ?, '', ?, ?, ?)
                    ON CONFLICT(bucket_id) DO UPDATE SET
-                     meaning_embedding=excluded.meaning_embedding""",
-                (bucket_id, now_iso(), json.dumps(embedding)),
+                     meaning_embedding=excluded.meaning_embedding,
+                     meaning_model=excluded.meaning_model,
+                     meaning_dimension=excluded.meaning_dimension""",
+                (
+                    bucket_id,
+                    now_iso(),
+                    json.dumps(embedding),
+                    self._current_model_name(),
+                    len(embedding),
+                ),
             )
             conn.commit()
         finally:
@@ -751,9 +931,18 @@ class EmbeddingEngine:
         conn = sqlite3.connect(self.db_path)
         try:
             rows = conn.execute(
-                "SELECT bucket_id FROM embeddings WHERE TRIM(embedding) <> ''"
+                """SELECT bucket_id, embedding, model, dimension
+                   FROM embeddings WHERE TRIM(embedding) <> ''"""
             ).fetchall()
-            return [str(row[0]) for row in rows]
+            output: list[str] = []
+            for bucket_id, payload, model, dimension in rows:
+                try:
+                    embedding = json.loads(payload)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if self._row_matches_current_model(model, dimension, embedding):
+                    output.append(str(bucket_id))
+            return output
         finally:
             conn.close()
 
@@ -762,9 +951,18 @@ class EmbeddingEngine:
         conn = sqlite3.connect(self.db_path)
         try:
             rows = conn.execute(
-                "SELECT bucket_id, content_hash FROM embeddings"
+                """SELECT bucket_id, content_hash, embedding, model, dimension
+                   FROM embeddings WHERE TRIM(embedding) <> ''"""
             ).fetchall()
-            return {str(bucket_id): str(digest or "") for bucket_id, digest in rows}
+            output: dict[str, str] = {}
+            for bucket_id, digest, payload, model, dimension in rows:
+                try:
+                    embedding = json.loads(payload)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if self._row_matches_current_model(model, dimension, embedding):
+                    output[str(bucket_id)] = str(digest or "")
+            return output
         finally:
             conn.close()
 
@@ -782,16 +980,54 @@ class EmbeddingEngine:
         conn = sqlite3.connect(self.db_path)
         try:
             row = conn.execute(
-                "SELECT embedding FROM embeddings WHERE bucket_id = ?", (bucket_id,)
+                """SELECT embedding, model, dimension FROM embeddings
+                   WHERE bucket_id = ?""",
+                (bucket_id,),
             ).fetchone()
         finally:
             conn.close()
         if row:
             try:
-                return json.loads(row[0])
-            except json.JSONDecodeError:
+                embedding = json.loads(row[0])
+            except (json.JSONDecodeError, TypeError):
                 return None
+            if self._row_matches_current_model(row[1], row[2], embedding):
+                return embedding
         return None
+
+    async def get_embeddings(
+        self,
+        bucket_ids: list[str],
+    ) -> dict[str, list[float]]:
+        """Read several current-model content vectors with one SQLite query."""
+        unique_ids = list(
+            dict.fromkeys(
+                str(item or "").strip()
+                for item in bucket_ids
+                if str(item or "").strip()
+            )
+        )
+        if not unique_ids:
+            return {}
+        placeholders = ",".join("?" for _item in unique_ids)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            rows = conn.execute(
+                f"""SELECT bucket_id, embedding, model, dimension
+                    FROM embeddings WHERE bucket_id IN ({placeholders})""",
+                unique_ids,
+            ).fetchall()
+        finally:
+            conn.close()
+        output: dict[str, list[float]] = {}
+        for bucket_id, payload, model, dimension in rows:
+            try:
+                embedding = json.loads(payload)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if self._row_matches_current_model(model, dimension, embedding):
+                output[str(bucket_id)] = embedding
+        return output
 
     # -------------------- 搜索 --------------------
 
@@ -829,7 +1065,9 @@ class EmbeddingEngine:
         conn = sqlite3.connect(self.db_path)
         try:
             cursor = conn.execute(
-                "SELECT bucket_id, embedding, meaning_embedding FROM embeddings"
+                """SELECT bucket_id, embedding, model, dimension,
+                          meaning_embedding, meaning_model, meaning_dimension
+                   FROM embeddings"""
             )
             while True:
                 rows = cursor.fetchmany(_SEARCH_BATCH_ROWS)
@@ -840,15 +1078,33 @@ class EmbeddingEngine:
                 best_scores: list[float | None] = []
                 candidate_vectors: list[list[float]] = []
                 candidate_owners: list[int] = []
-                for bucket_id, emb_json, meaning_emb_json in rows:
+                for (
+                    bucket_id,
+                    emb_json,
+                    content_model,
+                    content_dimension,
+                    meaning_emb_json,
+                    meaning_model,
+                    meaning_dimension,
+                ) in rows:
                     # 一个桶可能同时有 content 向量和 meaning 向量，取相似度
                     # 较高的一个。所有大对象都只活到当前小批次结束。
                     owner = len(bucket_ids)
                     bucket_ids.append(bucket_id)
                     best_scores.append(None)
-                    for label, raw_embedding in (
-                        ("embedding", emb_json),
-                        ("meaning embedding", meaning_emb_json),
+                    for label, raw_embedding, stored_model, stored_dimension in (
+                        (
+                            "embedding",
+                            emb_json,
+                            content_model,
+                            content_dimension,
+                        ),
+                        (
+                            "meaning embedding",
+                            meaning_emb_json,
+                            meaning_model,
+                            meaning_dimension,
+                        ),
                     ):
                         if not raw_embedding:
                             continue
@@ -866,6 +1122,12 @@ class EmbeddingEngine:
                                 f"[embedding] Skipping malformed {label} for {bucket_id!r}: "
                                 f"{type(_emb_exc).__name__}: {_emb_exc}"
                             )
+                            continue
+                        if not self._row_matches_current_model(
+                            stored_model,
+                            stored_dimension,
+                            stored_embedding,
+                        ):
                             continue
                         if len(stored_embedding) != query_dim:
                             # Preserve the pairwise helper's existing contract:

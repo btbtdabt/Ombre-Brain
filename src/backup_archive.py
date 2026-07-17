@@ -40,6 +40,7 @@ MAX_MANIFEST_BYTES = 8 * MIB
 MIGRATE_MAX_MEMBERS = 9_000
 MIGRATE_MAX_TOTAL_UNCOMPRESSED_BYTES = 512 * MIB
 MIGRATE_MAX_BUCKET_BYTES = 10 * MIB
+MIGRATE_MAX_MEDIA_BYTES = 25 * MIB
 MIGRATE_MAX_EXPORT_META_BYTES = 1 * MIB
 MIGRATE_MAX_EMBEDDINGS_DB_BYTES = 512 * MIB
 MIGRATE_MIN_FREE_RESERVE_BYTES = 64 * MIB
@@ -78,6 +79,10 @@ def _migration_member_limit(path: str) -> int:
     if path == "export_meta.json":
         return MIGRATE_MAX_EXPORT_META_BYTES
     parts = PurePosixPath(path).parts
+    if len(parts) >= 2 and parts[0] == "media":
+        return MIGRATE_MAX_MEDIA_BYTES
+    if len(parts) >= 3 and parts[:2] == ("buckets", "_media"):
+        return MIGRATE_MAX_MEDIA_BYTES
     if len(parts) >= 2 and parts[0] == "buckets" and path.endswith(".md"):
         return MIGRATE_MAX_BUCKET_BYTES
     raise BackupArchiveError(f"迁移包包含不支持的成员: {path}")
@@ -137,22 +142,49 @@ def validate_sqlite_bytes(db_bytes: bytes) -> None:
             pass
 
 
-def _collect_markdown(buckets_dir: str) -> dict[str, bytes]:
+def _media_root_for_backup(base: Path, media_dir: str | None) -> Path:
+    media_root = Path(media_dir or base / "_media").expanduser().resolve()
+    if media_root == base or base.is_relative_to(media_root):
+        raise BackupArchiveError("media_dir 不能等于或包含 buckets_dir")
+    return media_root
+
+
+def _iter_vault_files(base: Path, media_root: Path):
+    """Yield source, archive path, and allowed root for every source file."""
+    for path in sorted(base.rglob("*.md")):
+        if path.is_relative_to(media_root):
+            continue
+        relative = path.relative_to(base).as_posix()
+        yield path, _normalize_member_path(f"buckets/{relative}"), base
+
+    if media_root.is_dir():
+        for path in sorted(media_root.rglob("*")):
+            if not path.is_file() and not path.is_symlink():
+                continue
+            relative = path.relative_to(media_root).as_posix()
+            yield path, _normalize_member_path(f"media/{relative}"), media_root
+
+
+def _collect_vault_files(
+    buckets_dir: str,
+    media_dir: str | None = None,
+) -> dict[str, bytes]:
     base = Path(buckets_dir).resolve()
     if not base.is_dir():
         raise BackupArchiveError(f"buckets_dir not found: {buckets_dir}")
+    media_root = _media_root_for_backup(base, media_dir)
 
     files: dict[str, bytes] = {}
-    for path in sorted(base.rglob("*.md")):
+    for path, arc_path, allowed_root in _iter_vault_files(base, media_root):
+        if path.is_symlink():
+            raise BackupArchiveError(f"拒绝导出符号链接文件: {path}")
         resolved = path.resolve()
-        if not resolved.is_file() or not resolved.is_relative_to(base):
-            raise BackupArchiveError(f"拒绝导出指向记忆目录外的文件: {path}")
-        relative = resolved.relative_to(base).as_posix()
-        arc_path = _normalize_member_path(f"buckets/{relative}")
+        if not resolved.is_file() or not resolved.is_relative_to(allowed_root):
+            raise BackupArchiveError(f"拒绝导出指向允许目录外的文件: {path}")
         try:
             files[arc_path] = resolved.read_bytes()
         except OSError as exc:
-            raise BackupArchiveError(f"无法读取记忆文件 {relative}: {exc}") from exc
+            raise BackupArchiveError(f"无法读取备份文件 {arc_path}: {exc}") from exc
     return files
 
 
@@ -176,9 +208,10 @@ def build_export_archive(
     buckets_dir: str,
     embedding_db_path: str,
     export_meta: dict[str, Any],
+    media_dir: str | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
     """Build a complete in-memory archive or fail without returning a partial one."""
-    files = _collect_markdown(buckets_dir)
+    files = _collect_vault_files(buckets_dir, media_dir)
     db_bytes = snapshot_sqlite(embedding_db_path)
     if db_bytes:
         files["embeddings.db"] = db_bytes
@@ -236,8 +269,10 @@ def _stream_file_member(
                 digest.update(chunk)
                 output_handle.write(chunk)
                 archive_position = getattr(getattr(archive, "fp", None), "tell", None)
-                if callable(archive_position) and archive_position() > MAX_ARCHIVE_BYTES:
-                    raise BackupArchiveError("备份压缩后超过 512 MiB 上限")
+                if callable(archive_position):
+                    position = archive_position()
+                    if isinstance(position, (int, float)) and position > MAX_ARCHIVE_BYTES:
+                        raise BackupArchiveError("备份压缩后超过 512 MiB 上限")
     except BackupArchiveError:
         raise
     except OSError as exc:
@@ -251,6 +286,7 @@ def build_export_archive_file(
     buckets_dir: str,
     embedding_db_path: str,
     export_meta: dict[str, Any],
+    media_dir: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Build a bounded temporary ZIP on disk and return its path plus manifest.
 
@@ -263,6 +299,7 @@ def build_export_archive_file(
     base = Path(buckets_dir).resolve()
     if not base.is_dir():
         raise BackupArchiveError(f"buckets_dir not found: {buckets_dir}")
+    media_root = _media_root_for_backup(base, media_dir)
 
     archive_fd, archive_path = tempfile.mkstemp(prefix="ombre-export-", suffix=".zip")
     os.close(archive_fd)
@@ -289,17 +326,15 @@ def build_export_archive_file(
             zipfile.ZIP_DEFLATED,
             allowZip64=True,
         ) as archive:
-            for path in sorted(base.rglob("*.md")):
+            for path, arc_path, allowed_root in _iter_vault_files(base, media_root):
                 if path.is_symlink():
                     raise BackupArchiveError(f"拒绝导出符号链接文件: {path}")
                 try:
                     resolved = path.resolve(strict=True)
                 except OSError as exc:
                     raise BackupArchiveError(f"无法解析记忆文件 {path}: {exc}") from exc
-                if not resolved.is_file() or not resolved.is_relative_to(base):
-                    raise BackupArchiveError(f"拒绝导出指向记忆目录外的文件: {path}")
-                relative = path.relative_to(base).as_posix()
-                arc_path = _normalize_member_path(f"buckets/{relative}")
+                if not resolved.is_file() or not resolved.is_relative_to(allowed_root):
+                    raise BackupArchiveError(f"拒绝导出指向允许目录外的文件: {path}")
                 record(
                     _stream_file_member(
                         archive,
@@ -411,7 +446,10 @@ def _validate_infos(
         unix_mode = (info.external_attr >> 16) & 0xFFFF
         if unix_mode and stat.S_ISLNK(unix_mode):
             raise BackupArchiveError(f"不支持符号链接 ZIP 成员: {path}")
-        path_limit = member_limit(path) if callable(member_limit) else MAX_MEMBER_BYTES
+        raw_path_limit = member_limit(path) if callable(member_limit) else MAX_MEMBER_BYTES
+        if not isinstance(raw_path_limit, int):
+            raise BackupArchiveError(f"备份成员上限无效: {path}")
+        path_limit = raw_path_limit
         if info.file_size > path_limit:
             raise BackupArchiveError(f"备份成员过大: {path}")
         total += info.file_size

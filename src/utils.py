@@ -34,6 +34,7 @@ import logging
 import math
 import tempfile
 import threading
+from types import EllipsisType
 from pathlib import Path
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, Optional
@@ -563,7 +564,7 @@ def local_date_key(value, *, tz=LOCAL_TZ) -> str:
     return parsed.date().isoformat()
 
 
-def parse_bool(value, *, default=...) -> bool:
+def parse_bool(value: object, *, default: bool | EllipsisType = ...) -> bool:
     """Parse an explicit boolean without Python's ``bool('false')`` trap.
 
     JSON/YAML callers may supply booleans, 0/1, or common textual forms. Other

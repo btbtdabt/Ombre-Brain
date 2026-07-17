@@ -23,6 +23,11 @@ _SAFE_SUFFIX = re.compile(r"^\.[a-zA-Z0-9]{1,10}$")
 _DEFAULT_MAX_MEDIA_BYTES = 25 * 1024 * 1024
 
 
+def media_bucket_directory_name(bucket_id: str) -> str:
+    """Map a bucket id to its durable media subdirectory name."""
+    return re.sub(r"[^a-zA-Z0-9_.-]", "_", str(bucket_id or ""))[:128]
+
+
 class MediaPersistenceError(ValueError):
     """媒体无法在 OB 服务器上永久保存。"""
 
@@ -36,10 +41,22 @@ class MediaStore:
         media_dir: str,
         *,
         max_bytes: int = _DEFAULT_MAX_MEDIA_BYTES,
+        allowed_source_dirs: list[str] | None = None,
     ) -> None:
         self.vault_dir = Path(vault_dir).resolve()
         self.media_dir = Path(media_dir).resolve()
         self.max_bytes = max(1, int(max_bytes))
+        if allowed_source_dirs is None:
+            source_dirs = [tempfile.gettempdir()]
+        elif isinstance(allowed_source_dirs, str):
+            source_dirs = [allowed_source_dirs]
+        else:
+            source_dirs = allowed_source_dirs
+        self.allowed_source_dirs = tuple(
+            Path(source_dir).expanduser().resolve()
+            for source_dir in source_dirs
+            if str(source_dir or "").strip()
+        )
         self.media_dir.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
@@ -51,7 +68,7 @@ class MediaStore:
         return guessed if _SAFE_SUFFIX.fullmatch(guessed) else ".bin"
 
     def _stable_path(self, bucket_id: str, digest: str, suffix: str) -> Path:
-        safe_bucket = re.sub(r"[^a-zA-Z0-9_.-]", "_", bucket_id)[:128]
+        safe_bucket = media_bucket_directory_name(bucket_id)
         target_dir = (self.media_dir / safe_bucket).resolve()
         if self.media_dir not in target_dir.parents:
             raise MediaPersistenceError("媒体目录越界，已拒绝保存。")
@@ -82,11 +99,24 @@ class MediaStore:
             raise
 
     def _read_path(self, raw_path: str) -> tuple[bytes, str]:
-        source = Path(raw_path).expanduser()
-        if not source.is_file():
+        try:
+            source = Path(raw_path).expanduser().resolve(strict=True)
+        except OSError as exc:
             raise MediaPersistenceError(
                 f"媒体临时路径在 OB 服务器上不可读：{raw_path}。"
                 "请改传 data_base64，不能把客户端临时路径直接写进记忆。"
+            ) from exc
+        if not source.is_file():
+            raise MediaPersistenceError(
+                f"媒体临时路径不是普通文件：{raw_path}"
+            )
+        if not any(
+            source == root or source.is_relative_to(root)
+            for root in self.allowed_source_dirs
+        ):
+            raise MediaPersistenceError(
+                "媒体 path 只接受服务器上传临时目录中的文件；"
+                "其他来源请传 data_base64。"
             )
         size = source.stat().st_size
         if size > self.max_bytes:
