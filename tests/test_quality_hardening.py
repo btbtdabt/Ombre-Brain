@@ -1,6 +1,8 @@
 import asyncio
+from contextlib import asynccontextmanager
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import frontmatter
 
@@ -9,6 +11,7 @@ from dehydrator import Dehydrator
 from dream_engine import _clamp
 from memory_nodes import _facet_keywords_for_config
 from portrait_engine import DailyPortraitMaintainer
+from server import _install_app_startup_handler
 
 
 def _config(tmp_path: Path) -> dict:
@@ -86,3 +89,27 @@ def test_optional_llm_clients_fail_with_explicit_runtime_errors(tmp_path: Path) 
         except RuntimeError:
             continue
         raise AssertionError(f"{type(component).__name__} accepted a missing LLM client")
+
+
+def test_startup_handler_wraps_existing_asgi_lifespan() -> None:
+    events: list[str] = []
+
+    @asynccontextmanager
+    async def original_lifespan(_app):
+        events.append("original-start")
+        yield {"ready": True}
+        events.append("original-stop")
+
+    async def startup_handler() -> None:
+        events.append("ombre-start")
+
+    app = SimpleNamespace(router=SimpleNamespace(lifespan_context=original_lifespan))
+    assert _install_app_startup_handler(app, startup_handler) is True
+
+    async def run_lifespan() -> None:
+        async with app.router.lifespan_context(app) as state:
+            assert state == {"ready": True}
+            events.append("serving")
+
+    asyncio.run(run_lifespan())
+    assert events == ["original-start", "ombre-start", "serving", "original-stop"]

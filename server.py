@@ -53,9 +53,11 @@ import secrets
 import tempfile
 import time
 from base64 import b64decode
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any, Awaitable, Callable
 from urllib.parse import parse_qs, urlencode, urlparse
 from zoneinfo import ZoneInfo
 import httpx
@@ -4031,6 +4033,26 @@ async def _ensure_decay_engine_started_for_transport(transport_name: str) -> Non
         await decay_engine.ensure_started()
     except Exception as e:
         logger.warning("Decay engine startup failed / 衰减引擎启动失败: %s", e)
+
+
+def _install_app_startup_handler(
+    app: Any,
+    handler: Callable[[], Awaitable[None]],
+) -> bool:
+    router = getattr(app, "router", None)
+    original_lifespan_context: Any = getattr(router, "lifespan_context", None)
+    if not callable(original_lifespan_context):
+        return False
+    lifespan_context: Any = original_lifespan_context
+
+    @asynccontextmanager
+    async def lifespan(app_instance):
+        async with lifespan_context(app_instance) as state:
+            await handler()
+            yield state
+
+    setattr(router, "lifespan_context", lifespan)
+    return True
 
 
 async def _merge_or_create(
@@ -13909,12 +13931,12 @@ if __name__ == "__main__":
             _app = mcp.streamable_http_app()
         else:
             _app = mcp.sse_app()
-        if hasattr(_app, "add_event_handler"):
-            async def _start_decay_engine_on_app_startup():
-                await _ensure_decay_engine_started_for_transport(transport)
-                await embedding_outbox.start(reconcile=True)
+        async def _start_decay_engine_on_app_startup():
+            await _ensure_decay_engine_started_for_transport(transport)
+            await embedding_outbox.start(reconcile=True)
 
-            _app.add_event_handler("startup", _start_decay_engine_on_app_startup)
+        if not _install_app_startup_handler(_app, _start_decay_engine_on_app_startup):
+            raise RuntimeError("ASGI app does not expose a lifespan context")
         _app.add_middleware(
             CORSMiddleware,
             allow_origins=["*"],
