@@ -15,6 +15,7 @@ import os
 import threading
 import time
 import uuid
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from utils import bucket_text_for_embedding, now_iso, parse_bool, positive_float
@@ -332,6 +333,8 @@ class EmbeddingOutbox:
         """
         if buckets is None:
             buckets = await self.bucket_mgr.list_all(include_archive=include_archive)
+        if buckets is None:
+            raise TypeError("bucket manager returned no bucket snapshot")
 
         current: dict[str, tuple[str, str]] = {}
         for bucket in buckets:
@@ -351,11 +354,13 @@ class EmbeddingOutbox:
             if not callable(content_id_reader):
                 content_id_reader = getattr(engine, "list_all_ids", None)
             try:
-                content_ids = (
-                    set(content_id_reader())
-                    if callable(content_id_reader)
-                    else set()
-                )
+                if callable(content_id_reader):
+                    raw_content_ids = content_id_reader()
+                    if not isinstance(raw_content_ids, Iterable):
+                        raise TypeError("content ID reader returned a non-iterable")
+                    content_ids = set(raw_content_ids)
+                else:
+                    content_ids = set()
             except Exception as exc:
                 logger.warning(
                     "Embedding outbox could not list content index IDs: %s", exc
@@ -365,11 +370,16 @@ class EmbeddingOutbox:
                 return None
 
             hash_reader = getattr(engine, "list_content_hashes", None)
-            hashes_supported = callable(hash_reader)
             try:
-                indexed_hashes = (
-                    dict(hash_reader()) if hashes_supported else {}
-                )
+                if callable(hash_reader):
+                    raw_hashes = hash_reader()
+                    if not isinstance(raw_hashes, Mapping):
+                        raise TypeError("content hash reader returned a non-mapping")
+                    indexed_hashes = dict(raw_hashes)
+                    hashes_supported = True
+                else:
+                    indexed_hashes = {}
+                    hashes_supported = False
             except Exception as exc:
                 logger.warning(
                     "Embedding outbox could not read index hashes: %s", exc

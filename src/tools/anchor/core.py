@@ -26,6 +26,7 @@ pulse 顺带放在这里：它是系统状态 + 桶清单的总览，调用频�
 ========================================
 """
 
+import inspect
 from typing import Optional
 
 from .. import _runtime as rt
@@ -67,7 +68,10 @@ async def pulse(include_archive: Optional[bool] = False) -> str:
         include_archive = False
     ensure_started = getattr(rt.decay_engine, "ensure_started", None)
     if callable(ensure_started):
-        await ensure_started()
+        started = ensure_started()
+        if not inspect.isawaitable(started):
+            raise TypeError("decay ensure_started returned a non-awaitable")
+        await started
     try:
         stats = await rt.bucket_mgr.get_stats()
     except Exception as e:

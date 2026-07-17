@@ -157,6 +157,8 @@ class BaseEmbeddingEngine(abc.ABC):
     - 后端不开 SQLite 连接，不读写桶文件，存储/查询交给门面 EmbeddingEngine。
     """
 
+    _dim: int
+
     @abc.abstractmethod
     def generate(self, text: str) -> list[float]:
         """同步算一条向量。失败返回空列表（不抛运行期异常）。"""

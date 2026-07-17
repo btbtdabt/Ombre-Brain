@@ -30,6 +30,7 @@ import os
 import re
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 import math
@@ -38,9 +39,20 @@ import time
 import tempfile
 import uuid
 from collections import Counter
+from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from datetime import date, datetime
 from functools import wraps
+from pathlib import Path
+from typing import (
+    Any,
+    Optional,
+    Protocol,
+    SupportsFloat,
+    SupportsIndex,
+    SupportsInt,
+    TypedDict,
+)
 
 # 统一错误体系：越界 clamp 时上报 OB-W001/OB-W002（rule.md §11）
 try:
@@ -239,13 +251,33 @@ def _clamp_unit(v, field: str, source: str) -> float:
 
 def _metadata_float(value: object) -> float:
     """Read historical numeric metadata without rejecting YAML strings."""
+    if not value:
+        return 0.0
+    if not isinstance(
+        value,
+        (str, bytes, bytearray, SupportsFloat, SupportsIndex),
+    ):
+        return 0.0
     try:
-        parsed = float(value or 0)
+        parsed = float(value)
     except (TypeError, ValueError, OverflowError):
         return 0.0
     if not math.isfinite(parsed) or parsed < 0:
         return 0.0
     return parsed
+
+
+def _metadata_int(value: object, *, default: int) -> int:
+    """Read integer-like YAML scalars while rejecting container metadata."""
+    if not isinstance(
+        value,
+        (str, bytes, bytearray, SupportsInt, SupportsIndex),
+    ):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
 
 
 def _increment_activation_count(value: object) -> int | float:
@@ -266,9 +298,6 @@ def _markdown_body_start_line(text: str) -> int:
         return max(1, body_start)
     return 1
 
-
-from pathlib import Path
-from typing import Any, Optional
 
 import frontmatter
 import jieba
@@ -313,6 +342,19 @@ logger = logging.getLogger("ombre_brain.bucket")
 
 LexicalSignature = tuple[str, str, str, str, str, float]
 LexicalProfile = tuple[LexicalSignature, dict[str, float], float, tuple[str, ...]]
+
+
+class _BM25IndexProtocol(Protocol):
+    def build(self, buckets: list[dict]) -> None: ...
+
+    def score(self, query: str) -> dict[str, float]: ...
+
+
+class _TextFieldUpdates(TypedDict, total=False):
+    content: str
+    name: str
+    why_remembered: str
+    user_name: str
 
 
 _ORIGINAL_ATOMIC_WRITE_TEXT = atomic_write_text
@@ -507,7 +549,9 @@ class BucketManager:
         self.ledger_mirror = LedgerMirror(ledger_path)
 
         # BM25 稀疏索引（写操作后脏标记，search() 时懒重建）
-        self._bm25: "_BM25Index | None" = _BM25Index() if _BM25Index is not None else None
+        self._bm25: _BM25IndexProtocol | None = (
+            _BM25Index() if _BM25Index is not None else None
+        )
         self._bm25_dirty: bool = True
         self._bm25_rebuilding: bool = False  # Avoid concurrent duplicate rebuilds.
 
@@ -791,10 +835,7 @@ class BucketManager:
             digest = str(item.get("sha256") or "").lower()
             if re.fullmatch(r"[0-9a-f]{64}", digest):
                 entry["sha256"] = digest
-            try:
-                size = int(item.get("size"))
-            except (TypeError, ValueError, OverflowError):
-                size = -1
+            size = _metadata_int(item.get("size"), default=-1)
             if size >= 0:
                 entry["size"] = size
             if item.get("stored") is True:
@@ -834,7 +875,10 @@ class BucketManager:
         if not callable(store_meaning):
             return
         try:
-            await store_meaning(bucket_id, meaning_list[-1])
+            result = store_meaning(bucket_id, meaning_list[-1])
+            if not inspect.isawaitable(result):
+                raise TypeError("generate_and_store_meaning returned a non-awaitable")
+            await result
         except Exception as exc:
             logger.warning(f"meaning embedding failed for {bucket_id}: {exc}")
 
@@ -1378,7 +1422,7 @@ class BucketManager:
                     filename = f"{bucket_name}_{candidate_id}.md"
                 else:
                     filename = f"{candidate_id}.md"
-                candidate_path = safe_path(target_dir, filename)
+                candidate_path = str(safe_path(target_dir, filename))
                 if os.path.exists(candidate_path):
                     collision_count += 1
                     continue
@@ -1693,7 +1737,7 @@ class BucketManager:
                     continue
 
                 replacements = 0
-                updates: dict[str, str] = {}
+                updates: _TextFieldUpdates = {}
                 # A callable replacement is literal.  Passing ``new`` directly
                 # would interpret user-controlled ``\\1``/``\\g<name>`` syntax
                 # as regular-expression group references.
@@ -1977,11 +2021,21 @@ class BucketManager:
                 post.metadata.pop("media", None)
         if "media_append" in kwargs and kwargs["media_append"]:
             # Miss: 追加写入，去重同 path 的旧引用（trace media_append / hold 每次调用）。
-            existing_media = post.get("media") or []
+            raw_existing_media = post.get("media") or []
+            if not isinstance(raw_existing_media, list):
+                raise TypeError("bucket media metadata must be a list")
+            existing_media: list[object] = list(raw_existing_media)
             existing_paths = {m.get("path") for m in existing_media if isinstance(m, dict)}
-            appended = existing_media + [
-                m for m in kwargs["media_append"] if m.get("path") not in existing_paths
-            ]
+            raw_media_append = kwargs["media_append"]
+            if not isinstance(raw_media_append, list):
+                raise TypeError("media_append must be a list")
+            new_media: list[object] = []
+            for media_item in raw_media_append:
+                if not isinstance(media_item, dict):
+                    raise TypeError("media_append entries must be mappings")
+                if media_item.get("path") not in existing_paths:
+                    new_media.append(media_item)
+            appended = existing_media + new_media
             post["media"] = appended[:_MEDIA_MAX_ITEMS]
         if "meaning" in kwargs:
             # Miss: 整体覆盖写入（trace meaning_replace，用于纠错/清理）；空列表清空该字段。
@@ -1991,10 +2045,17 @@ class BucketManager:
                 post.metadata.pop("meaning", None)
         if "meaning_append" in kwargs and kwargs["meaning_append"]:
             # Miss: 追加一条新 meaning，不覆盖已有的（trace meaning_append / hold 每次调用）。
-            existing_meaning = post.get("meaning") or []
-            if isinstance(existing_meaning, str):
-                existing_meaning = [existing_meaning]
-            post["meaning"] = (list(existing_meaning) + [kwargs["meaning_append"]])[:_MEANING_LIST_MAX_ITEMS]
+            raw_existing_meaning = post.get("meaning") or []
+            if isinstance(raw_existing_meaning, str):
+                existing_meaning: list[object] = [raw_existing_meaning]
+            elif isinstance(raw_existing_meaning, Iterable):
+                existing_meaning = list(raw_existing_meaning)
+            else:
+                raise TypeError("bucket meaning metadata must be iterable")
+            meaning_append = kwargs["meaning_append"]
+            if not isinstance(meaning_append, str):
+                raise TypeError("meaning_append must be text")
+            post["meaning"] = (existing_meaning + [meaning_append])[:_MEANING_LIST_MAX_ITEMS]
         # --- Pass-through fields for plan/letter lifecycle ---
         # --- plan/letter/iter1.7 生命周期相关字段直接透传到 frontmatter ---
         # 这一组字段没有「校验/转换」逻辑，给什么写什么。新增字段往这个元组里加即可。
@@ -2107,10 +2168,17 @@ class BucketManager:
         final_type = str(post.get("type") or current_type).strip().lower()
         target_path = file_path
         if final_type in _EDITABLE_BUCKET_TYPES:
+            raw_domain = post.get("domain")
+            if isinstance(raw_domain, str):
+                domain_for_path = [raw_domain]
+            elif isinstance(raw_domain, (list, tuple)):
+                domain_for_path = [str(item) for item in raw_domain]
+            else:
+                domain_for_path = [_DEFAULT_DOMAIN_NAME]
             target_path = self._bucket_target_path(
                 file_path,
                 final_type,
-                post.get("domain") or [_DEFAULT_DOMAIN_NAME],
+                domain_for_path,
                 str(post.get("status") or "active"),
             )
 
@@ -2146,7 +2214,8 @@ class BucketManager:
             await self._index_after_write(bucket_id, post.content or "")
         # Miss: meaning 有独立的 embedding，content 和 meaning 改动分别触发各自的重生成。
         if "meaning" in kwargs or "meaning_append" in kwargs:
-            await self._sync_meaning_embedding(bucket_id, post.get("meaning") or [])
+            meaning_list = self._normalize_meaning_list(post.get("meaning") or [])
+            await self._sync_meaning_embedding(bucket_id, meaning_list)
         self._invalidate_bm25()
         self._record_v3_bucket_event(
             "update",
