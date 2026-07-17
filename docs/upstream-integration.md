@@ -11,8 +11,9 @@ verification evidence.
 - P0luz primary baseline: `v2.7.6` / `6da5158`
 - Yinglianchun secondary baseline: `4e0a546`
 - Historical deployed root runtime: `8e68a7d`
+- P0luz-base production cutover: `c806f78`
 
-The migration branch starts directly from the P0luz baseline. It does not merge
+The migration branch started directly from the P0luz baseline. It does not merge
 the historical root runtime because that would install two competing server
 implementations. Current and Yinglianchun behavior is instead ported into the
 P0luz `src/`, `src/tools/`, and `src/web/` module structure.
@@ -96,8 +97,24 @@ Local verification for this batch:
 - The saved Dashboard runtime overlay matched the effective Gateway config, and
   Persona post-reply processing continued in the copied 118-event state database.
 - The relay-facing native Claude and MCP contracts were exercised directly on
-  staging. The public Cloudflare relay remains production-targeted and must be
-  checked end to end immediately after production cutover.
+  staging.
+
+Production cutover verification:
+
+- The final P0luz-base tree was connected to the historical production lineage
+  by merge commit `c806f78`; the merge did not change the verified tree.
+- Production Brain and Gateway run image `ombre-brain:p0luz-main-c806f78` with
+  loopback health checks returning 200 and the persisted runtime source hash
+  matching the verified image.
+- The public production-alignment suite passed Claude 4.8, native Gemini, relay,
+  native Claude MCP tool use, and the expected current Ombre tool set.
+- Production loaded `/state/config.runtime.yaml`, retained the historical
+  118-event Persona database, and honored Dream retention settings.
+- A live SiliconFlow reranker request returned two results with the dedicated
+  reranker configuration; fresh Brain and Gateway logs contained no error-level
+  entries after cutover.
+- Rollback is retained as stopped containers based on `8e68a7d`, fork branch
+  `codex/pre-p0luz-cutover-20260716`, and a verified pre-cutover data archive.
 
 ## Intentional Architecture Exclusions
 

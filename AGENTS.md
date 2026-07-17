@@ -39,7 +39,8 @@ Merge tested P0luz updates into the local branch. Review every Yinglianchun comm
 
 ## Migration Safety
 
-- The historical root runtime remains the rollback implementation until P0luz-base parity is proven.
+- Production runs the modular P0luz-base runtime. The historical root runtime is rollback-only and must not receive new features or routine fixes.
+- Keep the pre-cutover data archive and stopped historical containers until Amy explicitly retires them after a stable observation period.
 - Never point migration tests at live `buckets/`, `state/`, SQLite databases, or config files. Test with copies in temporary directories.
 - Treat Markdown buckets as source data. Embeddings and projections are derived indexes and may be rebuilt only after a verified backup.
 - Validate SQLite copies with `PRAGMA quick_check` and validate backup manifests/checksums before import.
@@ -82,7 +83,7 @@ Use the SSH alias:
 ssh ombre-vps
 ```
 
-Production currently runs the historical root runtime. Do not replace it until the P0luz-base staging deployment passes the full parity checklist. Retain the old containers/images and data snapshot for rollback during cutover.
+Production runs the P0luz-base modular runtime from `fork/main`. Deploy the exact locally tested commit, preserve deployment-local data/config mounts, and verify public Brain, Gateway, relay, Claude, Gemini, MCP, Persona, and reranker paths after runtime changes. The historical root containers and pre-cutover snapshot are rollback assets only; never switch back merely to resolve an upstream merge conflict.
 
 After Gateway, config, MCP, relay, VPS, or Cloudflare changes, run the production-alignment checker once it has been ported to the new layout:
 
