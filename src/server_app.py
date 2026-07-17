@@ -112,14 +112,20 @@ class HTTPRuntimeSettings:
         auth_mode = str(config.get("mcp_auth_mode", "oauth")).strip().lower()
         if auth_mode not in ("oauth", "token"):
             auth_mode = "oauth"
+        auth_required = parse_bool(
+            config.get("mcp_require_auth", True), default=True
+        )
+        public_origin = configured_public_origin(config)
+        if not public_origin and auth_required and auth_mode == "oauth":
+            public_origin = normalize_public_origin(
+                os.environ.get("OMBRE_CHATGPT_OAUTH_PUBLIC_BASE_URL", "")
+            )
         return cls(
-            auth_required=parse_bool(
-                config.get("mcp_require_auth", True), default=True
-            ),
+            auth_required=auth_required,
             max_request_bytes=max_request_bytes,
             max_management_request_bytes=max_management_request_bytes,
             auth_mode=auth_mode,
-            public_origin=configured_public_origin(config),
+            public_origin=public_origin,
         )
 
 

@@ -2,6 +2,7 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from starlette.applications import Starlette
@@ -78,6 +79,54 @@ def test_http_runtime_settings_are_normalized(config, auth_required, limit):
 
     assert settings.auth_required is auth_required
     assert settings.max_request_bytes == limit
+
+
+def test_http_runtime_settings_use_fixed_oauth_public_origin_fallback(monkeypatch):
+    monkeypatch.setenv(
+        "OMBRE_CHATGPT_OAUTH_PUBLIC_BASE_URL",
+        "HTTPS://Brain.Example:443/mcp/",
+    )
+
+    settings = HTTPRuntimeSettings.from_config(
+        {"mcp_require_auth": True, "mcp_auth_mode": "oauth"}
+    )
+
+    assert settings.public_origin == "https://brain.example"
+
+
+def test_deployment_public_url_wins_over_fixed_oauth_env(monkeypatch):
+    monkeypatch.setenv(
+        "OMBRE_CHATGPT_OAUTH_PUBLIC_BASE_URL",
+        "https://legacy.example",
+    )
+
+    settings = HTTPRuntimeSettings.from_config(
+        {
+            "mcp_require_auth": True,
+            "mcp_auth_mode": "oauth",
+            "deployment": {"public_url": "https://configured.example/mcp"},
+        }
+    )
+
+    assert settings.public_origin == "https://configured.example"
+
+
+def test_disabled_mcp_auth_does_not_adopt_fixed_oauth_origin(monkeypatch):
+    monkeypatch.setenv(
+        "OMBRE_CHATGPT_OAUTH_PUBLIC_BASE_URL",
+        "https://oauth-only.example",
+    )
+
+    settings = HTTPRuntimeSettings.from_config({"mcp_require_auth": False})
+    configured = HTTPRuntimeSettings.from_config(
+        {
+            "mcp_require_auth": False,
+            "deployment": {"public_url": "https://configured.example"},
+        }
+    )
+
+    assert settings.public_origin == ""
+    assert configured.public_origin == "https://configured.example"
 
 
 @pytest.mark.parametrize(
@@ -830,7 +879,7 @@ async def test_runtime_lifespan_composes_with_parent_lifespan():
             events.append("runtime:stop")
 
     app = SimpleNamespace(router=SimpleNamespace(lifespan_context=parent))
-    install_runtime_lifespan(app, FakeLifecycle())
+    install_runtime_lifespan(app, cast(RuntimeLifecycle, FakeLifecycle()))
 
     async with app.router.lifespan_context(app):
         events.append("body")

@@ -80,7 +80,7 @@ fixed access token remains a resource-bound compatibility credential.
 
 Local verification for this batch:
 
-- `pytest`: 2,149 passed, 79 skipped, 3 known warnings.
+- `pytest`: 2,152 passed, 79 skipped, 3 known warnings.
 - Ruff: clean across the repository.
 - Pyright: zero errors across all 57 changed Python files. The whole-tree debt
   audit remains non-zero in dormant v3/legacy annotations and is not hidden.
