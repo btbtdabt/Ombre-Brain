@@ -9,5 +9,6 @@ pytest
 pytest-asyncio
 pytest-cov
 pytest-timeout
+pyright
 ruff
 uv==0.11.23
