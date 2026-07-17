@@ -127,7 +127,7 @@ def write_memory(
     except (TypeError, ValueError, OverflowError):
         normalized_importance = 7
     metadata = {
-        "activation_count": 0,
+        "activation_count": 1,
         "arousal": _finite_unit(arousal, 0.3),
         "created": now,
         "domain": _bounded_strings(domain) or ["未分类"],

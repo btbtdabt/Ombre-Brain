@@ -25,7 +25,7 @@ decay_engine.py — 记忆衰减引擎，模拟人类遗忘曲线
 import math
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from utils import parse_iso_datetime
 
@@ -176,6 +176,19 @@ class DecayEngine:
         """
         hours = days_since * 24.0
         return 1.0 + _FRESHNESS_AMPLITUDE * math.exp(-hours / _FRESHNESS_HALF_LIFE_HRS)
+
+    @staticmethod
+    def _parse_datetime(value) -> datetime:
+        """Historical UTC-normalizing parser retained for compatibility."""
+
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return parsed
+        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+
+    @staticmethod
+    def _now_naive_utc() -> datetime:
+        return datetime.now(timezone.utc).replace(tzinfo=None)
 
     def calculate_score(self, metadata: dict) -> float:
         """

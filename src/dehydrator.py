@@ -32,11 +32,20 @@ import hashlib
 import sqlite3
 import weakref
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 from openai import AsyncOpenAI
 
-from utils import clean_llm_json, count_tokens_approx, parse_bool, positive_float
+from identity import generic_identity_names, identity_names, render_identity_template
+from memory_layers import normalize_write_classification
+from memory_metadata import domain_prompt_options_text, normalize_domain_key
+from utils import (
+    clean_llm_json,
+    count_tokens_approx,
+    parse_bool,
+    parse_first_json_value,
+    positive_float,
+)
 
 try:
     from provider_detect import is_gemini_native_host, strip_native_resource_prefix
@@ -118,6 +127,45 @@ _IMPORTANCE_MAX = 10
 _DEFAULT_IMPORTANCE = 5
 
 
+RESERVED_SELF_ANCHOR_TAGS = {
+    "self_anchor",
+    "selfanchor",
+    "selfidentity",
+    "self_identity",
+    "self-identity",
+    "first_person_anchor",
+    "first-person-anchor",
+    "firstpersonanchor",
+    "自我",
+}
+
+
+def _tag_key(value: object) -> str:
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff_]+", "", str(value or "").strip().lower())
+
+
+def _sanitize_generated_tags(tags: object) -> list[str]:
+    if isinstance(tags, str):
+        raw = [part.strip() for part in tags.split(",")]
+    elif isinstance(tags, (list, tuple, set)):
+        raw = list(tags)
+    else:
+        raw = []
+    clean: list[str] = []
+    for tag in raw:
+        text = str(tag or "").strip()
+        if not text or _tag_key(text) in RESERVED_SELF_ANCHOR_TAGS:
+            continue
+        if text not in clean:
+            clean.append(text)
+    return clean[:_TAGS_MAX]
+
+
+# Public name retained by the historical root runtime. The P0 prompt has
+# advanced through four perspective revisions, so expose that active version.
+DEHYDRATION_PROMPT_VERSION = _PROMPT_VERSION
+
+
 # --- Dehydration prompt: instructs cheap LLM to compress information ---
 # --- 脱水提示词：指导廉价 LLM 压缩信息 ---
 # --- Perspective rule (shared) ---
@@ -158,6 +206,7 @@ DEHYDRATE_PROMPT = """你是一个信息压缩专家。请将以下内容脱水�
 6. 严格保留第一人称视角（见下方视角铁律）
 7. 只输出摘要 JSON，JSON 结束后立即停止；禁止附加自己的评论与立场、解释、道德判断、合规声明或角色代入
 8. 只复述输入中明确存在的信息，不得生成原文中不存在的观点、结论或待办
+9. 动作、感受、承诺和原话必须归属于原文中的主体；保持原有人称与视角，不要交换双方视角。原文省略主体且上下文不足时，保留省略，不猜测
 
 输出格式（纯 JSON，无其他内容）：
 {
@@ -171,7 +220,7 @@ DEHYDRATE_PROMPT = """你是一个信息压缩专家。请将以下内容脱水�
 
 # --- Diary digest prompt: split daily notes into independent memory entries ---
 # --- 日记整理提示词：把一大段日常拆分成多个独立记忆条目 ---
-DIGEST_PROMPT = """你是一个日记整理专家。她/他会发送一段包含今天各种事情的文本（可能很杂乱），请你将其拆分成多个独立的记忆条目。
+DIGEST_PROMPT_TEMPLATE = """你是一个日记整理专家。她/他会发送一段包含今天各种事情的文本（可能很杂乱），请你将其拆分成多个独立的记忆条目。
 
 整理规则：
 1. 每个条目应该是一个独立的主题/事件（不要混在一起）
@@ -211,10 +260,58 @@ importance: 1-10，根据内容重要程度判断
 valence: 0~1（0=消极, 0.5=中性, 1=积极）
 arousal: 0~1（0=平静, 0.5=普通, 1=激动）"""
 
+DIGEST_PROMPT_TEMPLATE += """
+
+当前身份口径来自配置：
+- 当前用户显示名：{user_display_name}
+- 当前 AI 名：{ai_name}
+- 用户别名：{user_aliases_text}
+
+长期记忆兼容规则（优先于上面的通用日记规则）：
+1. 输入已经过筛选；只提取长期有用的事实、偏好、承诺、关系锚点或当前项目状态，运维和部署噪声不要入库。
+2. 如果 user / 用户 / 用户消息指当前用户，content 中写作 {user_display_name}；如果 assistant / AI / 模型 / 助手消息指当前回应者，写作 {ai_name}。
+3. 原文里的具体称呼、昵称、互称、自称和亲密称谓必须原样保留，不要泛化为用户或 AI。
+4. memory_subject 只能是 user / relationship / event；memory_layer 只能是 stable_boundary / short_state / process_event / relationship_lesson。
+5. content 至少包含正文；### moment、### original、### reflection 按需写。### reflection 必须保持 {ai_name} 的第一人称反思。
+6. 禁止生成系统边界标签：self_anchor、self_identity、self-identity、first_person_anchor、first-person-anchor、自我。
+7. domain 必须从下面的新主域里选最精确的 1 个；确实横跨两个主域时才输出 2 个：
+{domain_options_text}
+8. 动作、感受、承诺和原话必须归属于原文中的主体；保持原有人称与视角，不要交换双方视角。上下文不足时保持主语省略，不猜测。
+
+输出格式（必须按照此格式输出）：
+[
+  {
+    "name": "条目标题（10字以内）",
+    "content": "整理后的内容",
+    "domain": ["主题域1"],
+    "valence": 0.7,
+    "arousal": 0.4,
+    "tags": ["核心词1", "核心词2"],
+    "importance": 5,
+    "memory_subject": "user",
+    "memory_layer": "stable_boundary"
+  }
+]
+
+输出必须是一个合法 JSON array。"""
+
+
+def _render_dehydrator_template(template: str, names: dict[str, Any]) -> str:
+    return render_identity_template(
+        template.replace("{domain_options_text}", domain_prompt_options_text()),
+        names,
+    )
+
+
+DIGEST_PROMPT = _render_dehydrator_template(
+    DIGEST_PROMPT_TEMPLATE,
+    generic_identity_names(),
+)
+
 
 # --- Merge prompt: instruct LLM to blend old and new memories ---
 # --- 合并提示词：指导 LLM 揉合新旧记忆 ---
-MERGE_PROMPT = """你是一个信息合并专家。请将旧记忆与新内容合并为一份统一的简洁记录。
+MERGE_PROMPT_TEMPLATE = """你是一个信息合并专家。请将旧记忆与新内容合并为一份统一的简洁记录。
 
 合并规则：
 1. 新内容与旧记忆冲突时，以新内容为准
@@ -226,10 +323,29 @@ MERGE_PROMPT = """你是一个信息合并专家。请将旧记忆与新内容�
 
 直接输出合并后的文本，不要加额外说明。"""
 
+MERGE_PROMPT_TEMPLATE += """
+
+当前身份口径来自配置：
+- 当前用户显示名：{user_display_name}
+- 当前 AI 名：{ai_name}
+- 用户别名：{user_aliases_text}
+
+兼容规则：
+1. 原文里的具体称呼、昵称、互称、自称和亲密称谓必须原样保留。
+2. content 至少包含正文。### moment 只放长期有用的短事实；### original 只放必须保留原味的短原话；### reflection 放 {ai_name} 的理解和以后如何回应。
+3. 保留旧记忆和新内容已有的 section 语义与人称；### reflection 必须继续使用第一人称。
+4. 动作、感受、承诺和原话必须归属于原文中的主体；保持原有人称与视角，不要交换双方视角。上下文不足时保持主语省略，不猜测。
+"""
+
+MERGE_PROMPT = render_identity_template(
+    MERGE_PROMPT_TEMPLATE,
+    generic_identity_names(),
+)
+
 
 # --- Auto-tagging prompt: analyze content for domain and emotion coords ---
 # --- 自动打标提示词：分析内容的主题域和情感坐标 ---
-ANALYZE_PROMPT = """你是一个内容分析器。请分析以下文本，输出结构化的元数据。
+ANALYZE_PROMPT_TEMPLATE = """你是一个内容分析器。请分析以下文本，输出结构化的元数据。
 
 分析规则：
 1. domain（主题域）：选最精确的 1~2 个，只选真正相关的
@@ -259,6 +375,49 @@ ANALYZE_PROMPT = """你是一个内容分析器。请分析以下文本，输出
   "suggested_name": "简短标题"
 }"""
 
+ANALYZE_PROMPT_TEMPLATE += """
+
+兼容分类规则（优先于上面的旧主题域示例）：
+1. domain 必须从下面的新主域里选最精确的 1 个；确实横跨两个主域时才输出 2 个：
+{domain_options_text}
+2. memory_subject 只能是 user / relationship / event。
+3. memory_layer 只能是 stable_boundary / short_state / process_event / relationship_lesson。
+4. 禁止生成系统边界标签：self_anchor、self_identity、self-identity、first_person_anchor、first-person-anchor、自我。
+
+输出格式（必须按照此格式输出）：
+{
+  "domain": ["主题域1", "主题域2"],
+  "valence": 0.7,
+  "arousal": 0.4,
+  "tags": ["核心词1", "核心词2"],
+  "suggested_name": "简短标题",
+  "memory_subject": "event",
+  "memory_layer": "process_event"
+}
+
+输出必须是一个合法 JSON object。"""
+
+ANALYZE_PROMPT = ANALYZE_PROMPT_TEMPLATE.replace(
+    "{domain_options_text}",
+    domain_prompt_options_text(),
+)
+
+
+DIRECT_BUCKET_CAPSULE_PROMPT = """你是长期记忆证据压缩器。请把一整条记忆 bucket 压成 direct recall 胶囊。
+
+目标：让模型能看见这条记忆的关键细节、原话、关系事实、情绪温度和转折，而不是只得到普通摘要。
+
+规则：
+1. 保留具体称呼、原话、关键动作、日期、承诺、偏好和关系定位。
+2. 保留记忆里的关键转折和当时的语气，不要改写成空泛概括。
+3. 压掉重复、旁枝、列表噪声和无关格式。
+4. 如果原文里有明显的“用户原话 / assistant 原话”，尽量保留短句原话。
+5. 不要写“这条记忆说明了什么”“象征着什么”这类解释。
+6. 输出为中文短胶囊，200-500字，按信息密度组织。
+7. 动作、感受、承诺和原话必须归属于原文中的主体；保持原有人称与视角，不要交换双方视角。原文省略主体且上下文不足时，保留省略，不猜测。
+
+直接输出胶囊正文，不要 JSON，不要标题。"""
+
 
 class Dehydrator:
     """
@@ -274,6 +433,7 @@ class Dehydrator:
     """
 
     def __init__(self, config: dict):
+        self.identity = identity_names(config)
         # --- Read dehydration API config / 读取脱水 API 配置 ---
         dehy_cfg = config.get("dehydration", {})
         self.api_key = dehy_cfg.get("api_key", "")
@@ -282,6 +442,9 @@ class Dehydrator:
         self.max_tokens = dehy_cfg.get("max_tokens", _DEFAULT_MAX_TOKENS)
         self.temperature = dehy_cfg.get("temperature", _DEFAULT_TEMPERATURE)
         self.timeout_seconds = positive_float(dehy_cfg.get("timeout_seconds"), _API_TIMEOUT_SECONDS)
+        self.thinking_mode = self._normalize_thinking_mode(
+            dehy_cfg.get("thinking_mode", "")
+        )
         # api_format: "openai_compat" (default) | "gemini" | "anthropic"
         self.api_format = dehy_cfg.get("api_format", "openai_compat")
         # Auto-detect new Google AI Studio key format (AQ.*): these keys are not accepted
@@ -305,7 +468,17 @@ class Dehydrator:
         # --- Human display name / 人类一方的称呼 ---
         # 注入脱水/合并的「视角铁律」：原文里人类那一方统一还原为这个名字，
         # 而不是被压成「双方/对方/用户」。与 config.human 同源（前端可改）。
-        self.human = config.get("human", "用户") or "用户"
+        self.human = (
+            config.get("human")
+            or self.identity.get("user_display_name")
+            or "用户"
+        )
+        identity_cfg = config.get("identity")
+        if not isinstance(identity_cfg, dict) or not (
+            identity_cfg.get("user_display_name") or identity_cfg.get("human_name")
+        ):
+            self.identity = dict(self.identity)
+            self.identity["user_display_name"] = self.human
 
         # --- API availability / 是否有可用的 API ---
         self.api_available = bool(self.api_key)
@@ -353,7 +526,7 @@ class Dehydrator:
         conn.commit()
         return conn
 
-    def _content_key(self, content: str) -> str:
+    def _content_key(self, content: str, *, purpose: str = "dehydrate") -> str:
         """缓存键 = hash(prompt 版本 + 人名 + 模型配置 + 原文)。
 
         缓存原本只按 content_hash 存，导致脱水 prompt 改了、人名改了，旧的
@@ -361,31 +534,52 @@ class Dehydrator:
         prompt 版本、人名、api_format、base_url 和 model 混进 key，换模型或端点后
         下次 breath 会用新配置重新脱水，不会复用旧模型的摘要。"""
         keyed = (
-            f"{_PROMPT_VERSION}|{self.human}|{self.api_format}|"
-            f"{self.base_url.rstrip('/')}|{self.model}|{content}"
+            f"{DEHYDRATION_PROMPT_VERSION}|{purpose}|{self.human}|"
+            f"{self.api_format}|{self.base_url.rstrip('/')}|{self.model}|"
+            f"{self.thinking_mode}|{self.thinking_budget!r}|{content}"
         )
         return hashlib.sha256(keyed.encode()).hexdigest()
 
-    def _get_cached_summary(self, content: str) -> str | None:
+    def _cache_key(self, content: str, *, purpose: str = "dehydrate") -> str:
+        """Historical cache-key API retained for callers and diagnostics."""
+
+        return self._content_key(content, purpose=purpose)
+
+    def _get_cached_summary(
+        self,
+        content: str,
+        *,
+        purpose: str = "dehydrate",
+    ) -> str | None:
         """Look up cached dehydration result by content hash."""
         row = self._cache_conn.execute(
             "SELECT summary FROM dehydration_cache WHERE content_hash = ?",
-            (self._content_key(content),)
+            (self._content_key(content, purpose=purpose),)
         ).fetchone()
         return row[0] if row else None
 
-    def _set_cached_summary(self, content: str, summary: str):
+    def _set_cached_summary(
+        self,
+        content: str,
+        summary: str,
+        *,
+        purpose: str = "dehydrate",
+    ):
         """Store dehydration result in cache."""
         self._cache_conn.execute(
             "INSERT OR REPLACE INTO dehydration_cache (content_hash, summary, model) VALUES (?, ?, ?)",
-            (self._content_key(content), summary, self.model)
+            (self._content_key(content, purpose=purpose), summary, self.model)
         )
         self._cache_conn.commit()
 
     def invalidate_cache(self, content: str):
         """Remove cached summary for specific content (call when bucket content changes)."""
-        self._cache_conn.execute(
-            "DELETE FROM dehydration_cache WHERE content_hash = ?", (self._content_key(content),)
+        self._cache_conn.executemany(
+            "DELETE FROM dehydration_cache WHERE content_hash = ?",
+            (
+                (self._content_key(content, purpose="dehydrate"),),
+                (self._content_key(content, purpose="direct_capsule"),),
+            ),
         )
         self._cache_conn.commit()
 
@@ -401,6 +595,14 @@ class Dehydrator:
         """
         if not self.api_available:
             raise RuntimeError("脱水 API 不可用，请检查 config.yaml 中的 dehydration 配置")
+
+    def _require_client(self) -> AsyncOpenAI:
+        """Return the OpenAI-compatible client or fail with an explicit contract."""
+
+        client = self.client
+        if client is None:
+            raise RuntimeError("脱水 API 不可用，请配置 OMBRE_API_KEY")
+        return client
 
     @staticmethod
     def _is_transient_error(exc: BaseException) -> bool:
@@ -490,8 +692,12 @@ class Dehydrator:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
-            temperature=temperature if temperature is not None else self.temperature,
+            **self._completion_options(
+                max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
+                temperature=(
+                    temperature if temperature is not None else self.temperature
+                ),
+            ),
         )
         if not response.choices:
             return ""
@@ -695,6 +901,27 @@ class Dehydrator:
         self._set_cached_summary(content, result)
         return self._format_output(result, metadata)
 
+    async def dehydrate_direct_capsule(
+        self,
+        content: str,
+        metadata: Optional[dict] = None,
+    ) -> str:
+        """Compress a whole bucket for high-detail direct recall."""
+
+        if not content or not content.strip():
+            return "（空记忆 / empty memory）"
+
+        cached = self._get_cached_summary(content, purpose="direct_capsule")
+        if cached:
+            return self._format_output(cached, metadata)
+
+        self._require_api()
+        result = await self._api_direct_bucket_capsule(content)
+        if not result.strip():
+            raise RuntimeError("API direct recall 胶囊返回空结果")
+        self._set_cached_summary(content, result, purpose="direct_capsule")
+        return self._format_output(result, metadata)
+
     # ---------------------------------------------------------
     # Merge: blend new content into existing bucket
     # 合并：将新内容揉入已有桶，保持体积恒定
@@ -737,6 +964,14 @@ class Dehydrator:
             content[:_DEHYDRATE_INPUT_LIMIT],
         )
 
+    async def _api_direct_bucket_capsule(self, content: str) -> str:
+        """Call the configured provider for a whole-bucket recall capsule."""
+
+        return await self._chat(
+            DIRECT_BUCKET_CAPSULE_PROMPT,
+            content[:6000],
+        )
+
     # ---------------------------------------------------------
     # API call: merge
     # API 调用：合并
@@ -750,7 +985,8 @@ class Dehydrator:
             f"旧记忆：\n{old_content[:_MERGE_INPUT_LIMIT]}\n\n"
             f"新内容：\n{new_content[:_MERGE_INPUT_LIMIT]}"
         )
-        return await self._chat(MERGE_PROMPT + _perspective_rule(self.human), user_msg)
+        prompt = render_identity_template(MERGE_PROMPT_TEMPLATE, self.identity)
+        return await self._chat(prompt + _perspective_rule(self.human), user_msg)
 
     # ---------------------------------------------------------
     # Output formatting
@@ -883,22 +1119,21 @@ class Dehydrator:
         )
         if not raw.strip():
             return self._default_analysis()
-        return self._parse_analysis(raw)
+        return self._parse_analysis(raw, content=content)
 
     # ---------------------------------------------------------
     # Parse API JSON response with safety checks
     # 解析 API 返回的 JSON，做安全校验
     # Ensure valence/arousal in 0~1, domain/tags valid
     # ---------------------------------------------------------
-    def _parse_analysis(self, raw: str) -> dict:
+    def _parse_analysis(self, raw: str, *, content: str = "") -> dict:
         """
         Parse and validate API tagging result.
         解析并校验 API 返回的打标结果。
         """
         try:
-            cleaned = self._strip_md_fence(raw)
-            result = json.loads(cleaned)
-        except (json.JSONDecodeError, IndexError, ValueError):
+            result = parse_first_json_value(raw)
+        except (TypeError, ValueError):
             logger.warning(f"API tagging JSON parse failed / JSON 解析失败: {raw[:_PARSE_ERR_PREVIEW]}")
             return self._default_analysis()
 
@@ -907,13 +1142,21 @@ class Dehydrator:
 
         # --- Validate and clamp value ranges / 校验并钳制数值范围 ---
         valence, arousal = self._clamp_va(result)
+        tags = _sanitize_generated_tags(result.get("tags", []))
+        classification = normalize_write_classification(
+            memory_subject=result.get("memory_subject", ""),
+            memory_layer=result.get("memory_layer", ""),
+            tags=tags,
+            content=content,
+        )
 
         return {
-            "domain": result.get("domain", ["未分类"])[:_DOMAIN_MAX],
+            "domain": self._normalize_domains(result.get("domain", ["general"])),
             "valence": valence,
             "arousal": arousal,
-            "tags": result.get("tags", [])[:_TAGS_MAX],
+            "tags": tags,
             "suggested_name": str(result.get("suggested_name", ""))[:_NAME_MAX_CHARS],
+            **classification,
         }
 
     # ---------------------------------------------------------
@@ -926,12 +1169,33 @@ class Dehydrator:
         返回默认的中性分析结果。
         """
         return {
-            "domain": ["未分类"],
+            "domain": ["general"],
             "valence": _DEFAULT_VALENCE,
             "arousal": _DEFAULT_AROUSAL,
             "tags": [],
             "suggested_name": "",
+            "memory_subject": "event",
+            "memory_layer": "process_event",
+            "memory_classification_source": "default",
         }
+
+    async def generate_moment(self, body: str) -> str:
+        """Generate a short moment sentence without bypassing native providers."""
+
+        if not body or len(body.strip()) < 10 or not self.api_available:
+            return ""
+        try:
+            raw = await self._chat(
+                "你是一个记忆摘要器。请从正文提取一句 15~40 字的核心事件或状态。只输出那句话，不要标题、引号或解释。",
+                body[:1500],
+                max_tokens=64,
+                temperature=0.0,
+            )
+        except Exception as exc:
+            logger.warning("Generate moment failed / 生成 moment 失败: %s", exc)
+            return ""
+        text = raw.strip().strip('"').strip("'").strip()
+        return text if len(text) <= 60 else text[:57] + "..."
 
     # ---------------------------------------------------------
     # Diary digest: split daily notes into independent memory entries
@@ -971,7 +1235,7 @@ class Dehydrator:
         调用 LLM API 执行日记整理。
         """
         raw = await self._chat(
-            DIGEST_PROMPT,
+            _render_dehydrator_template(DIGEST_PROMPT_TEMPLATE, self.identity),
             content[:_DIGEST_INPUT_LIMIT],
             max_tokens=_DIGEST_MAX_TOKENS,
             temperature=_DIGEST_TEMPERATURE,
@@ -990,9 +1254,8 @@ class Dehydrator:
         解析并校验 API 返回的日记整理结果。
         """
         try:
-            cleaned = self._strip_md_fence(raw)
-            items = json.loads(cleaned)
-        except (json.JSONDecodeError, IndexError, ValueError):
+            items = parse_first_json_value(raw)
+        except (TypeError, ValueError):
             logger.warning(f"Diary digest JSON parse failed / JSON 解析失败: {raw[:_PARSE_ERR_PREVIEW]}")
             return []
 
@@ -1011,17 +1274,43 @@ class Dehydrator:
             except (ValueError, TypeError):
                 importance = _DEFAULT_IMPORTANCE
             valence, arousal = self._clamp_va(item)
+            tags = _sanitize_generated_tags(item.get("tags", []))
+            item_content = str(item.get("content", ""))
+            classification = normalize_write_classification(
+                memory_subject=item.get("memory_subject", ""),
+                memory_layer=item.get("memory_layer", ""),
+                tags=tags,
+                content=item_content,
+            )
 
             validated.append({
                 "name": str(item.get("name", ""))[:_NAME_MAX_CHARS],
-                "content": str(item.get("content", "")),
-                "domain": item.get("domain", ["未分类"])[:_DOMAIN_MAX],
+                "content": item_content,
+                "domain": self._normalize_domains(item.get("domain", ["general"])),
                 "valence": valence,
                 "arousal": arousal,
-                "tags": item.get("tags", [])[:_TAGS_MAX],
+                "tags": tags,
                 "importance": importance,
+                **classification,
             })
         return validated
+
+    @staticmethod
+    def _normalize_domains(value: Any) -> list[str]:
+        if value is None:
+            raw = []
+        elif isinstance(value, str):
+            raw = [item.strip() for item in value.split(",")]
+        elif isinstance(value, (list, tuple, set)):
+            raw = list(value)
+        else:
+            raw = [value]
+        domains: list[str] = []
+        for item in raw:
+            domain = normalize_domain_key(item)
+            if domain and domain not in domains:
+                domains.append(domain)
+        return domains[:2] or ["general"]
 
     # ---------------------------------------------------------
     # API call: judge whether a new event resolves an active plan
@@ -1065,3 +1354,34 @@ class Dehydrator:
         except Exception as e:
             logger.warning(f"judge_plan_resolution failed: {e}")
             return {"resolved": False, "confidence": 0.0, "reason": str(e)}
+
+    def _completion_options(
+        self,
+        *,
+        max_tokens: int,
+        temperature: float,
+    ) -> dict[str, Any]:
+        options: dict[str, Any] = {
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        if self.thinking_mode:
+            options["extra_body"] = {"thinking": {"type": self.thinking_mode}}
+        return options
+
+    @staticmethod
+    def _normalize_thinking_mode(value: Any) -> str:
+        normalized = str(value or "").strip().lower()
+        aliases = {
+            "enabled": "enabled",
+            "enable": "enabled",
+            "on": "enabled",
+            "true": "enabled",
+            "disabled": "disabled",
+            "disable": "disabled",
+            "off": "disabled",
+            "false": "disabled",
+            "non-thinking": "disabled",
+            "non_thinking": "disabled",
+        }
+        return aliases.get(normalized, "")
