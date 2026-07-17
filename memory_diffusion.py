@@ -502,15 +502,16 @@ def _query_requests_old_or_conflict(query_text: str, options: DiffusionOptions) 
 
 def _seed_score(bucket: dict) -> float:
     raw_score = bucket.get("score")
-    try:
-        score = float(raw_score)
-        if score > 10:
-            return _clamp(score / 100.0, 0.15, 1.0)
-        if score > 1:
-            return _clamp(score / 10.0, 0.15, 1.0)
-        return _clamp(score, 0.15, 1.0)
-    except (TypeError, ValueError):
-        pass
+    if raw_score is not None:
+        try:
+            score = float(raw_score)
+            if score > 10:
+                return _clamp(score / 100.0, 0.15, 1.0)
+            if score > 1:
+                return _clamp(score / 10.0, 0.15, 1.0)
+            return _clamp(score, 0.15, 1.0)
+        except (TypeError, ValueError):
+            pass
 
     meta = bucket.get("metadata", {}) or {}
     try:

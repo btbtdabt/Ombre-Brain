@@ -18,12 +18,11 @@
 import os
 import json
 import hashlib
+import inspect
 import logging
-import asyncio
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import jieba
 from rapidfuzz import fuzz
@@ -1037,7 +1036,10 @@ class ImportEngine:
         getter = getattr(self.embedding_engine, "get_embedding", None)
         if callable(getter):
             try:
-                if await getter(bucket_id):
+                existing = getter(bucket_id)
+                if inspect.isawaitable(existing):
+                    existing = await existing
+                if existing:
                     return True
             except Exception:
                 pass

@@ -558,7 +558,8 @@ class ReflectionEngine:
             return {"items": [], "cursor": {}}
         if isinstance(data, dict):
             items = data.get("items")
-            cursor = data.get("cursor") if isinstance(data.get("cursor"), dict) else {}
+            raw_cursor = data.get("cursor")
+            cursor = raw_cursor if isinstance(raw_cursor, dict) else {}
             return {
                 "items": [item for item in (items or []) if isinstance(item, dict)],
                 "cursor": cursor,
@@ -575,7 +576,8 @@ class ReflectionEngine:
 
     def _daily_chat_memory_last_raw_event_id(self, profile_id: str) -> int:
         cursor = self._load_daily_chat_memory_cursor()
-        raw_events = cursor.get("raw_events") if isinstance(cursor.get("raw_events"), dict) else {}
+        raw_events_value = cursor.get("raw_events")
+        raw_events = raw_events_value if isinstance(raw_events_value, dict) else {}
         entry = raw_events.get(self._daily_chat_memory_cursor_key(profile_id))
         if not isinstance(entry, dict):
             return 0
@@ -592,10 +594,13 @@ class ReflectionEngine:
         if safe_id <= 0:
             return False
         payload = self._load_daily_chat_memory_payload()
-        cursor = payload.get("cursor") if isinstance(payload.get("cursor"), dict) else {}
-        raw_events = cursor.get("raw_events") if isinstance(cursor.get("raw_events"), dict) else {}
+        cursor_value = payload.get("cursor")
+        cursor = cursor_value if isinstance(cursor_value, dict) else {}
+        raw_events_value = cursor.get("raw_events")
+        raw_events = raw_events_value if isinstance(raw_events_value, dict) else {}
         cursor_key = self._daily_chat_memory_cursor_key(profile_id)
-        previous = raw_events.get(cursor_key) if isinstance(raw_events.get(cursor_key), dict) else {}
+        previous_value = raw_events.get(cursor_key)
+        previous = previous_value if isinstance(previous_value, dict) else {}
         try:
             previous_id = max(0, int(previous.get("last_raw_event_id") or 0))
         except (TypeError, ValueError):
@@ -1055,7 +1060,7 @@ class ReflectionEngine:
             return meta.get("type") != "feel"
 
         def add_candidate(item: dict | None) -> bool:
-            if not eligible(item):
+            if item is None or not eligible(item):
                 return False
             seen.add(item.get("id"))
             candidates.append(item)
@@ -1130,11 +1135,14 @@ class ReflectionEngine:
         return candidates
 
     async def _api_classify(self, bucket: dict, candidates: list[dict]) -> dict:
+        client = self.client
+        if client is None:
+            return self._heuristic_classify(bucket)
         payload = {
             "new_memory": self._memory_payload(bucket, content_limit=1200),
             "candidate_memories": [self._memory_payload(item, content_limit=360) for item in candidates],
         }
-        response = await self.client.chat.completions.create(
+        response = await client.chat.completions.create(
             model=self.model,
             messages=[
                 {"role": "system", "content": CLASSIFY_PROMPT},
@@ -1656,7 +1664,7 @@ class ReflectionEngine:
     @staticmethod
     def _daily_chat_memory_window_source_ids(turns: list[dict]) -> tuple[list[int], list[int]]:
         turn_ids = [
-            int(turn.get("id"))
+            int(str(turn.get("id")))
             for turn in turns
             if turn.get("id") is not None and str(turn.get("id")).isdigit()
         ]
@@ -3224,10 +3232,10 @@ class ReflectionEngine:
                 title = self._daily_chat_memory_title(content, kind, key)
             domain = self._auto_memory_domain(kind, content, candidate_tags, candidate.get("domain"))
             source_turn_ids = [
-                int(turn_id)
+                int(str(turn_id))
                 for turn_id in self._string_list(candidate.get("source_turn_ids"), limit=20)
                 if str(turn_id).isdigit()
-            ] or [int(turn_id) for turn_id in fallback_turn_ids[:20] if str(turn_id).isdigit()]
+            ] or [int(str(turn_id)) for turn_id in fallback_turn_ids[:20] if str(turn_id).isdigit()]
             source_event_ids = [
                 int(event_id)
                 for event_id in self._string_list(candidate.get("source_event_ids"), limit=80)
@@ -3297,7 +3305,7 @@ class ReflectionEngine:
             )[:12]
         if "importance" in edit:
             try:
-                updated["importance"] = max(1, min(10, int(edit.get("importance"))))
+                updated["importance"] = max(1, min(10, int(str(edit.get("importance")))))
             except (TypeError, ValueError):
                 pass
         if "confidence" in edit:
@@ -3556,15 +3564,6 @@ class ReflectionEngine:
             content = f"我从{label}的《{diary_title}》里轻轻带走一点温度，先不把日常写成普通记忆。"
         else:
             content = f"我觉得{label}的关系天气很轻，暂时没有明显需要带走的脉络。"
-        anchor_scene = names[0] if names else (
-            daily_chat_memories[0].get("title") or daily_chat_memories[0].get("content")
-            if daily_chat_memories
-            else (
-            "当天短期对话的原声"
-            if conversation_turns
-            else (diary.get("title") if diary else ("这一段关系天气很轻" if period == "daily" else "这一周的关系天气慢慢落下"))
-            )
-        )
         return {
             "title": title,
             "content": content,
@@ -3730,7 +3729,6 @@ class ReflectionEngine:
 
     def _heuristic_diary_memory_candidate(self, key: str, diary: dict) -> dict:
         content = str(diary.get("content") or "")
-        title = str(diary.get("title") or key)
         normalized = re.sub(r"\s+", " ", content).strip()
         if not normalized:
             return {"should_write": False, "reason": "empty_diary"}

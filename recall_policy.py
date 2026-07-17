@@ -1382,8 +1382,11 @@ class RecallPolicy:
         self.options = options or memory_relevance_options_from_config()
         self.semantic_threshold = _safe_float(semantic_threshold, 0.72)
         self.rerank_threshold = _safe_float(rerank_threshold, 0.65)
+        default_ai_name = str(identity_names().get("ai_name") or "").strip()
         self.ai_reaction_names = self._normalize_reaction_names(
-            ai_reaction_names if ai_reaction_names is not None else [identity_names().get("ai_name")]
+            ai_reaction_names
+            if ai_reaction_names is not None
+            else ([default_ai_name] if default_ai_name else [])
         )
         self.recall_context_terms = self._normalize_recall_context_terms(
             [*self.options.context_terms, *GENERIC_RECALL_CONTEXT_TERMS]

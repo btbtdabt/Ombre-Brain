@@ -121,8 +121,11 @@ class EmbeddingEngine:
         if cached is not None:
             self._query_cache.move_to_end(cache_key)
             return list(cached)
+        client = self.client
+        if client is None:
+            return []
         try:
-            response = await self.client.embeddings.create(
+            response = await client.embeddings.create(
                 model=self.model,
                 input=truncated,
             )
@@ -288,6 +291,8 @@ class EmbeddingEngine:
         if not embedding:
             return False
         if model != self.model:
+            return False
+        if dimension is None:
             return False
         try:
             stored_dimension = int(dimension)

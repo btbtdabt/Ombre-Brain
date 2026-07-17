@@ -10,10 +10,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from bucket_manager import BucketManager
-from embedding_engine import EmbeddingEngine
-from identity import identity_names
-from utils import bucket_text_for_embedding, load_config
+from bucket_manager import BucketManager  # noqa: E402
+from embedding_engine import EmbeddingEngine  # noqa: E402
+from identity import identity_names  # noqa: E402
+from utils import bucket_text_for_embedding, load_config  # noqa: E402
 
 
 RELATIONSHIP_WEATHER_TAGS = {"relationship_weather", "daily_impression", "weekly_impression"}

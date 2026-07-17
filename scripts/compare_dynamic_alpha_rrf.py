@@ -18,11 +18,12 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from bucket_manager import BucketManager
-from embedding_engine import EmbeddingEngine
-from gateway import GatewayService
-from gateway_state import GatewayStateStore
-from utils import load_config
+from bucket_manager import BucketManager  # noqa: E402
+from embedding_engine import EmbeddingEngine  # noqa: E402
+from gateway import GatewayService  # noqa: E402
+from gateway_state import GatewayStateStore  # noqa: E402
+from reranker_engine import RerankResult  # noqa: E402
+from utils import load_config  # noqa: E402
 
 
 DEFAULT_BUCKETS_DIR = ROOT / "tmp" / "p0-local-snapshot-20260628-1528" / "buckets"
@@ -103,10 +104,13 @@ class OfflineEmbeddingEngine:
         return results[:top_k]
 
     async def _generate_query_embedding(self, query: str) -> list[float]:
+        client = self.client
+        if client is None:
+            return []
         text = str(query or "")
         if self.query_instruction:
             text = f"Instruct: {self.query_instruction}\nQuery: {text}"
-        response = await self.client.embeddings.create(
+        response = await client.embeddings.create(
             model=self.model,
             input=text[: self.max_chars],
         )
@@ -137,7 +141,12 @@ class OfflineEmbeddingEngine:
 class DisabledReranker:
     enabled = False
 
-    async def rerank(self, query: str, documents: list[str], top_n: int | None = None):
+    async def rerank(
+        self,
+        query: str,
+        documents: list[str],
+        top_n: int | None = None,
+    ) -> list[RerankResult]:
         return []
 
 
@@ -286,14 +295,18 @@ def copy_entity_edges_to_state(source_path: Path | None, state_dir: Path) -> str
     return str(source_path)
 
 
+def as_mapping(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
 def item_bucket_id(item: dict[str, Any]) -> str:
-    bucket = item.get("bucket") if isinstance(item.get("bucket"), dict) else {}
+    bucket = as_mapping(item.get("bucket"))
     return str(bucket.get("id") or "")
 
 
 def item_bucket_name(item: dict[str, Any]) -> str:
-    bucket = item.get("bucket") if isinstance(item.get("bucket"), dict) else {}
-    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    bucket = as_mapping(item.get("bucket"))
+    meta = as_mapping(bucket.get("metadata"))
     return str(meta.get("name") or bucket.get("name") or bucket.get("id") or "")
 
 
@@ -415,8 +428,8 @@ def compact_recall_why(recall_why: dict[str, Any]) -> dict[str, Any]:
                 if key in source and source[key] not in (None, "", [], {})
             }
         )
-    admission = recall_why.get("admission") if isinstance(recall_why.get("admission"), dict) else {}
-    score = recall_why.get("score") if isinstance(recall_why.get("score"), dict) else {}
+    admission = as_mapping(recall_why.get("admission"))
+    score = as_mapping(recall_why.get("score"))
     return {
         "status": str(recall_why.get("status") or ""),
         "stage": str(recall_why.get("stage") or ""),
@@ -443,11 +456,11 @@ def compact_recall_why(recall_why: dict[str, Any]) -> dict[str, Any]:
 
 
 def compact_diffusion_debug(row: dict[str, Any]) -> dict[str, Any]:
-    trace = row.get("diffusion_trace") if isinstance(row.get("diffusion_trace"), dict) else {}
-    gate = trace.get("gate") if isinstance(trace.get("gate"), dict) else {}
-    final = trace.get("final") if isinstance(trace.get("final"), dict) else {}
-    seed = trace.get("seed") if isinstance(trace.get("seed"), dict) else {}
-    target = trace.get("target") if isinstance(trace.get("target"), dict) else {}
+    trace = as_mapping(row.get("diffusion_trace"))
+    gate = as_mapping(trace.get("gate"))
+    final = as_mapping(trace.get("final"))
+    seed = as_mapping(trace.get("seed"))
+    target = as_mapping(trace.get("target"))
     return {
         "bucket_id": str(row.get("bucket_id") or ""),
         "bucket_name": str(row.get("bucket_name") or ""),
@@ -489,7 +502,7 @@ async def evaluate_diffusion_debug(
         return {}
     query = str(case.get("query") or "").strip()
     all_moments, grouped_moments, moment_edges = service._refresh_moment_graph(buckets)
-    recalled_moments, moment_candidates, suppressed_moments, suppressed_buckets, planner_debug = await service._select_dynamic_moments(
+    selection = await service._select_dynamic_moments(
         query,
         args.session_id,
         buckets,
@@ -498,6 +511,11 @@ async def evaluate_diffusion_debug(
         search_query=service._dynamic_recall_search_query(query),
         include_query_planner_debug=True,
     )
+    recalled_moments = selection[0]
+    moment_candidates = selection[1]
+    suppressed_moments = selection[2]
+    suppressed_buckets = selection[3]
+    planner_debug = selection[4] if len(selection) == 5 else {}
     related_memory, diffused_debug_rows = service._build_moment_diffused_memory_with_debug(
         recalled_moments,
         moment_candidates,

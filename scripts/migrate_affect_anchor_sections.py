@@ -19,10 +19,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from bucket_manager import BucketManager
-from embedding_engine import EmbeddingEngine
-from memory_moments import MemoryMomentStore
-from utils import bucket_text_for_embedding, load_config, now_iso
+from bucket_manager import BucketManager  # noqa: E402
+from embedding_engine import EmbeddingEngine  # noqa: E402
+from memory_moments import MemoryMomentStore  # noqa: E402
+from utils import bucket_text_for_embedding, load_config, now_iso  # noqa: E402
 
 
 HEADING_RE = re.compile(r"^(#{2,6})\s+(.+?)\s*$")
@@ -788,9 +788,13 @@ def load_plan_file(path: Path) -> tuple[list[AnchorMigration], dict[str, Any]]:
 async def apply_plan(plan: list[AnchorMigration], mgr: BucketManager, config: dict[str, Any]) -> list[dict[str, Any]]:
     engine = EmbeddingEngine(config)
     moment_store = MemoryMomentStore(config)
-    results = []
+    results: list[dict[str, Any]] = []
     for item in plan:
-        result = {"bucket_id": item.bucket_id, "title": item.title, "path": item.path}
+        result: dict[str, Any] = {
+            "bucket_id": item.bucket_id,
+            "title": item.title,
+            "path": item.path,
+        }
         try:
             ok = write_bucket_content(item)
         except ValueError as exc:
@@ -847,10 +851,10 @@ def write_bucket_content(item: AnchorMigration) -> bool:
 
 def backup_plan_files(plan: list[AnchorMigration], backup_dir: Path) -> list[dict[str, Any]]:
     backup_dir.mkdir(parents=True, exist_ok=True)
-    results = []
+    results: list[dict[str, Any]] = []
     for item in plan:
         source = Path(item.path)
-        record = {"bucket_id": item.bucket_id, "source": str(source)}
+        record: dict[str, Any] = {"bucket_id": item.bucket_id, "source": str(source)}
         if not source.exists():
             record["backed_up"] = False
             record["error"] = "source_missing"

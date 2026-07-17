@@ -103,6 +103,7 @@ def test_bucket_media_round_trips_through_verified_backup(tmp_path: Path) -> Non
         )
     )
     original = asyncio.run(source_manager.get(bucket_id))
+    assert original is not None
     media_path = original["metadata"]["media"][0]["path"]
 
     backup = VaultBackupManager(
@@ -121,6 +122,7 @@ def test_bucket_media_round_trips_through_verified_backup(tmp_path: Path) -> Non
         Path(archive_path).unlink(missing_ok=True)
 
     restored = asyncio.run(target_manager.get(bucket_id))
+    assert restored is not None
     assert restored["metadata"]["media"][0]["path"] == media_path
     assert (Path(target_config["buckets_dir"]) / media_path).read_bytes() == b"persistent-photo"
 
@@ -153,6 +155,7 @@ def test_external_markdown_media_round_trips_without_becoming_a_bucket(tmp_path:
         Path(archive_path).unlink(missing_ok=True)
 
     restored = asyncio.run(target_manager.get(bucket_id))
+    assert restored is not None
     restored_path = Path(restored["metadata"]["media"][0]["path"])
     assert result["created"] == 1
     assert restored_path.is_absolute()

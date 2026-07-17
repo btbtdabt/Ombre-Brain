@@ -434,26 +434,15 @@ class EmotionalRecallPlan:
 def memory_relevance_options_from_config(config: dict | None = None) -> MemoryRelevanceOptions:
     aliases = {facet: list(values) for facet, values in DEFAULT_FACET_ALIASES.items()}
     section_hints = {key: list(values) for key, values in DEFAULT_SECTION_HINTS.items()}
-    context_terms = list(DEFAULT_CONTEXT_TERMS)
+    context_terms: list[str] = list(DEFAULT_CONTEXT_TERMS)
     user_terms: list[str] = []
     blocked: set[str] = set()
 
     identity_values = identity_names(config if isinstance(config, dict) else None)
-    context_terms.extend(
-        [
-            identity_values.get("ai_name"),
-            identity_values.get("user_name"),
-            identity_values.get("user_display_name"),
-            *(identity_values.get("user_aliases") or []),
-        ]
-    )
-    user_terms.extend(
-        [
-            identity_values.get("user_name"),
-            identity_values.get("user_display_name"),
-            *(identity_values.get("user_aliases") or []),
-        ]
-    )
+    for key in ("ai_name", "user_name", "user_display_name", "user_aliases"):
+        context_terms.extend(_list_text(identity_values.get(key)))
+    for key in ("user_name", "user_display_name", "user_aliases"):
+        user_terms.extend(_list_text(identity_values.get(key)))
 
     identity = (config or {}).get("identity", {}) if isinstance(config, dict) else {}
     if isinstance(identity, dict):

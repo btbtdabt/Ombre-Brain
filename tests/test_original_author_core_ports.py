@@ -80,7 +80,7 @@ class _FakeEmbeddings:
 def test_embedding_query_lru_reuses_results_and_returns_copies(tmp_path):
     engine = EmbeddingEngine(_config(tmp_path))
     fake = _FakeEmbeddings()
-    engine.client = SimpleNamespace(embeddings=fake)
+    setattr(engine, "client", SimpleNamespace(embeddings=fake))
 
     first = asyncio.run(engine._generate_embedding("seafood", kind="query"))
     first.append(999.0)
@@ -96,7 +96,7 @@ def test_embedding_query_lru_reuses_results_and_returns_copies(tmp_path):
 def test_embedding_query_lru_evicts_oldest_entry(tmp_path):
     engine = EmbeddingEngine(_config(tmp_path))
     fake = _FakeEmbeddings()
-    engine.client = SimpleNamespace(embeddings=fake)
+    setattr(engine, "client", SimpleNamespace(embeddings=fake))
 
     asyncio.run(engine._generate_embedding("one", kind="query"))
     asyncio.run(engine._generate_embedding("two", kind="query"))

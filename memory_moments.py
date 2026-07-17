@@ -780,8 +780,13 @@ def _build_retrieval_aliases(
     return aliases
 
 
+def _item_metadata(item: dict) -> dict:
+    metadata = item.get("metadata")
+    return metadata if isinstance(metadata, dict) else {}
+
+
 def _bucket_title(bucket: dict) -> str:
-    meta = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
+    meta = _item_metadata(bucket)
     return _clean_text(
         meta.get("name")
         or meta.get("title")
@@ -958,7 +963,7 @@ def parse_bucket_moments(
     relevance_options = relevance_options or memory_relevance_options_from_config()
     annotation_options = {**DEFAULT_ANNOTATION_OPTIONS, **(annotation_options or {})}
     bucket_id = _bucket_id(bucket)
-    meta = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
+    meta = _item_metadata(bucket)
     base_meta = _bucket_metadata(meta, bucket)
     updated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     moments: list[dict] = []
@@ -1302,7 +1307,7 @@ def _current_moment_preview(moment: dict) -> dict:
 
 
 def _moment_source_ref(moment: dict) -> dict | None:
-    metadata = moment.get("metadata") if isinstance(moment.get("metadata"), dict) else {}
+    metadata = _item_metadata(moment)
     source_ref = metadata.get("source_ref")
     return dict(source_ref) if isinstance(source_ref, dict) else None
 
@@ -1575,7 +1580,7 @@ def _bucket_metadata(meta: dict, bucket: dict) -> dict:
 
 
 def _source_ref_base(bucket: dict) -> dict | None:
-    meta = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
+    meta = _item_metadata(bucket)
     path = str(bucket.get("path") or meta.get("path") or meta.get("bucket_path") or "").strip()
     if not path:
         return None
@@ -1758,7 +1763,7 @@ def _clean_metadata_value(value: Any):
 
 
 def _bucket_id(bucket: dict) -> str:
-    meta = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
+    meta = _item_metadata(bucket)
     bucket_id = str(bucket.get("id") or meta.get("id") or "").strip()
     if not bucket_id:
         raise ValueError("bucket id is required")

@@ -70,7 +70,8 @@ def _strip_client_context_blocks(text: str) -> str:
 
 def raw_event_text_looks_injected(text: str, raw: dict[str, Any] | None = None) -> bool:
     raw = raw or {}
-    metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+    raw_metadata = raw.get("metadata")
+    metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
     flags = {
         str(raw.get("kind") or "").lower(),
         str(raw.get("source_type") or "").lower(),
@@ -170,12 +171,12 @@ class RawEventStore:
         rejected = 0
         for raw in list(events or [])[: self.max_ingest_batch]:
             normalized, reason = self._normalize_event(raw, default_source=safe_source, ingested_at=now)
-            if reason:
+            if reason or normalized is None:
                 rejected += 1
                 items.append(
                     {
                         "status": "rejected",
-                        "reason": reason,
+                        "reason": reason or "invalid_event",
                         "source_event_id": str((raw or {}).get("source_event_id") or (raw or {}).get("id") or ""),
                     }
                 )
@@ -410,7 +411,8 @@ class RawEventStore:
         session_id = str(raw.get("session_id") or "").strip()
         client = str(raw.get("client") or "").strip()
         created_at = self._clean_time(raw.get("created_at") or raw.get("timestamp") or raw.get("time") or ingested_at)
-        metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+        raw_metadata = raw.get("metadata")
+        metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
         metadata_json = json.dumps(metadata, ensure_ascii=False, sort_keys=True)
         event_hash = self._event_hash(
             source=source,

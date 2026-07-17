@@ -15,8 +15,8 @@ try:
 except Exception:  # pragma: no cover
     jieba = None
 
-from bucket_manager import BucketManager
-from utils import load_config, strip_wikilinks
+from bucket_manager import BucketManager  # noqa: E402
+from utils import load_config, strip_wikilinks  # noqa: E402
 
 
 RELATIONSHIP_WEATHER_TAGS = {"relationship_weather", "daily_impression", "weekly_impression"}

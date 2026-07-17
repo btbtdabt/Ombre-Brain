@@ -12,7 +12,6 @@ import argparse
 import asyncio
 import hashlib
 import json
-import os
 import re
 import shutil
 import sys
@@ -27,9 +26,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from bucket_manager import BucketManager
-from memory_moments import MemoryMomentStore
-from utils import load_config
+from bucket_manager import BucketManager  # noqa: E402
+from memory_moments import MemoryMomentStore  # noqa: E402
+from utils import load_config  # noqa: E402
 
 
 BUCKET_SUBDIRS = {"dynamic", "permanent", "archive", "feel"}

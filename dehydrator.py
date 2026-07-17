@@ -371,7 +371,7 @@ class Dehydrator:
     # API only (no local fallback)
     # 仅通过 API 脱水（无本地回退）
     # ---------------------------------------------------------
-    async def dehydrate(self, content: str, metadata: dict = None) -> str:
+    async def dehydrate(self, content: str, metadata: dict | None = None) -> str:
         """
         Dehydrate/compress memory content.
         Returns formatted summary string ready for Claude context injection.
@@ -404,7 +404,7 @@ class Dehydrator:
         self._set_cached_summary(content, result)
         return self._format_output(result, metadata)
 
-    async def dehydrate_direct_capsule(self, content: str, metadata: dict = None) -> str:
+    async def dehydrate_direct_capsule(self, content: str, metadata: dict | None = None) -> str:
         """
         Compress a whole bucket for direct recall display.
         Uses a purpose-specific cache key so it does not mix with compact diffusion summaries.
@@ -461,7 +461,8 @@ class Dehydrator:
         Call LLM API for intelligent dehydration (via OpenAI-compatible client).
         调用 LLM API 执行智能脱水。
         """
-        response = await self.client.chat.completions.create(
+        client = self._require_client()
+        response = await client.chat.completions.create(
             model=self.model,
             messages=[
                 {"role": "system", "content": DEHYDRATE_PROMPT},
@@ -478,7 +479,8 @@ class Dehydrator:
 
     async def _api_direct_bucket_capsule(self, content: str) -> str:
         """Call LLM API for direct-recall whole-bucket capsule compression."""
-        response = await self.client.chat.completions.create(
+        client = self._require_client()
+        response = await client.chat.completions.create(
             model=self.model,
             messages=[
                 {"role": "system", "content": DIRECT_BUCKET_CAPSULE_PROMPT},
@@ -503,7 +505,8 @@ class Dehydrator:
         调用 LLM API 执行智能合并。
         """
         user_msg = f"旧记忆：\n{old_content[:2000]}\n\n新内容：\n{new_content[:2000]}"
-        response = await self.client.chat.completions.create(
+        client = self._require_client()
+        response = await client.chat.completions.create(
             model=self.model,
             messages=[
                 {"role": "system", "content": render_identity_template(MERGE_PROMPT_TEMPLATE, self.identity)},
@@ -526,7 +529,7 @@ class Dehydrator:
     # Wraps dehydrated result with bucket name, tags, emotion coords
     # 把脱水结果包装成带桶名、标签、情感坐标的可读文本
     # ---------------------------------------------------------
-    def _format_output(self, content: str, metadata: dict = None) -> str:
+    def _format_output(self, content: str, metadata: dict | None = None) -> str:
         """
         Format dehydrated result into context-injectable text.
         将脱水结果格式化为可注入上下文的文本。
@@ -597,7 +600,8 @@ class Dehydrator:
         Call LLM API for content analysis / tagging.
         调用 LLM API 执行内容分析打标。
         """
-        response = await self.client.chat.completions.create(
+        client = self._require_client()
+        response = await client.chat.completions.create(
             model=self.model,
             messages=[
                 {"role": "system", "content": ANALYZE_PROMPT},
@@ -694,7 +698,8 @@ class Dehydrator:
             logger.warning("Generate moment skipped: dehydration API unavailable / 生成 moment 跳过：脱水 API 不可用")
             return ""
         try:
-            response = await self.client.chat.completions.create(
+            client = self._require_client()
+            response = await client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": (
@@ -754,7 +759,8 @@ class Dehydrator:
         Call LLM API for diary organization.
         调用 LLM API 执行日记整理。
         """
-        response = await self.client.chat.completions.create(
+        client = self._require_client()
+        response = await client.chat.completions.create(
             model=self.model,
             messages=[
                 {"role": "system", "content": _render_dehydrator_template(DIGEST_PROMPT_TEMPLATE, self.identity)},
@@ -850,6 +856,12 @@ class Dehydrator:
         if self.thinking_mode:
             options["extra_body"] = {"thinking": {"type": self.thinking_mode}}
         return options
+
+    def _require_client(self) -> AsyncOpenAI:
+        client = self.client
+        if client is None:
+            raise RuntimeError("脱水 API 不可用，请配置 OMBRE_API_KEY")
+        return client
 
     def _normalize_thinking_mode(self, value: Any) -> str:
         normalized = str(value or "").strip().lower()

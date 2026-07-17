@@ -102,11 +102,15 @@ def test_restore_overwrite_replaces_bucket_and_skip_preserves_existing(tmp_path)
     try:
         skipped = asyncio.run(target_backup.restore_archive(archive_path, mode="skip"))
         assert skipped["skipped"] == 1
-        assert asyncio.run(target_manager.get(bucket_id))["content"] == "local version"
+        current = asyncio.run(target_manager.get(bucket_id))
+        assert current is not None
+        assert current["content"] == "local version"
 
         restored = asyncio.run(target_backup.restore_archive(archive_path, mode="overwrite"))
         assert restored["overwritten"] == 1
-        assert asyncio.run(target_manager.get(bucket_id))["content"] == "source truth"
+        current = asyncio.run(target_manager.get(bucket_id))
+        assert current is not None
+        assert current["content"] == "source truth"
     finally:
         Path(archive_path).unlink(missing_ok=True)
 

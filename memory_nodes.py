@@ -338,7 +338,8 @@ class MemoryNodeStore:
     def _node_from_bucket(self, bucket: dict) -> dict:
         if not isinstance(bucket, dict):
             raise ValueError("bucket must be a dict")
-        meta = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
+        raw_metadata = bucket.get("metadata")
+        meta = raw_metadata if isinstance(raw_metadata, dict) else {}
         bucket_id = str(bucket.get("id") or meta.get("id") or "").strip()
         if not bucket_id:
             raise ValueError("bucket id is required")
@@ -370,7 +371,7 @@ class MemoryNodeStore:
             "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
 
-    def _facets_for_bucket(self, bucket: dict, meta: dict) -> dict[str, float]:
+    def _facets_for_bucket(self, bucket: dict, meta: dict) -> dict[str, dict[str, float]]:
         fields = {
             "tags": _join_text(meta.get("tags")),
             "domain": _join_text(meta.get("domain")),
@@ -379,7 +380,7 @@ class MemoryNodeStore:
         }
         fields = {key: value.lower() for key, value in fields.items()}
 
-        flat_facets = {}
+        flat_facets: dict[str, float] = {}
         for facet, keywords in self.facet_keywords.items():
             score = 0.0
             for keyword in keywords:
@@ -465,12 +466,9 @@ def _facet_keywords_for_config(config: dict[str, Any]) -> dict[str, tuple[str, .
     raw_identity = config.get("identity", {}) if isinstance(config, dict) else {}
     user_terms: list[str] = []
     if isinstance(raw_identity, dict):
-        user_terms.extend(
-            [
-                raw_identity.get("user_display_name") or raw_identity.get("human_name"),
-                *(raw_identity.get("user_aliases") or []),
-            ]
-        )
+        display_name = raw_identity.get("user_display_name") or raw_identity.get("human_name")
+        aliases = raw_identity.get("user_aliases") or []
+        user_terms.extend(str(term) for term in [display_name, *aliases] if term is not None and str(term).strip())
     for facet in ("relation.intimacy", "topic.love"):
         keywords.setdefault(facet, []).extend(user_terms)
 

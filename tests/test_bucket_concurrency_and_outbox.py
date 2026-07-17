@@ -77,6 +77,7 @@ def test_archived_bucket_requires_explicit_activation_before_update(tmp_path):
         assert await manager.activate(bucket_id) is True
         assert await manager.update(bucket_id, content="allowed after activation") is True
         active = await manager.get(bucket_id)
+        assert active is not None
         assert active["content"] == "allowed after activation"
 
     asyncio.run(scenario())
@@ -94,6 +95,7 @@ def test_delete_serializes_yaml_dates_and_preserves_previous_tombstone_on_failur
         )
     )
     source_path = manager._find_bucket_file(bucket_id)
+    assert source_path is not None
     tombstone_path = Path(manager.tombstone_dir) / f"{bucket_id}.json"
     tombstone_path.parent.mkdir(parents=True, exist_ok=True)
     tombstone_path.write_text('{"id":"older","marker":true}\n', encoding="utf-8")
@@ -113,7 +115,9 @@ def test_delete_serializes_yaml_dates_and_preserves_previous_tombstone_on_failur
 def test_bucket_move_rolls_back_without_duplicate_when_rewrite_fails(tmp_path, monkeypatch):
     manager = BucketManager(_config(tmp_path))
     bucket_id = asyncio.run(manager.create(content="original", bucket_id="move-bucket"))
-    source_path = Path(manager._find_bucket_file(bucket_id))
+    source_path_value = manager._find_bucket_file(bucket_id)
+    assert source_path_value is not None
+    source_path = Path(source_path_value)
     original_atomic_write = __import__("bucket_manager").atomic_write_text
 
     def fail_archive_write(path, text):
@@ -125,7 +129,9 @@ def test_bucket_move_rolls_back_without_duplicate_when_rewrite_fails(tmp_path, m
     assert asyncio.run(manager.archive(bucket_id)) is False
     assert source_path.exists()
     assert list(Path(manager.archive_dir).rglob("*.md")) == []
-    assert asyncio.run(manager.get(bucket_id))["content"] == "original"
+    current = asyncio.run(manager.get(bucket_id))
+    assert current is not None
+    assert current["content"] == "original"
 
 
 def test_concurrent_archive_and_update_leaves_at_most_one_copy(tmp_path, monkeypatch):
@@ -250,7 +256,9 @@ def test_embedding_outbox_survives_restart_and_retries(tmp_path):
     manager = _Manager()
     failing = _Engine(manager, succeeds=False)
     first = EmbeddingOutbox(config, manager, failing)
-    desired = bucket_text_for_embedding(asyncio.run(manager.get(manager.bucket_id)))
+    bucket = asyncio.run(manager.get(manager.bucket_id))
+    assert bucket is not None
+    desired = bucket_text_for_embedding(bucket)
 
     assert first.enqueue(manager.bucket_id, desired) is True
     assert asyncio.run(first.process_once()) is True
@@ -270,12 +278,16 @@ def test_embedding_outbox_does_not_acknowledge_newer_content(tmp_path):
     manager = _Manager()
     engine = _Engine(manager)
     outbox = EmbeddingOutbox(config, manager, engine)
-    old_text = bucket_text_for_embedding(asyncio.run(manager.get(manager.bucket_id)))
+    bucket = asyncio.run(manager.get(manager.bucket_id))
+    assert bucket is not None
+    old_text = bucket_text_for_embedding(bucket)
     outbox.enqueue(manager.bucket_id, old_text)
     old_item = dict(outbox._items[manager.bucket_id])
 
     manager.content = "newer"
-    new_text = bucket_text_for_embedding(asyncio.run(manager.get(manager.bucket_id)))
+    bucket = asyncio.run(manager.get(manager.bucket_id))
+    assert bucket is not None
+    new_text = bucket_text_for_embedding(bucket)
     outbox.enqueue(manager.bucket_id, new_text)
     outbox._complete(manager.bucket_id, old_item["content_hash"])
 
@@ -288,7 +300,9 @@ def test_embedding_outbox_discards_deleted_bucket(tmp_path):
     manager = _Manager()
     engine = _Engine(manager)
     outbox = EmbeddingOutbox(config, manager, engine)
-    desired = bucket_text_for_embedding(asyncio.run(manager.get(manager.bucket_id)))
+    bucket = asyncio.run(manager.get(manager.bucket_id))
+    assert bucket is not None
+    desired = bucket_text_for_embedding(bucket)
     outbox.enqueue(manager.bucket_id, desired)
     manager.exists = False
 
@@ -316,7 +330,9 @@ def test_embedding_outbox_background_processing_is_nonblocking(tmp_path):
         outbox = EmbeddingOutbox(config, manager, engine)
         await outbox.start(reconcile=False)
         try:
-            desired = bucket_text_for_embedding(await manager.get(manager.bucket_id))
+            bucket = await manager.get(manager.bucket_id)
+            assert bucket is not None
+            desired = bucket_text_for_embedding(bucket)
             started = time.monotonic()
             assert outbox.enqueue(manager.bucket_id, desired) is True
             assert time.monotonic() - started < 0.05
