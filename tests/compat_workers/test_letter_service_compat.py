@@ -1,6 +1,8 @@
 import pytest
 
 from letter_service import LetterService
+from tools import _runtime as tool_runtime
+from tools.plan.core import letter_read
 from tests.compat_workers.support import LegacyBucketManager
 
 
@@ -23,11 +25,7 @@ async def test_letters_preserve_author_metadata_and_filtering(worker_config):
     assert "[Ombre]" in ai_result
     assert "[user]" in user_result
     assert "[Nova]" in custom_result
-    stored = [
-        bucket
-        for bucket in await manager.list_all()
-        if bucket["metadata"].get("type") == "letter"
-    ]
+    stored = await manager.list_letters()
     assert {bucket["metadata"].get("author") for bucket in stored} == {
         "Ombre",
         "user",
@@ -88,3 +86,39 @@ async def test_letter_read_falls_back_when_vector_hits_are_not_letters(worker_co
     await letters.write(author="Amy", content="the silver lighthouse")
 
     assert "silver lighthouse" in await letters.read(query="lighthouse")
+
+
+@pytest.mark.asyncio
+async def test_mcp_letter_read_supports_legacy_list_all_only_manager(monkeypatch):
+    class ListAllOnlyManager:
+        def __init__(self):
+            self.include_archive = None
+
+        async def list_all(self, *, include_archive=False):
+            self.include_archive = include_archive
+            return [
+                {
+                    "id": "legacy-letter",
+                    "content": "A letter preserved through the legacy manager.",
+                    "metadata": {
+                        "type": "letter",
+                        "author": "Amy",
+                        "letter_date": "2026-07-16",
+                    },
+                },
+                {
+                    "id": "ordinary-memory",
+                    "content": "Not a letter.",
+                    "metadata": {"type": "permanent", "author": "Amy"},
+                },
+            ]
+
+    manager = ListAllOnlyManager()
+    monkeypatch.setattr(tool_runtime, "bucket_mgr", manager)
+    monkeypatch.setattr(tool_runtime, "embedding_engine", None)
+
+    result = await letter_read(author="Amy")
+
+    assert manager.include_archive is False
+    assert "legacy manager" in result
+    assert "Not a letter" not in result

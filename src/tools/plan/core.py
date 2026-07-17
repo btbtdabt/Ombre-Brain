@@ -25,7 +25,7 @@ breath 中。
 """
 
 import math
-from typing import Optional
+from typing import Any, Awaitable, Callable, Optional, cast
 
 from .. import _runtime as rt
 from .._common import check_content_size, check_metadata_size, check_query_size
@@ -219,7 +219,15 @@ async def letter_read(
     except (TypeError, ValueError, OverflowError):
         limit = 10
     try:
-        all_b = await rt.bucket_mgr.list_all(include_archive=False)
+        list_letters = getattr(rt.bucket_mgr, "list_letters", None)
+        if callable(list_letters):
+            list_letters_fn = cast(
+                Callable[[], Awaitable[list[dict[str, Any]]]],
+                list_letters,
+            )
+            all_b = await list_letters_fn()
+        else:
+            all_b = await rt.bucket_mgr.list_all(include_archive=False)
     except Exception as e:
         return f"读取信件失败: {e}"
     letters = [b for b in all_b if b["metadata"].get("type") == "letter"]
