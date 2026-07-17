@@ -14,7 +14,8 @@ These instructions apply to `C:\Users\Amy98\Projects\Ombre-Brain`.
 - `p0luz` (`P0luz/Ombre-Brain`) is the primary upstream and normal merge source.
 - `origin` (`Yinglianchun/Ombre-Brain`) is a secondary feature source. Fetch and compare it, then port applicable behavior into the P0luz architecture with tests. Do not merge its root runtime wholesale.
 - `fork` (`btbtdabt/Ombre-Brain`) is Amy's writable GitHub repository and the normal push target.
-- Preserve applicable features from both upstreams. When behavior conflicts, retain the more complete implementation unless it breaks the documented production contract or stored-data compatibility.
+- The default is to preserve every user-visible and production-runtime feature from the current fork and both upstreams. A feature may be excluded only when it is demonstrably obsolete, superseded by a compatible implementation, part of the intentionally dormant v3/distributed stack, or incompatible with stored-data/production contracts. Record every exclusion and its regression evidence in `docs/upstream-integration.md`.
+- When implementations conflict, first preserve both behaviors behind one shared interface or an explicit configuration choice. If they are genuinely mutually exclusive, keep the P0luz modular architecture and the documented production/data contract, then port the more complete behavior into that boundary.
 
 Future update procedure:
 
@@ -25,7 +26,7 @@ git log --oneline <recorded-p0-baseline>..p0luz/main
 git log --oneline <recorded-origin-baseline>..origin/main
 ```
 
-Merge tested P0luz updates into the local branch. Port Yinglianchun changes at the corresponding `src/tools`, `src/web`, engine, or Gateway seam. Update `docs/upstream-integration.md` only after verification passes.
+Merge tested P0luz updates into the local branch. Review every Yinglianchun commit after the recorded baseline and port its behavior at the corresponding `src/tools`, `src/web`, engine, or Gateway seam. Add or update a parity test for each retained feature. Advance either recorded baseline in `docs/upstream-integration.md` only after the complete integration batch passes verification.
 
 ## Local First, Then Align
 

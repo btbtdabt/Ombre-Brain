@@ -1,7 +1,10 @@
 # Upstream Integration Policy
 
 This repository uses the P0luz implementation as its executable base and keeps
-Yinglianchun's repository as a secondary source of product behavior.
+Yinglianchun's repository as a secondary source of product behavior. Feature
+preservation is opt-out, not opt-in: every user-visible or production-runtime
+capability is ported unless this document records a concrete exclusion and its
+verification evidence.
 
 ## Recorded Baselines
 
@@ -57,3 +60,11 @@ runtime demonstrates the same externally observable behavior.
 Do not resolve upstream conflicts by restoring the repository-root runtime or by
 silently dropping one implementation's feature. Record intentional exclusions
 with their reason and regression evidence.
+
+## Intentional Architecture Exclusions
+
+- P0luz's dormant Rust kernel, Raft, distributed fabric, and event-sourced v3
+  scaffolding remain outside the single-node production boot path. Their source
+  and tests stay in the repository, but activation requires a separate migration
+  because it changes storage, operations, and failure semantics rather than adding
+  an isolated product feature.
