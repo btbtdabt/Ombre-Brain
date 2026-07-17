@@ -35,8 +35,9 @@ import math
 import tempfile
 import threading
 from pathlib import Path
-from datetime import date, datetime
-from typing import Callable, Optional
+from datetime import date, datetime, timedelta
+from typing import Any, Callable, Optional
+from zoneinfo import ZoneInfo
 
 
 # ============================================================
@@ -63,6 +64,11 @@ _BUCKET_NAME_MAX_LEN = 80
 _BOOL_TRUE = frozenset({"1", "true", "yes", "on"})
 _BOOL_FALSE = frozenset({"0", "false", "no", "off"})
 
+LOCAL_TZ = ZoneInfo("Asia/Shanghai")
+
+_yaml_locks_guard = threading.Lock()
+_yaml_locks: dict[str, threading.RLock] = {}
+
 # 进程启动那一刻就被「真实 OS / 平台」注入的可配置环境变量名集合（值非空才算）。
 # 在任何 dashboard 保存动作 mutate os.environ 之前快照——这是「平台级 env」与
 # 「运行时被 dashboard 写进 os.environ 的值」唯一可靠的区分依据。
@@ -79,6 +85,12 @@ def _project_root() -> str:
 
 
 _config_yaml_lock = threading.RLock()
+
+
+def _yaml_lock(path: str | os.PathLike[str]) -> threading.RLock:
+    normalized = os.path.normcase(os.path.abspath(os.fspath(path)))
+    with _yaml_locks_guard:
+        return _yaml_locks.setdefault(normalized, threading.RLock())
 
 
 def _migrate_legacy_render_config(legacy_path: str, persistent_path: str) -> None:
@@ -348,6 +360,207 @@ def atomic_update_config_yaml(mutate: Callable[[dict], None]) -> dict:
             except OSError:
                 pass
         return save_config
+
+
+def atomic_update_yaml(
+    path: str | os.PathLike[str],
+    mutate: Callable[[dict], Any],
+) -> dict:
+    """Atomically apply a locked read-modify-write update to a YAML mapping."""
+    target_path = os.path.abspath(os.fspath(path))
+    tmp_path = ""
+    with _yaml_lock(target_path):
+        persisted: dict = {}
+        if os.path.exists(target_path):
+            with open(target_path, "r", encoding="utf-8") as source:
+                persisted = yaml.safe_load(source) or {}
+        if not isinstance(persisted, dict):
+            raise ValueError(f"YAML top level must be a mapping: {target_path}")
+
+        replacement = mutate(persisted)
+        if replacement is not None:
+            if not isinstance(replacement, dict):
+                raise TypeError("YAML mutation must return a mapping or None")
+            persisted = replacement
+
+        parent = os.path.dirname(target_path)
+        os.makedirs(parent, exist_ok=True)
+        fallback_backup: bytes | None = None
+        try:
+            descriptor, tmp_path = tempfile.mkstemp(
+                prefix=f".{os.path.basename(target_path)}.tmp.",
+                dir=parent,
+            )
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as target:
+                yaml.safe_dump(
+                    persisted,
+                    target,
+                    allow_unicode=True,
+                    default_flow_style=False,
+                    sort_keys=False,
+                )
+                target.flush()
+                os.fsync(target.fileno())
+            try:
+                os.replace(tmp_path, target_path)
+            except OSError as exc:
+                if exc.errno != errno.EBUSY or not _is_exact_linux_mount_point(
+                    target_path
+                ):
+                    raise
+                fallback_backup = _overwrite_mounted_config(tmp_path, target_path)
+
+            try:
+                with open(target_path, "r", encoding="utf-8") as source:
+                    verified = yaml.safe_load(source) or {}
+                if verified != persisted:
+                    raise OSError(f"YAML verification failed after write: {target_path}")
+            except Exception as verify_error:
+                if fallback_backup is not None:
+                    try:
+                        _write_bytes_and_sync(target_path, fallback_backup)
+                    except Exception as restore_error:
+                        raise OSError(
+                            "YAML verification failed and restoring the previous "
+                            f"bind-mounted file also failed: {restore_error}"
+                        ) from verify_error
+                raise
+        finally:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    logging.warning("Could not remove temporary YAML file: %s", tmp_path)
+        return persisted
+
+
+def parse_first_json_value(raw: str) -> Any:
+    """Parse the first JSON object or array embedded in an LLM response."""
+    text = str(raw or "").strip()
+    if not text:
+        raise ValueError("empty_json_response")
+
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char not in "{[":
+            continue
+        try:
+            value, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        return value
+    raise ValueError("no_json_object_or_array_found")
+
+
+def _date_hint(
+    year: int,
+    month: int,
+    day: int,
+    label: str,
+    tz=LOCAL_TZ,
+) -> dict[str, str] | None:
+    try:
+        target = datetime(year, month, day, tzinfo=tz).date()
+    except ValueError:
+        return None
+    return {"date": target.isoformat(), "label": str(label).strip()}
+
+
+def _reference_now(now: datetime | None = None, tz=LOCAL_TZ) -> datetime:
+    if now is None:
+        return datetime.now(tz)
+    if now.tzinfo is None:
+        return now.replace(tzinfo=tz)
+    return now.astimezone(tz)
+
+
+def parse_human_date_reference(
+    text: str,
+    *,
+    now: datetime | None = None,
+    tz=LOCAL_TZ,
+) -> dict[str, str] | None:
+    """Parse common Chinese and numeric date references into ``YYYY-MM-DD``."""
+    value = str(text or "").strip()
+    if not value:
+        return None
+    base = _reference_now(now, tz)
+
+    explicit = re.search(
+        r"(?<!\d)(20\d{2})\s*(?:[-/.]|年)\s*(\d{1,2})\s*(?:[-/.]|月)\s*(\d{1,2})\s*(?:日|号)?(?!\d)",
+        value,
+    )
+    if explicit:
+        year, month, day = (int(part) for part in explicit.groups())
+        return _date_hint(year, month, day, explicit.group(0), tz)
+
+    short_year = re.search(
+        r"(?<!\d)(\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*(?:日|号)?",
+        value,
+    )
+    if short_year:
+        year, month, day = (int(part) for part in short_year.groups())
+        return _date_hint(2000 + year, month, day, short_year.group(0), tz)
+
+    month_day = re.search(
+        r"(?<![\d年/-])(\d{1,2})\s*月\s*(\d{1,2})\s*(?:日|号)?",
+        value,
+    )
+    if month_day:
+        month, day = (int(part) for part in month_day.groups())
+        return _date_hint(base.year, month, day, month_day.group(0), tz)
+
+    for label, offset in (
+        ("大前天", -3),
+        ("前天", -2),
+        ("昨晚", -1),
+        ("昨天", -1),
+        ("昨日", -1),
+        ("今晚", 0),
+        ("今天", 0),
+    ):
+        if label in value:
+            return {
+                "date": (base + timedelta(days=offset)).date().isoformat(),
+                "label": label,
+            }
+    return None
+
+
+def strip_human_date_references(text: str) -> str:
+    """Remove date shells before extracting topical query terms."""
+    value = str(text or "")
+    for pattern in (
+        r"(?<!\d)20\d{2}\s*(?:[-/.]|年)\s*\d{1,2}\s*(?:[-/.]|月)\s*\d{1,2}\s*(?:日|号)?(?!\d)",
+        r"(?<!\d)\d{2}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*(?:日|号)?",
+        r"(?<![\d年/-])\d{1,2}\s*月\s*\d{1,2}\s*(?:日|号)?",
+    ):
+        value = re.sub(pattern, " ", value)
+    for label in ("大前天", "前天", "昨晚", "昨天", "昨日", "今晚", "今天"):
+        value = value.replace(label, " ")
+    return value
+
+
+def local_date_key(value, *, tz=LOCAL_TZ) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        return text
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        explicit_hint = parse_human_date_reference(text, tz=tz)
+        relative_labels = ("大前天", "前天", "昨晚", "昨天", "昨日", "今晚", "今天")
+        if explicit_hint and not any(label in text for label in relative_labels):
+            return explicit_hint["date"]
+        match = re.match(r"^\d{4}-\d{2}-\d{2}", text)
+        return match.group(0) if match else ""
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(tz)
+    return parsed.date().isoformat()
 
 
 def parse_bool(value, *, default=...) -> bool:
@@ -829,6 +1042,108 @@ def strip_wikilinks(text: str) -> str:
     return re.sub(r"\[\[([^\]]+)\]\]", r"\1", text) if text else text
 
 
+_AFFECT_ANCHOR_RE = re.compile(r"(?ims)^###\s*affect_anchor\s*$.*?(?=^###\s+|\Z)")
+_FOLLOWUP_SECTION_RE = re.compile(
+    r"(?ims)^#{2,6}\s*(?:followup|followups|follow-up|followup_log|followups_log|followup-log|todo|to-do|todo_log|todo-log|next|后续|后续待办|后续记录|待办|待办事项|待办记录)\s*$.*?(?=^#{2,6}\s+|\Z)"
+)
+_DISPLAY_TEMPERATURE_SECTION_RE = re.compile(
+    r"(?ims)^###\s*(?:affect_anchor|affect anchor|喜欢它的原因|favorite_reason|favorite reason)\s*$.*?(?=^###\s+|\Z)"
+)
+_TEMPERATURE_MEANING_LINE_RE = re.compile(r"(?m)^\s*含义[:：].*(?:\n|$)")
+_CHORD_TOKEN_RE = re.compile(
+    r"\b[A-G](?:#|b)?(?:maj|min|m|dim|aug)?\d*(?:sus\d*|add\d*|b\d+|#\d+)*(?:/[A-G](?:#|b)?)?\b"
+)
+_TEMPERATURE_MUSIC_TOKEN_RE = re.compile(
+    r"\b(?:\d{2,3}\s*bpm|ppp|pp|mp|mf|ff|fff|p|f|add\s*\d+|sus\s*\d+)\b",
+    re.I,
+)
+
+
+def _looks_like_temperature_chord_line(line: str) -> bool:
+    text = str(line or "").strip()
+    if not text:
+        return False
+    if text.startswith(">"):
+        text = text[1:].strip()
+    if not text or re.search(r"[\u4e00-\u9fff]", text):
+        return False
+    if not any(marker in text for marker in ("->", "→", "|", "·")) and "bpm" not in text.lower():
+        return False
+    if not _CHORD_TOKEN_RE.search(text):
+        return False
+    remainder = _CHORD_TOKEN_RE.sub("", text)
+    remainder = _TEMPERATURE_MUSIC_TOKEN_RE.sub("", remainder)
+    remainder = re.sub(r"[-→>·|/(),.:;_\s]+", "", remainder)
+    return not remainder
+
+
+def _strip_inline_temperature_chord_segments(line: str) -> str:
+    match = re.search(r"\s>\s*(.+)$", str(line or ""))
+    if match and _looks_like_temperature_chord_line(">" + match.group(1)):
+        return str(line)[: match.start()].rstrip()
+    return line
+
+
+def strip_affect_anchor(text: str) -> str:
+    """Remove display-only affect data from searchable text."""
+    if not text:
+        return text
+    return _AFFECT_ANCHOR_RE.sub("", str(text)).strip()
+
+
+def strip_followup_sections(text: str) -> str:
+    """Remove task-only follow-up sections from ordinary recall text."""
+    if not text:
+        return text
+    return _FOLLOWUP_SECTION_RE.sub("", str(text)).strip()
+
+
+def bucket_content_for_recall(bucket: dict) -> str:
+    """Build factual recall text without display or task-only sections."""
+    if not isinstance(bucket, dict):
+        return ""
+    text = strip_wikilinks(str(bucket.get("content") or ""))
+    text = strip_affect_anchor(text)
+    return strip_followup_sections(text).strip()
+
+
+def strip_display_temperature_sections(text: str) -> str:
+    """Remove display-only affect/favorite sections from rendered context."""
+    if not text:
+        return text
+    return _DISPLAY_TEMPERATURE_SECTION_RE.sub("", str(text)).strip()
+
+
+def strip_temperature_meaning_lines(text: str) -> str:
+    """Remove template affect explanations and standalone chord lines."""
+    if not text:
+        return text
+    cleaned = _TEMPERATURE_MEANING_LINE_RE.sub("", str(text))
+    lines = []
+    for line in cleaned.splitlines():
+        line = _strip_inline_temperature_chord_segments(line)
+        if _looks_like_temperature_chord_line(line):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def bucket_text_for_embedding(bucket: dict) -> str:
+    """Build embedding text from the title and factual recall body."""
+    if not isinstance(bucket, dict):
+        return ""
+    metadata = bucket.get("metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    title = strip_wikilinks(str(metadata.get("name") or "")).strip()
+    body = bucket_content_for_recall(bucket)
+    if title and body:
+        return f"Title: {title}\nContent: {body}"
+    if title:
+        return f"Title: {title}"
+    return body
+
+
 # ===============================================================
 # Wikilinks / 双链解析（iter 1.7 §F1）
 # ---------------------------------------------------------------
@@ -954,6 +1269,13 @@ def sanitize_name(name: str) -> str:
     cleaned = re.sub(r"[^\w\s\u4e00-\u9fff-]", "", name, flags=re.UNICODE)
     cleaned = cleaned.strip()[:_BUCKET_NAME_MAX_LEN]
     return cleaned if cleaned else "unnamed"
+
+
+def same_path(first: str, second: str) -> bool:
+    """Return whether two path strings identify the same normalized path."""
+    return os.path.normcase(os.path.abspath(first)) == os.path.normcase(
+        os.path.abspath(second)
+    )
 
 
 def safe_path(base_dir: str, filename: str) -> Path:
