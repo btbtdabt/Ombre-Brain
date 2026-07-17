@@ -53,9 +53,12 @@ import secrets
 import tempfile
 import time
 from base64 import b64decode
+from collections.abc import AsyncIterator
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any, Awaitable, Callable
 from urllib.parse import parse_qs, urlencode, urlparse
 from zoneinfo import ZoneInfo
 import httpx
@@ -66,6 +69,9 @@ import httpx
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mcp.server.fastmcp import Context, FastMCP
+from starlette.applications import Starlette
+from starlette.routing import Mount
+from starlette.types import ASGIApp
 
 from bucket_manager import BucketManager
 from backup_archive import BackupArchiveError, MAX_ARCHIVE_BYTES
@@ -366,7 +372,7 @@ def _dashboard_sanitize_gateway_upstreams(raw_upstreams, existing_upstreams=None
         if name in seen_names:
             raise ValueError(f'duplicate gateway upstream name "{name}"')
         seen_names.add(name)
-        sanitized = {
+        sanitized: dict[str, object] = {
             "name": name,
             "protocol": _dashboard_normalize_upstream_protocol(
                 raw.get("protocol") or raw.get("api_format") or raw.get("type")
@@ -2319,7 +2325,7 @@ async def _auto_generate_moment_if_missing(content: str, *, section_fallback: bo
     generator = getattr(dehydrator, "generate_moment", None)
     if callable(generator):
         try:
-            generated_moment = await generator(body_text)
+            generated_moment = await dehydrator.generate_moment(body_text)
         except Exception as e:
             logger.warning("Auto moment generation failed / 自动 moment 生成失败: %s", e)
 
@@ -2780,7 +2786,8 @@ async def _call_profile_fact_proposal_model(
     evidence_moment_id: str = "",
     max_proposals: int = 3,
 ) -> str:
-    if not getattr(dehydrator, "api_available", False) or not getattr(dehydrator, "client", None):
+    client = dehydrator.client
+    if not getattr(dehydrator, "api_available", False) or client is None:
         raise RuntimeError("dehydration API is not configured")
     meta = bucket.get("metadata", {}) if isinstance(bucket, dict) else {}
     identity = _identity()
@@ -2809,7 +2816,7 @@ async def _call_profile_fact_proposal_model(
         "content": content[:5000],
         "max_proposals": max(1, min(3, int(max_proposals))),
     }
-    response = await dehydrator.client.chat.completions.create(
+    response = await client.chat.completions.create(
         model=dehydrator.model,
         messages=[
             {"role": "system", "content": prompt},
@@ -2941,7 +2948,8 @@ async def _call_anchor_proposal_model(
     *,
     bucket: dict,
 ) -> str:
-    if not getattr(dehydrator, "api_available", False) or not getattr(dehydrator, "client", None):
+    client = dehydrator.client
+    if not getattr(dehydrator, "api_available", False) or client is None:
         raise RuntimeError("dehydration API is not configured")
     meta = bucket.get("metadata", {}) if isinstance(bucket, dict) else {}
     identity = _identity()
@@ -2961,7 +2969,7 @@ async def _call_anchor_proposal_model(
         "last_active": meta.get("last_active", ""),
         "content": strip_wikilinks(bucket.get("content", ""))[:5000],
     }
-    response = await dehydrator.client.chat.completions.create(
+    response = await client.chat.completions.create(
         model=dehydrator.model,
         messages=[
             {"role": "system", "content": prompt},
@@ -4031,6 +4039,28 @@ async def _ensure_decay_engine_started_for_transport(transport_name: str) -> Non
         logger.warning("Decay engine startup failed / 衰减引擎启动失败: %s", e)
 
 
+def _build_remote_transport_app(
+    inner_app: ASGIApp,
+    startup_handler: Callable[[], Awaitable[None]],
+    *,
+    transport_lifespan: Callable[[], AbstractAsyncContextManager[Any]] | None = None,
+) -> Starlette:
+    # Mounted Starlette apps do not run child lifespans. FastMCP's documented
+    # streamable-HTTP mount pattern enters session_manager.run() in the parent.
+    @asynccontextmanager
+    async def lifespan(_app: Starlette) -> AsyncIterator[None]:
+        if transport_lifespan is None:
+            await startup_handler()
+            yield
+            return
+
+        async with transport_lifespan():
+            await startup_handler()
+            yield
+
+    return Starlette(routes=[Mount("/", app=inner_app)], lifespan=lifespan)
+
+
 async def _merge_or_create(
     content: str,
     tags: list,
@@ -4058,7 +4088,7 @@ async def _merge_or_create(
         existing = await bucket_mgr.search(
             content,
             limit=1,
-            domain_filter=domain or None,
+            domain_filter=domain,
             include_archive=False,
         )
     except Exception as e:
@@ -4859,7 +4889,7 @@ def _append_breath_word_map_matches(
     matched_ids = {str(bucket.get("id") or "") for bucket in matches if bucket.get("id")}
     for bucket_id, hint_score in word_map_scores.items():
         bucket = bucket_map.get(bucket_id)
-        if not _is_breath_recall_seed_bucket(bucket):
+        if bucket is None or not _is_breath_recall_seed_bucket(bucket):
             continue
         hint_debug = word_map_debug.get(bucket_id) or {}
         bucket["word_map_hint"] = True
@@ -5408,11 +5438,12 @@ def _recall_policy() -> RecallPolicy:
     if _RECALL_POLICY_INSTANCE is not None:
         return _RECALL_POLICY_INSTANCE
     semantic_threshold, rerank_threshold = _recall_admission_thresholds()
+    ai_name = identity_names(config).get("ai_name")
     _RECALL_POLICY_INSTANCE = RecallPolicy(
         _recall_relevance_options(),
         semantic_threshold=semantic_threshold,
         rerank_threshold=rerank_threshold,
-        ai_reaction_names=[identity_names(config).get("ai_name")],
+        ai_reaction_names=[ai_name] if isinstance(ai_name, str) else [],
     )
     return _RECALL_POLICY_INSTANCE
 
@@ -5966,11 +5997,13 @@ def _append_breath_lexical_matches(
             if hasattr(bucket_mgr, "_calc_topic_score")
             else 1.0
         )
-        emotion = (
-            bucket_mgr._calc_emotion_score(q_valence, q_arousal, meta)
-            if hasattr(bucket_mgr, "_calc_emotion_score")
-            else 0.5
-        )
+        emotion = 0.5
+        if (
+            q_valence is not None
+            and q_arousal is not None
+            and hasattr(bucket_mgr, "_calc_emotion_score")
+        ):
+            emotion = bucket_mgr._calc_emotion_score(q_valence, q_arousal, meta)
         time_s = (
             bucket_mgr._calc_time_score(meta)
             if hasattr(bucket_mgr, "_calc_time_score")
@@ -6065,20 +6098,27 @@ async def _build_recall_debug_payload(
     max_results = _int_between(max_results, 3, 1, 20)
     max_tokens = _int_between(max_tokens, 800, 1, 20000)
     direct_render_mode = _normalize_direct_render_mode(direct_render_mode)
-    domain_filter = [d.strip() for d in str(domain or "").split(",") if d.strip()] or None
+    domain_filter = [d.strip() for d in str(domain or "").split(",") if d.strip()]
     q_valence = valence if isinstance(valence, (int, float)) and 0 <= valence <= 1 else None
     q_arousal = arousal if isinstance(arousal, (int, float)) and 0 <= arousal <= 1 else None
     search_query = recall_search_query(query, _recall_relevance_options())
     warnings: list[str] = []
 
     try:
-        matches = await bucket_mgr.search(
-            search_query,
-            limit=max(max_candidates, max_results, 20),
-            domain_filter=domain_filter,
-            query_valence=q_valence,
-            query_arousal=q_arousal,
-        )
+        if q_valence is None or q_arousal is None:
+            matches = await bucket_mgr.search(
+                search_query,
+                limit=max(max_candidates, max_results, 20),
+                domain_filter=domain_filter,
+            )
+        else:
+            matches = await bucket_mgr.search(
+                search_query,
+                limit=max(max_candidates, max_results, 20),
+                domain_filter=domain_filter,
+                query_valence=q_valence,
+                query_arousal=q_arousal,
+            )
     except Exception as e:
         return {"status": "error", "error": "search_failed", "message": str(e)}
     matches = _breath_recall_seed_buckets(matches)
@@ -6366,7 +6406,8 @@ async def _build_breath_debug_rerank_payload(
         arousal=arousal,
     )
     payload.update(base)
-    candidates = payload.get("candidates") if isinstance(payload.get("candidates"), list) else []
+    raw_candidates = payload.get("candidates")
+    candidates = raw_candidates if isinstance(raw_candidates, list) else []
     payload["applied"] = any(candidate.get("rerank_score") is not None for candidate in candidates)
     if payload.get("status") != "ok":
         payload["skip_reason"] = payload.get("error") or "recall_debug_failed"
@@ -7410,7 +7451,7 @@ async def breath(
 
     # --- With args: search mode (keyword + vector dual channel) ---
     # --- 有参数：检索模式（关键词 + 向量双通道）---
-    domain_filter = [d.strip() for d in domain.split(",") if d.strip()] or None
+    domain_filter = [d.strip() for d in domain.split(",") if d.strip()]
     q_valence = valence if 0 <= valence <= 1 else None
     q_arousal = arousal if 0 <= arousal <= 1 else None
     if auto_surface and _recall_policy().is_auto_query_too_vague(query):
@@ -7418,13 +7459,20 @@ async def breath(
     search_query = recall_search_query(query, _recall_relevance_options())
 
     try:
-        matches = await bucket_mgr.search(
-            search_query,
-            limit=max(max_results, 20),
-            domain_filter=domain_filter,
-            query_valence=q_valence,
-            query_arousal=q_arousal,
-        )
+        if q_valence is None or q_arousal is None:
+            matches = await bucket_mgr.search(
+                search_query,
+                limit=max(max_results, 20),
+                domain_filter=domain_filter,
+            )
+        else:
+            matches = await bucket_mgr.search(
+                search_query,
+                limit=max(max_results, 20),
+                domain_filter=domain_filter,
+                query_valence=q_valence,
+                query_arousal=q_arousal,
+            )
     except Exception as e:
         logger.error(f"Search failed / 检索失败: {e}")
         return "检索过程出错，请稍后重试。"
@@ -8935,7 +8983,7 @@ def _profile_fact_body(
     return "\n\n".join(f"### {heading}\n{text.strip()}" for heading, text in sections)
 
 
-def _profile_key(value: str, default: str) -> str:
+def _profile_key(value: object, default: str) -> str:
     text = str(value or "").strip().lower()
     if not text:
         return default
@@ -9646,7 +9694,7 @@ async def api_create_memory(request):
     event_date = str(body.get("date") or body.get("event_date") or "").strip()
 
     existing = await bucket_mgr.get(bucket_id) if bucket_id else None
-    if existing:
+    if existing and bucket_id is not None:
         before_bucket = existing
         update_kwargs = {
             "content": content,
@@ -9845,15 +9893,16 @@ async def api_portrait_maintain(request):
         if scope and scope not in {"user", "persona", "relationship"}:
             return JSONResponse({"error": "invalid scope"}, status_code=400)
         force = _bool_value(body.get("force"), False)
-        maintain_kwargs = {"force": force}
+        force_scopes: list[str] | None = None
         if scope:
-            maintain_kwargs["force_scopes"] = [scope]
+            force_scopes = [scope]
         elif force:
-            maintain_kwargs["force_scopes"] = ["user", "persona", "relationship"]
+            force_scopes = ["user", "persona", "relationship"]
         result = await portrait_engine.maintain_daily(
             bucket_mgr,
             persona_engine,
-            **maintain_kwargs,
+            force=force,
+            force_scopes=force_scopes,
         )
         status_code = 409 if result.get("status") == "blocked" else 200
         return JSONResponse(result, status_code=status_code)
@@ -10043,10 +10092,14 @@ async def api_portrait_stable_rollback(request):
     if not isinstance(body, dict):
         return JSONResponse({"error": "json body must be an object"}, status_code=400)
     expected_revision = _portrait_expected_revision(body)
-    try:
-        target_revision = int(body.get("target_revision"))
-    except (TypeError, ValueError):
+    raw_target_revision = body.get("target_revision")
+    if raw_target_revision is None:
         target_revision = None
+    else:
+        try:
+            target_revision = int(raw_target_revision)
+        except (TypeError, ValueError):
+            target_revision = None
     if expected_revision is None or target_revision is None:
         return JSONResponse(
             {"error": "expected_revision and target_revision are required"},
@@ -10189,6 +10242,8 @@ async def api_profile_fact_update(request):
         return JSONResponse({"error": "update failed"}, status_code=500)
 
     updated_bucket = await bucket_mgr.get(bucket_id)
+    if updated_bucket is None:
+        return JSONResponse({"error": "updated bucket not found"}, status_code=500)
     if action == "edit":
         _queue_embedding_refresh_if_changed(bucket_id, before_bucket, updated_bucket)
         try:
@@ -10354,6 +10409,8 @@ async def api_profile_fact_proposal_confirm(request):
         return JSONResponse({"error": result}, status_code=400)
     profile_id = result.split("profile_fact→", 1)[1].split(" ", 1)[0]
     created = await bucket_mgr.get(profile_id)
+    if created is None:
+        return JSONResponse({"error": "created profile fact not found"}, status_code=500)
     return JSONResponse({
         "status": "created",
         "id": profile_id,
@@ -11086,6 +11143,8 @@ async def api_bucket_update(request):
         return JSONResponse({"error": "update failed"}, status_code=500)
 
     bucket = await bucket_mgr.get(bucket_id)
+    if bucket is None:
+        return JSONResponse({"error": "updated bucket not found"}, status_code=500)
     embedding_queued = (
         _queue_embedding_refresh_if_changed(bucket_id, before_bucket, bucket)
         if (content is not None or name is not None)
@@ -11226,7 +11285,7 @@ async def api_search_raw(request):
     except Exception:
         body = {}
 
-    def value(name: str, default: str = ""):
+    def value(name: str, default: object = "") -> object:
         return body.get(name, params.get(name, default))
 
     query = str(value("q", value("query", "")) or "")
@@ -11360,7 +11419,11 @@ async def api_breath_debug(request):
             bid = bucket["id"]
             try:
                 topic = topic_scores.get(str(bid), 0.0) if query else 0.0
-                emotion = bucket_mgr._calc_emotion_score(q_valence, q_arousal, meta)
+                emotion = (
+                    bucket_mgr._calc_emotion_score(q_valence, q_arousal, meta)
+                    if q_valence is not None and q_arousal is not None
+                    else 0.5
+                )
                 time_s = bucket_mgr._calc_time_score(meta)
                 imp = max(1, min(10, int(meta.get("importance", 5)))) / 10.0
 
@@ -12218,9 +12281,10 @@ async def api_config_update(request):
         dehydrator.api_key = dehy.get("api_key", "")
         normalize_thinking = getattr(dehydrator, "_normalize_thinking_mode", None)
         if callable(normalize_thinking):
-            dehydrator.thinking_mode = normalize_thinking(dehy.get("thinking_mode", ""))
+            thinking_mode = normalize_thinking(dehy.get("thinking_mode", ""))
         else:
-            dehydrator.thinking_mode = str(dehy.get("thinking_mode") or "").strip()
+            thinking_mode = dehy.get("thinking_mode", "")
+        dehydrator.thinking_mode = str(thinking_mode or "").strip()
         dehydrator.max_tokens = dehy.get("max_tokens", 1024)
         dehydrator.temperature = dehy.get("temperature", 0.1)
         dehydrator.api_available = bool(dehydrator.api_key)
@@ -13869,16 +13933,23 @@ if __name__ == "__main__":
 
         # --- Add CORS middleware so remote clients (Cloudflare Tunnel / ngrok) can connect ---
         # --- 添加 CORS 中间件，让远程客户端（Cloudflare Tunnel / ngrok）能正常连接 ---
-        if transport == "streamable-http":
-            _app = mcp.streamable_http_app()
-        else:
-            _app = mcp.sse_app()
-        if hasattr(_app, "add_event_handler"):
-            async def _start_decay_engine_on_app_startup():
-                await _ensure_decay_engine_started_for_transport(transport)
-                await embedding_outbox.start(reconcile=True)
+        async def _start_decay_engine_on_app_startup():
+            await _ensure_decay_engine_started_for_transport(transport)
+            await embedding_outbox.start(reconcile=True)
 
-            _app.add_event_handler("startup", _start_decay_engine_on_app_startup)
+        if transport == "streamable-http":
+            _inner_app = mcp.streamable_http_app()
+            _app = _build_remote_transport_app(
+                _inner_app,
+                _start_decay_engine_on_app_startup,
+                transport_lifespan=mcp.session_manager.run,
+            )
+        else:
+            _inner_app = mcp.sse_app()
+            _app = _build_remote_transport_app(
+                _inner_app,
+                _start_decay_engine_on_app_startup,
+            )
         _app.add_middleware(
             CORSMiddleware,
             allow_origins=["*"],

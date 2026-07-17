@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import time
 import urllib.error
@@ -114,14 +113,17 @@ def config_gateway_checks(check: Check, config_path: Path) -> None:
     if not config_path.exists():
         check.fail(f"local config missing: {config_path}")
         return
-    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    gateway = cfg.get("gateway") if isinstance(cfg.get("gateway"), dict) else {}
+    loaded_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    cfg = loaded_config if isinstance(loaded_config, dict) else {}
+    gateway_value = cfg.get("gateway")
+    gateway = gateway_value if isinstance(gateway_value, dict) else {}
     check.assert_true(
         gateway.get("upstream_default_model") == EXPECTED["final_model"],
         "local gateway upstream_default_model is claude-opus-4-8",
     )
 
-    upstreams = gateway.get("upstreams") if isinstance(gateway.get("upstreams"), list) else []
+    upstreams_value = gateway.get("upstreams")
+    upstreams = upstreams_value if isinstance(upstreams_value, list) else []
     by_name = {str(item.get("name")): item for item in upstreams if isinstance(item, dict)}
     anthropic = by_name.get("anthropic", {})
     anthropic_native = by_name.get("anthropic-native", {})
@@ -172,7 +174,8 @@ def config_gateway_checks(check: Check, config_path: Path) -> None:
         "local gemini upstream default_model is gemini-3.5-flash",
     )
 
-    routes = gateway.get("token_routes") if isinstance(gateway.get("token_routes"), list) else []
+    routes_value = gateway.get("token_routes")
+    routes = routes_value if isinstance(routes_value, list) else []
     gemini_routes = [
         route for route in routes
         if isinstance(route, dict)

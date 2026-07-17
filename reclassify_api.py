@@ -74,7 +74,7 @@ async def reclassify():
                 max_tokens=64000,
                 temperature=0.1,
             )
-            raw = resp.choices[0].message.content.strip()
+            raw = (resp.choices[0].message.content or "").strip()
             if raw.startswith("```"):
                 raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0]
             result = json.loads(raw)

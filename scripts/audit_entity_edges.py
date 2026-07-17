@@ -20,10 +20,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from bucket_manager import BucketManager
-from entity_edges import extract_entity_edges_from_bucket
-from identity import identity_names
-from utils import load_config
+from bucket_manager import BucketManager  # noqa: E402
+from entity_edges import extract_entity_edges_from_bucket  # noqa: E402
+from identity import identity_names  # noqa: E402
+from utils import load_config  # noqa: E402
 
 
 DEFAULT_SNAPSHOT_ROOT = ROOT / "tmp" / "p0-local-snapshot-20260628-1528"
@@ -102,13 +102,18 @@ def _compact(value: Any) -> str:
     return re.sub(r"[\s。；;，,、：:\"'“”‘’「」『』【】\[\]（）()!?！？~～._-]+", "", str(value or "").lower())
 
 
+def _bucket_metadata(bucket: dict[str, Any]) -> dict[str, Any]:
+    metadata = bucket.get("metadata")
+    return metadata if isinstance(metadata, dict) else {}
+
+
 def _bucket_name(bucket: dict[str, Any]) -> str:
-    meta = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
+    meta = _bucket_metadata(bucket)
     return str(meta.get("name") or bucket.get("name") or bucket.get("id") or "").strip()
 
 
 def _bucket_domain(bucket: dict[str, Any]) -> list[str]:
-    meta = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
+    meta = _bucket_metadata(bucket)
     domain = meta.get("domain") or []
     if isinstance(domain, str):
         return [domain]
@@ -118,7 +123,7 @@ def _bucket_domain(bucket: dict[str, Any]) -> list[str]:
 
 
 def _bucket_tags(bucket: dict[str, Any]) -> list[str]:
-    meta = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
+    meta = _bucket_metadata(bucket)
     tags = meta.get("tags") or []
     if isinstance(tags, str):
         return [tags]

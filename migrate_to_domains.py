@@ -99,7 +99,7 @@ def migrate():
         print(f"  ✓ {filename}")
         print(f"    → {primary_domain}/{new_filename}")
 
-    print(f"\n迁移完成。")
+    print("\n迁移完成。")
 
     # 展示新结构
     print("\n=== 新目录结构 ===")

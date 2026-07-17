@@ -8,6 +8,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from openai import AsyncOpenAI
+from openai.types.chat import ChatCompletionMessageParam
 
 from identity import identity_names, render_identity_template
 from self_anchor import is_self_anchor_bucket
@@ -194,12 +195,13 @@ class DailyPortraitMaintainer:
             or reflection_cfg.get("base_url")
             or persona_cfg.get("base_url")
         )
-        self.model = (
+        self.model = str(
             portrait_model
             or dehy_cfg.get("model", "deepseek-chat")
             or reflection_cfg.get("model")
             or persona_cfg.get("model")
-        )
+            or ""
+        ).strip()
         self.api_key = (
             portrait_api_key
             or dehy_cfg.get("api_key", "")
@@ -1536,7 +1538,8 @@ class DailyPortraitMaintainer:
         return self._parse_json_object(raw or "{}")
 
     async def _create_stable_completion(self, payload: dict, *, max_tokens: int):
-        messages = [
+        client = self._require_client()
+        messages: list[ChatCompletionMessageParam] = [
             {"role": "system", "content": self._stable_prompt()},
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ]
@@ -1546,7 +1549,7 @@ class DailyPortraitMaintainer:
             json_response=self.json_response_format,
         )
         try:
-            return await self.client.chat.completions.create(
+            return await client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 **options,
@@ -1555,7 +1558,7 @@ class DailyPortraitMaintainer:
             if not options.pop("response_format", None):
                 raise
             logger.warning("Portrait stable JSON response_format failed, retrying without it: %s", exc)
-            return await self.client.chat.completions.create(
+            return await client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 **options,
@@ -1896,7 +1899,8 @@ class DailyPortraitMaintainer:
         raise last_error or ValueError("portrait_json_parse_failed")
 
     async def _create_patch_completion(self, payload: dict, *, max_tokens: int):
-        messages = [
+        client = self._require_client()
+        messages: list[ChatCompletionMessageParam] = [
             {"role": "system", "content": self._prompt()},
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ]
@@ -1906,7 +1910,7 @@ class DailyPortraitMaintainer:
             json_response=self.json_response_format,
         )
         try:
-            return await self.client.chat.completions.create(
+            return await client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 **options,
@@ -1915,7 +1919,7 @@ class DailyPortraitMaintainer:
             if not options.pop("response_format", None):
                 raise
             logger.warning("Portrait JSON response_format failed, retrying without it: %s", exc)
-            return await self.client.chat.completions.create(
+            return await client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 **options,
@@ -1977,7 +1981,7 @@ class DailyPortraitMaintainer:
     def _normalize_patch(self, patch: dict, materials: dict) -> tuple[dict, list[dict]]:
         if not isinstance(patch, dict):
             patch = {}
-        normalized = {key: [] for key in PATCH_KEYS}
+        normalized: dict[str, Any] = {key: [] for key in PATCH_KEYS}
         rejected = []
         evidence_scope_limits = self._material_scope_limits(materials)
         current_bucket_ids = {
@@ -3443,7 +3447,7 @@ class DailyPortraitMaintainer:
 
     def _portrait_snapshot(self, state: dict) -> dict:
         portrait = state.get("portrait", {}) if isinstance(state.get("portrait"), dict) else {}
-        snapshot = {
+        snapshot: dict[str, Any] = {
             scope: {
                 "recent_buffer": (portrait.get(scope, {}) or {}).get("recent_buffer", [])[:8],
                 "staging_pool": (portrait.get(scope, {}) or {}).get("staging_pool", [])[:8],
@@ -3568,6 +3572,12 @@ class DailyPortraitMaintainer:
         if self.thinking_mode:
             options["extra_body"] = {"thinking": {"type": self.thinking_mode}}
         return options
+
+    def _require_client(self) -> AsyncOpenAI:
+        client = self.client
+        if client is None:
+            raise RuntimeError("Portrait API is unavailable")
+        return client
 
     def _parse_json_object(self, raw: str) -> dict:
         text = str(raw or "").strip()

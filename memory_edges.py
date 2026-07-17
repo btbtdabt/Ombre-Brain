@@ -79,10 +79,17 @@ class MemoryEdgeStore:
         for edge in edges or []:
             if not isinstance(edge, dict):
                 continue
+            source = edge.get("source") or edge.get("source_memory_id")
+            target = edge.get("target") or edge.get("target_memory_id")
+            relation_type = edge.get("relation_type") or edge.get("type")
+            if source is None or target is None:
+                continue
+            if relation_type is None:
+                relation_type = "relates_to"
             saved_edge = self.add_edge(
-                edge.get("source") or edge.get("source_memory_id"),
-                edge.get("target") or edge.get("target_memory_id"),
-                edge.get("relation_type") or edge.get("type"),
+                source,
+                target,
+                relation_type,
                 edge.get("confidence", 0.5),
                 edge.get("reason", ""),
                 edge.get("created_at"),

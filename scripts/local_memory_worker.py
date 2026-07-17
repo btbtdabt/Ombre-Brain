@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from utils import load_config
+from utils import load_config  # noqa: E402
 
 
 DEFAULT_BRIDGE_DB = Path(r"D:\haven_bridge\data\haven.db")

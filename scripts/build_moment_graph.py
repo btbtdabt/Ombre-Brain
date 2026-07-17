@@ -18,11 +18,15 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from bucket_manager import BucketManager
-from memory_layers import can_moment_be_direct_seed, can_moment_be_related_target
-from memory_moments import MemoryMomentStore, parse_bucket_moments
-from memory_relevance import MemoryRelevanceOptions, content_terms_for_query, memory_relevance_options_from_config
-from utils import load_config
+from bucket_manager import BucketManager  # noqa: E402
+from memory_layers import can_moment_be_direct_seed, can_moment_be_related_target  # noqa: E402
+from memory_moments import MemoryMomentStore, parse_bucket_moments  # noqa: E402
+from memory_relevance import (  # noqa: E402
+    MemoryRelevanceOptions,
+    content_terms_for_query,
+    memory_relevance_options_from_config,
+)
+from utils import load_config  # noqa: E402
 
 
 GENERATED_REASON_PREFIX = "local_graph:"

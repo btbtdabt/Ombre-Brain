@@ -210,11 +210,17 @@ class EntityEdgeStore:
         for edge in edges or []:
             if not isinstance(edge, dict):
                 continue
+            subject = edge.get("subject")
+            relation = edge.get("relation")
+            object_text = edge.get("object_text") or edge.get("object")
+            bucket_id = edge.get("bucket_id")
+            if subject is None or relation is None or object_text is None or bucket_id is None:
+                continue
             saved_edge = self.add_edge(
-                edge.get("subject"),
-                edge.get("relation"),
-                edge.get("object_text") or edge.get("object"),
-                edge.get("bucket_id"),
+                subject,
+                relation,
+                object_text,
+                bucket_id,
                 edge.get("confidence", 0.65),
                 edge.get("evidence", ""),
                 edge.get("created_at"),
@@ -357,7 +363,8 @@ def extract_entity_edges_from_bucket(bucket: dict, identity: dict | None = None)
     if not bucket_id:
         return []
     identity = identity or identity_names(None)
-    meta = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
+    raw_metadata = bucket.get("metadata")
+    meta = raw_metadata if isinstance(raw_metadata, dict) else {}
     title = str(meta.get("name") or bucket.get("name") or "").strip()
     text = _bucket_entity_text(bucket)
     relation_text = _bucket_relation_text(bucket)
@@ -517,7 +524,8 @@ def _edge(
 
 
 def _bucket_entity_text(bucket: dict) -> str:
-    meta = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
+    raw_metadata = bucket.get("metadata")
+    meta = raw_metadata if isinstance(raw_metadata, dict) else {}
     parts = [
         meta.get("name") or bucket.get("name") or "",
         " ".join(str(tag) for tag in meta.get("tags", []) or []),

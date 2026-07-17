@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Awaitable, Callable, Literal, Protocol, overload
 from urllib.parse import unquote
 from zoneinfo import ZoneInfo
 
@@ -100,7 +100,7 @@ from persona_event_selection import (
 )
 from raw_events import RawEventStore, raw_event_text_looks_injected, strip_raw_client_context
 from reminder_store import ReminderStore
-from reranker_engine import RerankerEngine
+from reranker_engine import RerankerEngine, RerankResult
 from self_anchor import is_self_anchor_bucket, is_self_anchor_metadata
 from source_refs import source_ref_window
 from utils import (
@@ -438,6 +438,23 @@ DEFAULT_AXIS_LITE_TECHNICAL_DOMAIN_TERMS = (
 )
 
 
+class EmbeddingSearchEngine(Protocol):
+    enabled: bool
+
+    async def search_similar(self, query: str, top_k: int = 10) -> list[tuple[str, float]]: ...
+
+
+class RerankingEngine(Protocol):
+    enabled: bool
+
+    async def rerank(
+        self,
+        query: str,
+        documents: list[str],
+        top_n: int | None = None,
+    ) -> list[RerankResult]: ...
+
+
 class GatewayService:
     """
     OpenAI-compatible gateway that injects Ombre memory before forwarding
@@ -449,8 +466,8 @@ class GatewayService:
         config: dict,
         bucket_mgr: BucketManager | None = None,
         dehydrator: Dehydrator | None = None,
-        embedding_engine: EmbeddingEngine | None = None,
-        reranker_engine: RerankerEngine | None = None,
+        embedding_engine: EmbeddingSearchEngine | None = None,
+        reranker_engine: RerankingEngine | None = None,
         state_store: GatewayStateStore | None = None,
         raw_event_store: RawEventStore | None = None,
         persona_engine: PersonaStateEngine | None = None,
@@ -757,11 +774,12 @@ class GatewayService:
         self.recall_admission_rerank_score = self._clamp(
             float(self.gateway_cfg.get("recall_admission_rerank_score", 0.65))
         )
+        ai_name = self.identity.get("ai_name")
         self.recall_policy = RecallPolicy(
             self.relevance_options,
             semantic_threshold=self.recall_admission_semantic_score,
             rerank_threshold=self.recall_admission_rerank_score,
-            ai_reaction_names=[self.identity.get("ai_name")],
+            ai_reaction_names=[ai_name] if isinstance(ai_name, str) else [],
         )
         self.query_planner_enabled = self._bool_config_value(
             self.gateway_cfg.get("query_planner_enabled"),
@@ -1594,7 +1612,11 @@ class GatewayService:
         self.dehydrator.api_key = str(
             dehy_cfg.get("api_key") or getattr(self.dehydrator, "api_key", "") or ""
         ).strip()
-        normalize_thinking = getattr(self.dehydrator, "_normalize_thinking_mode", None)
+        normalize_thinking: Callable[[Any], str] | None = getattr(
+            self.dehydrator,
+            "_normalize_thinking_mode",
+            None,
+        )
         if callable(normalize_thinking):
             self.dehydrator.thinking_mode = normalize_thinking(dehy_cfg.get("thinking_mode", ""))
         else:
@@ -2678,6 +2700,28 @@ class GatewayService:
         self._moment_graph_cache_bucket_list_id = 0
         self._moment_graph_cache_edge_stamp = (0, 0)
         self._moment_graph_cache_store_stamp = (0, 0)
+
+    @overload
+    async def prepare_payload(
+        self,
+        payload: dict,
+        session_id: str,
+        *,
+        include_favorite_memory: bool = False,
+        include_debug: Literal[True],
+        debug_detail: str = "full",
+    ) -> tuple[dict, list[str] | None, dict[str, Any]]: ...
+
+    @overload
+    async def prepare_payload(
+        self,
+        payload: dict,
+        session_id: str,
+        *,
+        include_favorite_memory: bool = False,
+        include_debug: Literal[False] = False,
+        debug_detail: str = "full",
+    ) -> tuple[dict, list[str] | None]: ...
 
     async def prepare_payload(
         self,
@@ -7826,6 +7870,10 @@ class GatewayService:
         except (TypeError, ValueError):
             return default
 
+    @staticmethod
+    def _dict_or_empty(value: object) -> dict[str, Any]:
+        return value if isinstance(value, dict) else {}
+
     def _query_requests_favorite_memory(self, query: str) -> bool:
         text = (query or "").strip().lower()
         if not text:
@@ -8254,7 +8302,7 @@ class GatewayService:
                 row = {
                     "id": int(event.get("id") or 0),
                     "session_id": session_id,
-                    "round_id": int(round_value) if round_id.isdigit() else None,
+                    "round_id": int(round_value) if round_value is not None and round_id.isdigit() else None,
                     "created_at": str(event.get("created_at") or ""),
                     "user_text": "",
                     "assistant_text": "",
@@ -8760,9 +8808,9 @@ class GatewayService:
         debug["status"] = "injected"
         debug["event_count"] = len(selected_events)
         debug["selected_event_ids"] = [
-            int(event.get("id"))
+            int(event_id)
             for event in selected_events
-            if event.get("id") is not None
+            if (event_id := event.get("id")) is not None
         ]
         debug["excerpt_event_count"] = sum(
             1
@@ -9687,7 +9735,8 @@ class GatewayService:
             rerank_score=row.get("rerank_score"),
         ):
             return True
-        why = row.get("recall_why") if isinstance(row.get("recall_why"), dict) else {}
+        why_value = row.get("recall_why")
+        why = why_value if isinstance(why_value, dict) else {}
         sources = why.get("sources") if isinstance(why, dict) else []
         if isinstance(sources, list):
             strong_sources = {
@@ -9703,7 +9752,8 @@ class GatewayService:
                 "category_overview_item",
             }:
                 return True
-        scores = why.get("score") if isinstance(why.get("score"), dict) else {}
+        scores_value = why.get("score")
+        scores = scores_value if isinstance(scores_value, dict) else {}
         return self.recall_policy.has_strong_score(
             semantic_score=scores.get("semantic"),
             rerank_score=scores.get("rerank"),
@@ -9898,11 +9948,11 @@ class GatewayService:
         if not source_buckets:
             return items, []
 
-        candidate_buckets = [
-            item.get("bucket")
-            for item in items
-            if isinstance(item, dict) and isinstance(item.get("bucket"), dict)
-        ]
+        candidate_buckets: list[dict] = []
+        for item in items:
+            bucket = item.get("bucket") if isinstance(item, dict) else None
+            if isinstance(bucket, dict):
+                candidate_buckets.append(bucket)
         embedding_by_id = await self._semantic_session_dedupe_embeddings(
             source_buckets + candidate_buckets
         )
@@ -10005,12 +10055,16 @@ class GatewayService:
         )
         if not bucket_ids:
             return {}
-        get_embeddings = getattr(self.embedding_engine, "get_embeddings", None)
+        get_embeddings: Callable[
+            [list[str]], Awaitable[dict[str, list[float]]]
+        ] | None = getattr(self.embedding_engine, "get_embeddings", None)
         try:
             if callable(get_embeddings):
                 result = await get_embeddings(bucket_ids)
                 return result if isinstance(result, dict) else {}
-            get_embedding = getattr(self.embedding_engine, "get_embedding", None)
+            get_embedding: Callable[
+                [str], Awaitable[list[float] | None]
+            ] | None = getattr(self.embedding_engine, "get_embedding", None)
             if not callable(get_embedding):
                 return {}
             values = await asyncio.gather(*(get_embedding(bucket_id) for bucket_id in bucket_ids))
@@ -10038,7 +10092,9 @@ class GatewayService:
             left_embedding = embedding_by_id.get(left_id)
             right_embedding = embedding_by_id.get(right_id)
         else:
-            get_embedding = getattr(self.embedding_engine, "get_embedding", None)
+            get_embedding: Callable[
+                [str], Awaitable[list[float] | None]
+            ] | None = getattr(self.embedding_engine, "get_embedding", None)
             if not callable(get_embedding):
                 return None
             try:
@@ -10118,6 +10174,32 @@ class GatewayService:
         if include_query_planner_debug:
             return [], [], [], [], (query_planner_debug or self._query_planner_debug_base(""))
         return [], [], [], []
+
+    @overload
+    async def _select_dynamic_moments(
+        self,
+        query: str,
+        session_id: str,
+        all_buckets: list[dict],
+        grouped_moments: dict[str, list[dict]],
+        *,
+        all_moments: list[dict] | None = None,
+        search_query: str = "",
+        include_query_planner_debug: Literal[True],
+    ) -> tuple[list[dict], list[dict], list[dict], list[dict], dict[str, Any]]: ...
+
+    @overload
+    async def _select_dynamic_moments(
+        self,
+        query: str,
+        session_id: str,
+        all_buckets: list[dict],
+        grouped_moments: dict[str, list[dict]],
+        *,
+        all_moments: list[dict] | None = None,
+        search_query: str = "",
+        include_query_planner_debug: Literal[False] = False,
+    ) -> tuple[list[dict], list[dict], list[dict], list[dict]]: ...
 
     async def _select_dynamic_moments(
         self,
@@ -11225,11 +11307,9 @@ class GatewayService:
             kind = str(metadata.get("comment_kind") or "").strip().lower()
             ordinal = self._moment_ordinal(year_ring)
             score = 0.0
-            query_hit = False
             for term in query_terms:
                 if term and term.lower() in text:
                     score += 3.0
-                    query_hit = True
             for term in seed_terms:
                 if term and term.lower() in text:
                     score += 1.0
@@ -11968,9 +12048,10 @@ class GatewayService:
             and not row.get("category_overview_item")
         ):
             return False, "category_overview_item_missing"
-        has_caution_path = bool(row.get("path") is not None and path_has_caution(row.get("path")))
+        path = row.get("path")
+        has_caution_path = bool(path is not None and path_has_caution(path))
         has_source_record_topic_evidence = self._diffusion_path_source_record_evidence_extends_axis(
-            row.get("path"),
+            path,
             query_plan,
         )
         explicit_edge_axis_bypass = (
@@ -12138,7 +12219,8 @@ class GatewayService:
         path = row.get("path")
         path_nodes = tuple(str(node_id) for node_id in (getattr(path, "nodes", ()) or ()))
         path_steps = tuple(getattr(path, "steps", ()) or ())
-        moment = row.get("moment") if isinstance(row.get("moment"), dict) else {}
+        moment_value = row.get("moment")
+        moment = moment_value if isinstance(moment_value, dict) else {}
         target_id = str(row.get("moment_id") or moment.get("moment_id") or "")
         target_node_id = path_nodes[-1] if path_nodes else target_id
         seed_node_id = path_nodes[0] if path_nodes else ""
@@ -12252,7 +12334,7 @@ class GatewayService:
         return count
 
     def _diffusion_path_confidence(self, path: Any, *, default: float = 0.65) -> float:
-        steps = tuple(getattr(path, "steps", ()) or ())
+        steps: tuple[Any, ...] = tuple(getattr(path, "steps", ()) or ())
         if not steps:
             return self._clamp(float(default or 0.65), 0.0, 1.0)
         values = [
@@ -13614,7 +13696,8 @@ class GatewayService:
         primary_domain = normalize_domain_key(raw.get("primary_domain"))
         if primary_domain and primary_domain in DOMAIN_SENTINEL_ALLOWED_DOMAINS:
             domains.append(primary_domain)
-        raw_domains = raw.get("domains") if isinstance(raw.get("domains"), list) else []
+        raw_domains_value = raw.get("domains")
+        raw_domains = raw_domains_value if isinstance(raw_domains_value, list) else []
         for item in raw_domains:
             candidates = []
             if isinstance(item, dict):
@@ -13871,11 +13954,13 @@ class GatewayService:
         for item in items or []:
             if not isinstance(item, dict):
                 continue
-            bucket = item.get("bucket") if isinstance(item.get("bucket"), dict) else {}
+            bucket_value = item.get("bucket")
+            bucket = bucket_value if isinstance(bucket_value, dict) else {}
             bucket_id = str(bucket.get("id") or "")
             if not bucket_id:
                 continue
-            metadata = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
+            metadata_value = bucket.get("metadata")
+            metadata = metadata_value if isinstance(metadata_value, dict) else {}
             bucket_name = str(metadata.get("name") or bucket_id)
             blocked_reason = str(item.get("blocked_reason") or "")
             status = "admitted" if bucket_id in final_ids else ("blocked" if blocked_reason else "candidate")
@@ -14083,8 +14168,10 @@ class GatewayService:
         for row in diffused_rows or []:
             if not isinstance(row, dict) or str(row.get("source") or "") != "graph":
                 continue
-            path = row.get("path") if isinstance(row.get("path"), dict) else {}
-            trace = row.get("diffusion_trace") if isinstance(row.get("diffusion_trace"), dict) else {}
+            path_value = row.get("path")
+            path = path_value if isinstance(path_value, dict) else {}
+            trace_value = row.get("diffusion_trace")
+            trace = trace_value if isinstance(trace_value, dict) else {}
             if not path.get("steps") or not trace:
                 continue
             paths.append(
@@ -14140,7 +14227,8 @@ class GatewayService:
                 logger.warning("Gateway moment chunk shadow preview failed for %s: %s", bucket_id, exc)
                 errors.append({"bucket_id": bucket_id, "reason": type(exc).__name__})
                 continue
-            metadata = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
+            metadata_value = bucket.get("metadata")
+            metadata = metadata_value if isinstance(metadata_value, dict) else {}
             previews.append(
                 {
                     "bucket_id": bucket_id,
@@ -14423,7 +14511,11 @@ class GatewayService:
         client = getattr(self.dehydrator, "client", None)
         if client is None:
             return None, "query_planner_dehydration_unavailable"
-        completion_options = getattr(self.dehydrator, "_completion_options", None)
+        completion_options: Callable[..., dict[str, Any]] | None = getattr(
+            self.dehydrator,
+            "_completion_options",
+            None,
+        )
         max_tokens = int(payload.get("max_tokens") or self.query_planner_max_tokens)
         if callable(completion_options):
             options = completion_options(
@@ -14643,12 +14735,12 @@ class GatewayService:
             return None
         rescued["admission_reason"] = "semantic_rescue_direct_evidence"
         rescued["blocked_reason"] = ""
+        recall_policy_debug_value = rescued.get("recall_policy_debug")
+        recall_policy_debug = (
+            recall_policy_debug_value if isinstance(recall_policy_debug_value, dict) else {}
+        )
         rescued["recall_policy_debug"] = {
-            **(
-                rescued.get("recall_policy_debug")
-                if isinstance(rescued.get("recall_policy_debug"), dict)
-                else {}
-            ),
+            **recall_policy_debug,
             "semantic_rescue": rescue_evidence,
         }
         debug["selected_bucket_id"] = bucket_id
@@ -15069,7 +15161,11 @@ class GatewayService:
         ]
 
     def _retrieval_alias_hits(self, query: str, eligible_ids: set[str]) -> list[dict[str, Any]]:
-        search = getattr(self.memory_moment_store, "search_retrieval_aliases", None)
+        search: Callable[..., list[dict]] | None = getattr(
+            self.memory_moment_store,
+            "search_retrieval_aliases",
+            None,
+        )
         if not callable(search) or not str(query or "").strip() or not eligible_ids:
             return []
         try:
@@ -16000,6 +16096,36 @@ class GatewayService:
         admitted_pool.sort(key=lambda item: self._bucket_final_candidate_rank(policy_query, item, recent_ids=recent_ids))
         return admitted_pool, suppressed_candidates
 
+    @overload
+    async def _select_dynamic_buckets(
+        self,
+        query: str,
+        session_id: str,
+        all_buckets: list[dict],
+        *,
+        search_query: str = "",
+        include_query_planner_debug: Literal[True],
+        allow_semantic: bool = True,
+        allow_query_planner: bool = True,
+        allow_semantic_session_dedupe: bool = True,
+        allow_rerank: bool = True,
+    ) -> tuple[list[dict], list[dict], dict[str, Any]]: ...
+
+    @overload
+    async def _select_dynamic_buckets(
+        self,
+        query: str,
+        session_id: str,
+        all_buckets: list[dict],
+        *,
+        search_query: str = "",
+        include_query_planner_debug: Literal[False] = False,
+        allow_semantic: bool = True,
+        allow_query_planner: bool = True,
+        allow_semantic_session_dedupe: bool = True,
+        allow_rerank: bool = True,
+    ) -> tuple[list[dict], list[dict]]: ...
+
     async def _select_dynamic_buckets(
         self,
         query: str,
@@ -16485,7 +16611,7 @@ class GatewayService:
     def _bucket_evidence_labels(self, query: str, item: dict) -> list[str]:
         if not isinstance(item, dict):
             return []
-        bucket = item.get("bucket") if isinstance(item.get("bucket"), dict) else {}
+        bucket = self._dict_or_empty(item.get("bucket"))
         labels: list[str] = []
         title_anchor_terms = self._bucket_title_anchor_terms(query, bucket)
         if title_anchor_terms:
@@ -16997,7 +17123,7 @@ class GatewayService:
             return None
         if self._axis_lite_bypass_for_item(query, item):
             return None
-        bucket = item.get("bucket") if isinstance(item.get("bucket"), dict) else {}
+        bucket = self._dict_or_empty(item.get("bucket"))
         matched = self._axis_lite_candidate_matches(query_plan, bucket)
         if matched:
             if self._axis_lite_domain_mismatch(query_plan, bucket):
@@ -17088,7 +17214,7 @@ class GatewayService:
         if semantic_score < semantic_threshold or final_score < final_threshold:
             return False
         item["recall_policy_debug"] = {
-            **(item.get("recall_policy_debug") if isinstance(item.get("recall_policy_debug"), dict) else {}),
+            **self._dict_or_empty(item.get("recall_policy_debug")),
             "tech_domain_high_confidence_semantic_bypass": True,
             "tech_domain_semantic_score": round(semantic_score, 4),
             "tech_domain_final_score": round(final_score, 4),
@@ -17129,7 +17255,7 @@ class GatewayService:
         hard_evidence_labels = self._hard_bucket_evidence_labels(evidence_labels)
         item["evidence_labels"] = evidence_labels
         item["hard_evidence_labels"] = hard_evidence_labels
-        dynamic_plan = item.get("dynamic_anchor_plan") if isinstance(item.get("dynamic_anchor_plan"), dict) else {}
+        dynamic_plan = self._dict_or_empty(item.get("dynamic_anchor_plan"))
         independent_anchor_evidence = bool(
             self._planner_lexical_direct_signal(item)
             or item.get("exact_anchor_match")
@@ -17206,7 +17332,7 @@ class GatewayService:
             if tech_rejection:
                 item["admission_reason"] = "tech_domain_without_query_anchor"
                 item["recall_policy_debug"] = {
-                    **(item.get("recall_policy_debug") if isinstance(item.get("recall_policy_debug"), dict) else {}),
+                    **self._dict_or_empty(item.get("recall_policy_debug")),
                     **tech_rejection,
                 }
                 return False
@@ -17218,7 +17344,7 @@ class GatewayService:
             item["admission_reason"] = "discriminative_anchor_missing"
             item["blocked_reason"] = "discriminative_anchor_missing"
             item["recall_policy_debug"] = {
-                **(item.get("recall_policy_debug") if isinstance(item.get("recall_policy_debug"), dict) else {}),
+                **self._dict_or_empty(item.get("recall_policy_debug")),
                 "required_terms": list(dynamic_plan.get("required_terms") or []),
                 "matched_terms": list(item.get("distinctive_anchor_terms") or []),
                 "missing_terms": list(item.get("distinctive_anchor_missing_terms") or []),
@@ -17230,7 +17356,7 @@ class GatewayService:
             item["admission_reason"] = "category_overview_item_missing"
             item["blocked_reason"] = "category_overview_item_missing"
             item["recall_policy_debug"] = {
-                **(item.get("recall_policy_debug") if isinstance(item.get("recall_policy_debug"), dict) else {}),
+                **self._dict_or_empty(item.get("recall_policy_debug")),
                 "category_terms": list(dynamic_plan.get("category_terms") or []),
                 "matched_terms": list(item.get("category_overview_terms") or []),
                 "auto": True,
@@ -17241,7 +17367,7 @@ class GatewayService:
             item["admission_reason"] = reason
             item["blocked_reason"] = reason
             item["recall_policy_debug"] = {
-                **(item.get("recall_policy_debug") if isinstance(item.get("recall_policy_debug"), dict) else {}),
+                **self._dict_or_empty(item.get("recall_policy_debug")),
                 "evidence_labels": evidence_labels,
                 "hard_evidence_labels": hard_evidence_labels,
                 "blocked_reason": reason,
@@ -17344,7 +17470,7 @@ class GatewayService:
                 "auto": True,
             }
             return False
-        dynamic_plan = moment.get("dynamic_anchor_plan") if isinstance(moment.get("dynamic_anchor_plan"), dict) else {}
+        dynamic_plan = self._dict_or_empty(moment.get("dynamic_anchor_plan"))
         dynamic_anchor_missing = bool(
             dynamic_plan.get("required_terms")
             and not moment.get("distinctive_anchor_match")
@@ -17395,7 +17521,7 @@ class GatewayService:
             if tech_rejection:
                 moment["admission_reason"] = "tech_domain_without_query_anchor"
                 moment["recall_policy_debug"] = {
-                    **(moment.get("recall_policy_debug") if isinstance(moment.get("recall_policy_debug"), dict) else {}),
+                    **self._dict_or_empty(moment.get("recall_policy_debug")),
                     **tech_rejection,
                 }
                 return False
@@ -17418,7 +17544,7 @@ class GatewayService:
         if decision.admit_direct and dynamic_anchor_missing:
             moment["admission_reason"] = "discriminative_anchor_missing"
             moment["recall_policy_debug"] = {
-                **(moment.get("recall_policy_debug") if isinstance(moment.get("recall_policy_debug"), dict) else {}),
+                **self._dict_or_empty(moment.get("recall_policy_debug")),
                 "required_terms": list(dynamic_plan.get("required_terms") or []),
                 "matched_terms": list(moment.get("distinctive_anchor_terms") or []),
                 "missing_terms": list(moment.get("distinctive_anchor_missing_terms") or []),
@@ -17428,7 +17554,7 @@ class GatewayService:
         if decision.admit_direct and category_overview_missing:
             moment["admission_reason"] = "category_overview_item_missing"
             moment["recall_policy_debug"] = {
-                **(moment.get("recall_policy_debug") if isinstance(moment.get("recall_policy_debug"), dict) else {}),
+                **self._dict_or_empty(moment.get("recall_policy_debug")),
                 "category_terms": list(dynamic_plan.get("category_terms") or []),
                 "matched_terms": list(moment.get("category_overview_terms") or []),
                 "auto": True,
@@ -17440,7 +17566,7 @@ class GatewayService:
                 reason, debug = axis_rejection
                 moment["admission_reason"] = reason
                 moment["recall_policy_debug"] = {
-                    **(moment.get("recall_policy_debug") if isinstance(moment.get("recall_policy_debug"), dict) else {}),
+                    **self._dict_or_empty(moment.get("recall_policy_debug")),
                     **debug,
                 }
                 return False
@@ -17534,7 +17660,8 @@ class GatewayService:
         *,
         required_terms: list[str] | None = None,
     ) -> tuple[dict[str, float], dict[str, dict[str, Any]]]:
-        if not self._word_map_hint_available():
+        word_map_store = self.word_map_store
+        if not self._word_map_hint_available() or word_map_store is None:
             return {}, {}
         terms = self._word_map_query_terms(query, required_terms=required_terms)
         if not terms:
@@ -17547,7 +17674,7 @@ class GatewayService:
         if not eligible_ids:
             return {}, {}
         try:
-            payload = self.word_map_store.hint_buckets_for_terms(
+            payload = word_map_store.hint_buckets_for_terms(
                 terms,
                 neighbor_limit=self.word_map_hint_neighbor_limit,
                 bucket_limit=self.word_map_hint_bucket_limit,
@@ -17645,7 +17772,7 @@ class GatewayService:
         for item in items or []:
             if not isinstance(item, dict) or not item.get("word_map_hint"):
                 continue
-            bucket = item.get("bucket") if isinstance(item.get("bucket"), dict) else {}
+            bucket = self._dict_or_empty(item.get("bucket"))
             bucket_id = str(bucket.get("id") or "")
             if bucket_id and bucket_id not in payload["bucket_ids"]:
                 payload["bucket_ids"].append(bucket_id)
@@ -17736,7 +17863,8 @@ class GatewayService:
         for item in items or []:
             if not isinstance(item, dict) or not item.get("exact_anchor_match"):
                 continue
-            bucket = item.get("bucket") if isinstance(item.get("bucket"), dict) else {}
+            bucket_value = item.get("bucket")
+            bucket = bucket_value if isinstance(bucket_value, dict) else {}
             bucket_id = str(bucket.get("id") or "")
             if bucket_id and bucket_id not in payload["bucket_ids"]:
                 payload["bucket_ids"].append(bucket_id)
@@ -18579,7 +18707,7 @@ class GatewayService:
         explicit_lookup: bool = False,
         query: str = "",
     ) -> dict[str, Any]:
-        signal = bucket.get("_recall_signal") if isinstance(bucket.get("_recall_signal"), dict) else {}
+        signal = self._dict_or_empty(bucket.get("_recall_signal"))
         item = {"bucket": bucket, **signal}
         item.setdefault("admission_reason", "admitted_bucket")
         return self._format_suppressed_bucket_debug(
@@ -18602,6 +18730,7 @@ class GatewayService:
             bucket = {}
         metadata = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
         debug = item.get("recall_policy_debug")
+        semantic_rescue_value = item.get("semantic_rescue")
         payload = {
             "bucket_id": str(bucket.get("id") or ""),
             "bucket_name": str(metadata.get("name") or bucket.get("id") or ""),
@@ -18660,8 +18789,8 @@ class GatewayService:
             "retrieval_alias_moment_ids": list(item.get("retrieval_alias_moment_ids") or []),
             "retrieval_alias_bucket_count": int(item.get("retrieval_alias_bucket_count") or 0),
             "semantic_rescue": (
-                dict(item.get("semantic_rescue"))
-                if isinstance(item.get("semantic_rescue"), dict)
+                dict(semantic_rescue_value)
+                if isinstance(semantic_rescue_value, dict)
                 else {}
             ),
             "semantic_session_dedupe_similarity": (
@@ -18880,7 +19009,8 @@ class GatewayService:
             entry["injected"] = bool(entry["injected"] or injected)
             entry["suppressed"] = bool(entry["suppressed"] or suppressed)
 
-            why = row.get("recall_why") if isinstance(row.get("recall_why"), dict) else {}
+            why_value = row.get("recall_why")
+            why = why_value if isinstance(why_value, dict) else {}
             sources = [
                 str(source.get("source") or "").strip()
                 for source in (why.get("sources") or [])
@@ -18888,7 +19018,8 @@ class GatewayService:
             ]
             for source in sources:
                 append_unique(entry["sources"], source)
-            admission = why.get("admission") if isinstance(why.get("admission"), dict) else {}
+            admission_value = why.get("admission")
+            admission = admission_value if isinstance(admission_value, dict) else {}
             admission_reason = str(
                 admission.get("reason")
                 or row.get("admission_reason")
@@ -18896,21 +19027,25 @@ class GatewayService:
                 or ""
             ).strip()
             append_unique(entry["admission_reasons"], admission_reason)
+            score_value = why.get("score")
             evidence: dict[str, Any] = {
                 "stage": stage,
                 "status": str(why.get("status") or row.get("status") or ""),
                 "primary_source": str(why.get("primary_source") or ""),
                 "sources": sources,
                 "admission_reason": admission_reason,
-                "score": why.get("score") if isinstance(why.get("score"), dict) else {},
+                "score": score_value if isinstance(score_value, dict) else {},
             }
-            trace = row.get("diffusion_trace") if isinstance(row.get("diffusion_trace"), dict) else {}
+            trace_value = row.get("diffusion_trace")
+            trace = trace_value if isinstance(trace_value, dict) else {}
             if trace:
+                gate_value = trace.get("gate")
+                final_value = trace.get("final")
                 evidence["diffusion"] = {
                     "why": str(trace.get("why") or row.get("why") or ""),
                     "path_trace": str(trace.get("path_trace") or ""),
-                    "gate": trace.get("gate") if isinstance(trace.get("gate"), dict) else {},
-                    "final": trace.get("final") if isinstance(trace.get("final"), dict) else {},
+                    "gate": gate_value if isinstance(gate_value, dict) else {},
+                    "final": final_value if isinstance(final_value, dict) else {},
                 }
             entry["evidence"].append(evidence)
 
@@ -19493,7 +19628,7 @@ class GatewayService:
         bucket_id = str(bucket.get("id") or "")
         if not bucket_id:
             return None
-        metadata = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
+        metadata = self._dict_or_empty(bucket.get("metadata"))
         title = str(metadata.get("name") or bucket.get("name") or bucket_id).strip()
         text = bucket_content_for_recall(bucket)
         if title and self._compact_lookup_key(title) not in self._compact_lookup_key(text):
@@ -19501,7 +19636,7 @@ class GatewayService:
         if not str(text or "").strip():
             return None
 
-        signal = bucket.get("_recall_signal") if isinstance(bucket.get("_recall_signal"), dict) else {}
+        signal = self._dict_or_empty(bucket.get("_recall_signal"))
         reliable = bool(
             self._planner_lexical_direct_signal(signal)
             or signal.get("exact_anchor_match")

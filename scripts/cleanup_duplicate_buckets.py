@@ -16,9 +16,9 @@ from rapidfuzz import fuzz
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from bucket_manager import BucketManager
-from embedding_engine import EmbeddingEngine
-from utils import load_config, strip_affect_anchor
+from bucket_manager import BucketManager  # noqa: E402
+from embedding_engine import EmbeddingEngine  # noqa: E402
+from utils import load_config, strip_affect_anchor  # noqa: E402
 
 
 NON_DELETABLE_TYPES = {"permanent", "feel", "archived"}

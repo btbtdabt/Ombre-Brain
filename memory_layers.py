@@ -602,8 +602,8 @@ def normalize_write_classification(
 
 
 def _metadata(item: dict[str, Any]) -> dict[str, Any]:
-    meta = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-    return meta
+    metadata = item.get("metadata")
+    return metadata if isinstance(metadata, dict) else {}
 
 
 def _moment_metadata(moment: dict[str, Any]) -> dict[str, Any]:

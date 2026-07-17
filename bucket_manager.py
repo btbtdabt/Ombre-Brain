@@ -34,12 +34,13 @@ import logging
 import re
 import json
 import time
+from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from collections import Counter
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
-from typing import Optional
+from typing import Optional, SupportsFloat, SupportsIndex
 
 import frontmatter
 import jieba
@@ -59,6 +60,35 @@ from utils import (
 )
 
 logger = logging.getLogger("ombre_brain.bucket")
+
+LexicalSignature = tuple[str, str, str, str, str, float]
+LexicalProfile = tuple[LexicalSignature, dict[str, float], float, tuple[str, ...]]
+
+
+def _domain_strings(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if not isinstance(value, Sequence) or isinstance(value, (bytes, bytearray)):
+        return [str(value)]
+    domains: list[str] = []
+    for item in value:
+        if item is not None:
+            domains.append(str(item))
+    return domains
+
+
+def _increment_activation_count(value: object) -> int | float:
+    return _metadata_float(value) + 1
+
+
+def _metadata_float(value: object) -> float:
+    if not value:
+        return 0.0
+    if not isinstance(value, (str, bytes, bytearray, SupportsFloat, SupportsIndex)):
+        raise TypeError("metadata value must be convertible to float")
+    return float(value)
 
 
 @asynccontextmanager
@@ -194,10 +224,7 @@ class BucketManager:
         self.w_importance = scoring.get("importance", 1.0)
         self.content_weight = scoring.get("content_weight", 1.0)  # Added to allow better content-based matching during merge
         self.lexical_stop_terms = self._build_lexical_stop_terms(config)
-        self._lexical_profile_cache: dict[
-            str,
-            tuple[tuple, Counter[str], float, tuple[str, str, str, str]],
-        ] = {}
+        self._lexical_profile_cache: dict[str, LexicalProfile] = {}
 
     def _bucket_turn(self, bucket_id: str):
         return _filesystem_turn(str(self.base_dir), f"bucket-{bucket_id}")
@@ -384,13 +411,14 @@ class BucketManager:
         self,
         file_path: str,
         target_type_dir: str,
-        domain: list[str] | None = None,
+        domain: Sequence[str] | str | None = None,
     ) -> str:
         """
         Move a bucket file to a new type directory, preserving domain subfolder.
         Returns new file path.
         """
-        primary_domain = sanitize_name(domain[0]) if domain else "未分类"
+        domains = _domain_strings(domain)
+        primary_domain = sanitize_name(domains[0]) if domains else "未分类"
         target_dir = os.path.join(target_type_dir, primary_domain)
         os.makedirs(target_dir, exist_ok=True)
         filename = os.path.basename(file_path)
@@ -565,7 +593,12 @@ class BucketManager:
 
         # --- Auto-move: pinned → permanent/ ---
         # --- 自动移动：钉选 → permanent/ ---
-        domain = post.get("domain", ["未分类"])
+        raw_domain = post.get("domain", ["未分类"])
+        domain: list[str] | str | None
+        if raw_domain is None or isinstance(raw_domain, str):
+            domain = raw_domain
+        else:
+            domain = _domain_strings(raw_domain)
         if kwargs.get("pinned") and post.get("type") != "permanent":
             post["type"] = "permanent"
             atomic_write_text(file_path, frontmatter.dumps(post))
@@ -632,7 +665,7 @@ class BucketManager:
         now = now_iso()
         created_at = str(created or now).strip() or now
         default_author = identity_names(self.config).get("ai_name") or "AI"
-        entry = {
+        entry: dict[str, str | float] = {
             "id": generate_bucket_id(),
             "created": created_at,
             "author": str(author or default_author),
@@ -654,7 +687,7 @@ class BucketManager:
         post["updated_at"] = now
         if touch:
             post["last_active"] = now
-            post["activation_count"] = post.get("activation_count", 0) + 1
+            post["activation_count"] = _increment_activation_count(post.get("activation_count", 0))
 
         try:
             atomic_write_text(file_path, frontmatter.dumps(post))
@@ -839,7 +872,7 @@ class BucketManager:
         try:
             post = frontmatter.load(file_path)
             post["last_active"] = now_iso()
-            post["activation_count"] = post.get("activation_count", 0) + 1
+            post["activation_count"] = _increment_activation_count(post.get("activation_count", 0))
 
             atomic_write_text(file_path, frontmatter.dumps(post))
             current_time = self._parse_iso_datetime(post.get("created", post.get("last_active", "")))
@@ -892,7 +925,7 @@ class BucketManager:
                     delta_hours = abs((reference_time - created).total_seconds()) / 3600
                     if delta_hours > hours:
                         continue
-                    current_count = float(post.get("activation_count") or 0)
+                    current_count = _metadata_float(post.get("activation_count"))
                     if not math.isfinite(current_count) or current_count < 0:
                         current_count = 0.0
                     post["activation_count"] = round(current_count + 0.3, 1)
@@ -932,10 +965,10 @@ class BucketManager:
     async def search(
         self,
         query: str,
-        limit: int = None,
-        domain_filter: list[str] = None,
-        query_valence: float = None,
-        query_arousal: float = None,
+        limit: int | None = None,
+        domain_filter: list[str] | None = None,
+        query_valence: float | None = None,
+        query_arousal: float | None = None,
         include_archive: bool = True,
     ) -> list[dict]:
         """
@@ -1207,7 +1240,7 @@ class BucketManager:
     def _bucket_searchable_content(self, bucket: dict) -> str:
         return bucket_content_for_recall(bucket)[:1000]
 
-    def _bucket_lexical_profile(self, bucket: dict) -> tuple[Counter[str], float]:
+    def _bucket_lexical_profile(self, bucket: dict) -> tuple[dict[str, float], float]:
         _signature, term_frequency, weighted_length, _phrase_fields = self._bucket_lexical_cache_entry(bucket)
         return term_frequency, weighted_length
 
@@ -1223,7 +1256,7 @@ class BucketManager:
     def _bucket_lexical_cache_entry(
         self,
         bucket: dict,
-    ) -> tuple[tuple, Counter[str], float, tuple[str, str, str, str]]:
+    ) -> LexicalProfile:
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
         bucket_id = str(bucket.get("id") or meta.get("id") or "")
         name = str(meta.get("name") or "")
@@ -1242,7 +1275,7 @@ class BucketManager:
             ("tags", tags, 2.0),
             ("content", content, content_weight),
         )
-        term_frequency: Counter[str] = Counter()
+        term_frequency: dict[str, float] = {}
         weighted_length = 0.0
         for field, text, weight in fields:
             tokens = self._lexical_tokens(text)
@@ -1251,7 +1284,7 @@ class BucketManager:
                 if compact and not self._is_lexical_stop_term(compact):
                     tokens.append(compact)
             for token in tokens:
-                term_frequency[token] += weight
+                term_frequency[token] = term_frequency.get(token, 0.0) + weight
             weighted_length += max(1, len(tokens)) * weight if tokens else 0.0
         value = (
             signature,
@@ -1425,7 +1458,7 @@ class BucketManager:
     # No emotion in query → neutral 0.5 (doesn't affect ranking)
     # ---------------------------------------------------------
     def _calc_emotion_score(
-        self, q_valence: float, q_arousal: float, meta: dict
+        self, q_valence: float | None, q_arousal: float | None, meta: dict
     ) -> float:
         """
         Calculate emotion resonance score (0~1, closer = higher).
@@ -1582,9 +1615,7 @@ class BucketManager:
             post = frontmatter.load(file_path)
             if str(post.get("type") or "").strip().lower() == "archived":
                 return True
-            domain = post.get("domain", ["未分类"])
-            if not isinstance(domain, list):
-                domain = [domain]
+            domain = _domain_strings(post.get("domain", ["未分类"]))
             primary_domain = sanitize_name(domain[0]) if domain else "未分类"
             archive_subdir = os.path.join(self.archive_dir, primary_domain)
             os.makedirs(archive_subdir, exist_ok=True)
@@ -1614,9 +1645,7 @@ class BucketManager:
 
         try:
             post = frontmatter.load(file_path)
-            domain = post.get("domain", ["未分类"])
-            if not isinstance(domain, list):
-                domain = [domain]
+            domain = _domain_strings(post.get("domain", ["未分类"]))
             primary_domain = sanitize_name(domain[0]) if domain else "未分类"
             target_dir = os.path.join(self.dynamic_dir, primary_domain)
             os.makedirs(target_dir, exist_ok=True)

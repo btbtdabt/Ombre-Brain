@@ -300,7 +300,7 @@ def local_date_key(value, *, tz=LOCAL_TZ) -> str:
     return parsed.date().isoformat()
 
 
-def load_config(config_path: str = None) -> dict:
+def load_config(config_path: str | None = None) -> dict:
     """
     Load configuration file.
     加载配置文件。

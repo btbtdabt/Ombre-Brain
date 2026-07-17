@@ -25,7 +25,13 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install pytest pytest-asyncio
+          pip install pytest pytest-asyncio ruff pyright
+
+      - name: Run Ruff
+        run: python -m ruff check .
+
+      - name: Run Pyright
+        run: python -m pyright .
 
       - name: Run full test suite
         run: python -m pytest -q

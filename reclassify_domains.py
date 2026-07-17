@@ -147,7 +147,6 @@ def reclassify():
         new_domains = classify(body, old_domains)
 
         primary = sanitize_name(new_domains[0])
-        old_primary = sanitize_name(old_domains[0]) if old_domains else "未分类"
 
         if name and name != bucket_id:
             new_filename = f"{sanitize_name(name)}_{bucket_id}.md"
@@ -179,7 +178,7 @@ def reclassify():
             os.rmdir(dp)
             print(f"\n  🗑 删除空目录: {d}/")
 
-    print(f"\n重分类完成。\n")
+    print("\n重分类完成。\n")
 
     # 展示新结构
     print("=== 新目录结构 ===")

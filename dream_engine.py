@@ -10,7 +10,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, SupportsFloat, SupportsIndex
 from zoneinfo import ZoneInfo
 
 import yaml
@@ -87,7 +87,11 @@ def _parse_dt(value: str) -> datetime:
 
 def _clamp(value: object, default: float = 0.5) -> float:
     try:
-        number = float(value)
+        number = (
+            float(value)
+            if isinstance(value, (str, bytes, bytearray, SupportsFloat, SupportsIndex))
+            else default
+        )
     except (TypeError, ValueError):
         number = default
     return max(0.0, min(1.0, number))
@@ -723,7 +727,8 @@ class DreamEngine:
         dream_text = re.sub(r"\s+\n", "\n", str(raw.get("dream_text") or "")).strip()
         if not dream_text:
             raise ValueError("dream_text is empty")
-        affect = raw.get("core_affect") if isinstance(raw.get("core_affect"), dict) else {}
+        raw_affect = raw.get("core_affect")
+        affect = raw_affect if isinstance(raw_affect, dict) else {}
         core_affect = {
             "valence": round(_clamp(affect.get("valence", 0.5)), 2),
             "arousal": round(_clamp(affect.get("arousal", 0.3), 0.3), 2),

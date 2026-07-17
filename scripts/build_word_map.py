@@ -16,10 +16,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from bucket_manager import BucketManager
-from identity_semantics import IdentitySemanticStore
-from utils import load_config
-from word_map import WordMapStore
+from bucket_manager import BucketManager  # noqa: E402
+from identity_semantics import IdentitySemanticStore  # noqa: E402
+from utils import load_config  # noqa: E402
+from word_map import WordMapStore  # noqa: E402
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

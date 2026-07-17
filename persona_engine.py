@@ -564,11 +564,11 @@ class PersonaStateEngine:
                 "updated_at": self._format_time(now),
             }
         events = self._list_events(events_limit, active_session_id)
-        guidance = (
+        guidance = str((
             events[0].get("reply_guidance")
             if events and events[0].get("reply_guidance")
             else self.fallback_guidance
-        )
+        ) or "")
 
         return {
             "profile_id": self.profile_id,
