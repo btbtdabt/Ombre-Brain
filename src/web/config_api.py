@@ -134,14 +134,9 @@ def register(mcp) -> None:
 
     @mcp.custom_route("/dashboard", methods=["GET"])
     async def dashboard(request: Request) -> Response:
-        """Legacy alias: /dashboard 永久跳到根路径。
-
-        我历史上把 dashboard 同时挂在 / 与 /dashboard，但叠加 Cloudflare 边缘
-        （或任何 reverse proxy）的 host-rewrite 规则时容易触发回环。统一只在 /
-        上提供 HTML，老书签靠 301 软迁移到 /。
-        """
+        """Keep the current production dashboard URL stable after migration."""
         from starlette.responses import RedirectResponse
-        return RedirectResponse(url="/", status_code=301)
+        return RedirectResponse(url="/memory-dashboard", status_code=302)
 
 
     @mcp.custom_route("/api/env-vars", methods=["GET"])
