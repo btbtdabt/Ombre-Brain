@@ -639,6 +639,7 @@ def load_config(config_path: Optional[str] = None) -> dict:
         "mcp_auth_mode": "oauth",
         "mcp_token": "",
         "buckets_dir": os.path.join(project_root, "buckets"),
+        "state_dir": "",
         "merge_threshold": 75,
         "dehydration": {
             "model": "gemini-2.0-flash",
@@ -697,6 +698,40 @@ def load_config(config_path: Optional[str] = None) -> dict:
             logging.warning(
                 f"Failed to parse config file, using defaults / "
                 f"配置文件解析失败，使用默认配置: {e}"
+            )
+
+    # Runtime settings changed from the Dashboard live outside config.yaml.
+    # Resolve their state path before loading the overlay, then reapply all
+    # environment overrides below so environment variables remain authoritative.
+    env_buckets_dir_early = os.environ.get("OMBRE_BUCKETS_DIR", "").strip()
+    env_vault_dir_early = os.environ.get("OMBRE_VAULT_DIR", "").strip()
+    if env_buckets_dir_early:
+        config["buckets_dir"] = env_buckets_dir_early
+    elif env_vault_dir_early:
+        config["buckets_dir"] = env_vault_dir_early
+    env_state_dir_early = os.environ.get("OMBRE_STATE_DIR", "").strip()
+    if env_state_dir_early:
+        config["state_dir"] = env_state_dir_early
+
+    runtime_config_path = os.environ.get("OMBRE_RUNTIME_CONFIG_PATH", "").strip()
+    if not runtime_config_path:
+        runtime_state_dir = config.get("state_dir") or os.path.join(
+            os.path.dirname(os.path.abspath(str(config["buckets_dir"]))),
+            "state",
+        )
+        runtime_config_path = os.path.join(str(runtime_state_dir), "config.runtime.yaml")
+    config["_runtime_config_path"] = runtime_config_path
+    if os.path.exists(runtime_config_path):
+        try:
+            with open(runtime_config_path, "r", encoding="utf-8") as f:
+                runtime_config = yaml.safe_load(f) or {}
+            if isinstance(runtime_config, dict):
+                config = _deep_merge(config, runtime_config)
+                config["_runtime_config_path"] = runtime_config_path
+        except (OSError, yaml.YAMLError) as e:
+            logging.warning(
+                f"Failed to load runtime config, ignoring / "
+                f"运行时配置读取失败，已忽略: {e}"
             )
 
     # Normalize YAML booleans before environment overrides. Quoted values such
@@ -807,6 +842,7 @@ def load_config(config_path: Optional[str] = None) -> dict:
     }
     config["transport"] = _transport_aliases.get(_raw_transport, _raw_transport)
     _apply_env_override(config, "OMBRE_BUCKETS_DIR", "buckets_dir")
+    _apply_env_override(config, "OMBRE_STATE_DIR", "state_dir")
     env_buckets_dir = os.environ.get("OMBRE_BUCKETS_DIR", "")
 
     # MCP OAuth 开关（布尔，单独处理）—— OMBRE_MCP_REQUIRE_AUTH
@@ -878,6 +914,12 @@ def load_config(config_path: Optional[str] = None) -> dict:
     # --- Ensure bucket storage directories exist ---
     # --- 确保记忆桶存储目录存在 ---
     buckets_dir: str = str(config["buckets_dir"])
+    if not str(config.get("state_dir") or "").strip():
+        config["state_dir"] = os.path.join(
+            os.path.dirname(os.path.abspath(buckets_dir)),
+            "state",
+        )
+    os.makedirs(str(config["state_dir"]), exist_ok=True)
     for subdir in ["permanent", "dynamic", "archive"]:
         os.makedirs(os.path.join(buckets_dir, subdir), exist_ok=True)
     os.makedirs(str(config["media_dir"]), exist_ok=True)

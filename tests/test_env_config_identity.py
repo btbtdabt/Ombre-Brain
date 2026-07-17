@@ -297,6 +297,75 @@ def test_reranker_environment_overrides_are_loaded(monkeypatch, tmp_path):
     assert engine.enabled is False
 
 
+def test_state_directory_runtime_overlay_and_environment_precedence(
+    monkeypatch, tmp_path
+):
+    buckets_dir = tmp_path / "buckets"
+    state_dir = tmp_path / "state"
+    runtime_config = state_dir / "config.runtime.yaml"
+    state_dir.mkdir()
+    runtime_config.write_text(
+        "gateway:\n  skip_recent_rounds: 17\nstate_dir: ignored-by-env\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OMBRE_BUCKETS_DIR", str(buckets_dir))
+    monkeypatch.setenv("OMBRE_STATE_DIR", str(state_dir))
+    monkeypatch.delenv("OMBRE_RUNTIME_CONFIG_PATH", raising=False)
+
+    config = load_config(str(tmp_path / "missing-config.yaml"))
+
+    assert config["state_dir"] == str(state_dir)
+    assert config["_runtime_config_path"] == str(runtime_config)
+    assert config["gateway"]["skip_recent_rounds"] == 17
+    assert state_dir.is_dir()
+
+
+def test_unreadable_runtime_overlay_does_not_block_startup(monkeypatch, tmp_path):
+    buckets_dir = tmp_path / "buckets"
+    state_dir = tmp_path / "state"
+    runtime_config = state_dir / "config.runtime.yaml"
+    state_dir.mkdir()
+    runtime_config.touch()
+    monkeypatch.setenv("OMBRE_BUCKETS_DIR", str(buckets_dir))
+    monkeypatch.setenv("OMBRE_STATE_DIR", str(state_dir))
+    monkeypatch.delenv("OMBRE_RUNTIME_CONFIG_PATH", raising=False)
+    original_open = open
+
+    def guarded_open(path, *args, **kwargs):
+        if os.fspath(path) == str(runtime_config):
+            raise PermissionError("runtime overlay unavailable")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", guarded_open)
+
+    config = load_config(str(tmp_path / "missing-config.yaml"))
+
+    assert config["state_dir"] == str(state_dir)
+    assert config["_runtime_config_path"] == str(runtime_config)
+
+
+def test_vault_directory_discovers_sibling_runtime_overlay(monkeypatch, tmp_path):
+    vault_dir = tmp_path / "vault"
+    state_dir = tmp_path / "state"
+    runtime_config = state_dir / "config.runtime.yaml"
+    state_dir.mkdir()
+    runtime_config.write_text(
+        "gateway:\n  skip_recent_rounds: 23\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("OMBRE_BUCKETS_DIR", raising=False)
+    monkeypatch.delenv("OMBRE_STATE_DIR", raising=False)
+    monkeypatch.delenv("OMBRE_RUNTIME_CONFIG_PATH", raising=False)
+    monkeypatch.setenv("OMBRE_VAULT_DIR", str(vault_dir))
+
+    config = load_config(str(tmp_path / "missing-config.yaml"))
+
+    assert config["buckets_dir"] == str(vault_dir)
+    assert config["state_dir"] == str(state_dir)
+    assert config["_runtime_config_path"] == str(runtime_config)
+    assert config["gateway"]["skip_recent_rounds"] == 23
+
+
 @pytest.mark.asyncio
 async def test_embedding_provider_tuple_rebuilds_and_persists_once(
     monkeypatch, tmp_path

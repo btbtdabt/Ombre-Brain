@@ -29,7 +29,9 @@
 - `OMBRE_MEDIA_DIR`：永久媒体目录；默认 `<数据根目录>/_media`。
 - `OMBRE_MEDIA_MAX_BYTES`：单个媒体文件最大字节数，默认 25 MiB。
 - `OMBRE_CONFIG_PATH`：持久配置文件路径。
+- `OMBRE_RUNTIME_CONFIG_PATH`：Dashboard 运行时覆盖配置路径；默认 `<state_dir>/config.runtime.yaml`。
 - `OMBRE_CODE_DIR`：容器中持久运行代码目录。
+- `OMBRE_STATE_DIR`：Persona、画像、图索引、队列和其他运行状态目录。
 - `OMBRE_LOG_DIR`：日志目录。
 - `OMBRE_LOG_FILE`：日志文件路径。
 - `OMBRE_EXTERNAL_CHANGE_POLL_SECONDS`：外部 Markdown 变动轮询间隔。
