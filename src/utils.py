@@ -75,10 +75,18 @@ _yaml_locks: dict[str, threading.RLock] = {}
 # 「运行时被 dashboard 写进 os.environ 的值」唯一可靠的区分依据。
 # 用途：dashboard 据此提示「这些字段由平台环境变量提供，重启会覆盖你这里保存的值」，
 # 修复「config.yaml 存了 Gemini，但平台 OMBRE_COMPRESS_BASE_URL=DeepSeek 每次重启盖回」的坑。
-BOOT_ENV_CONFIG: frozenset[str] = frozenset(
-    k for k, v in os.environ.items()
-    if (k.startswith("OMBRE_") or k == "AI_NAME") and str(v).strip()
-)
+_boot_env_config = {
+    key
+    for key, value in os.environ.items()
+    if (key.startswith("OMBRE_") or key == "AI_NAME") and str(value).strip()
+}
+if (
+    "OMBRE_EMBEDDING_API_KEY" in _boot_env_config
+    and "OMBRE_EMBED_API_KEY" not in _boot_env_config
+):
+    _boot_env_config.add("OMBRE_EMBED_API_KEY")
+BOOT_ENV_CONFIG: frozenset[str] = frozenset(_boot_env_config)
+ENV_ALIAS_PROVENANCE: dict[str, str] = {}
 def _project_root() -> str:
     """Return absolute path to the project root (parent of src/ where utils.py lives).
     项目根目录（src/ 的上一层）。"""
@@ -715,6 +723,21 @@ def load_config(config_path: Optional[str] = None) -> dict:
         config.setdefault("dehydration", {})["base_url"] = legacy_base_url
         logging.warning(
             "OMBRE_BASE_URL 是兼容变量；请迁移到 OMBRE_COMPRESS_BASE_URL，旧名仍会继续生效。"
+        )
+
+    legacy_embedding_api_key = os.environ.get(
+        "OMBRE_EMBEDDING_API_KEY", ""
+    ).strip()
+    ENV_ALIAS_PROVENANCE.pop("OMBRE_EMBED_API_KEY", None)
+    if legacy_embedding_api_key and not os.environ.get(
+        "OMBRE_EMBED_API_KEY", ""
+    ).strip():
+        os.environ["OMBRE_EMBED_API_KEY"] = legacy_embedding_api_key
+        ENV_ALIAS_PROVENANCE["OMBRE_EMBED_API_KEY"] = "OMBRE_EMBEDDING_API_KEY"
+        config.setdefault("embedding", {})["api_key"] = legacy_embedding_api_key
+        logging.warning(
+            "OMBRE_EMBEDDING_API_KEY 是兼容变量；请迁移到 "
+            "OMBRE_EMBED_API_KEY，旧名仍会继续生效。"
         )
 
     # v1.3 Zeabur 模板曾使用通用 PASSWORD；只在正式变量缺失时兼容映射。

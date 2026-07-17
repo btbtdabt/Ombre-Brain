@@ -17,9 +17,17 @@ _FIELDS = (
     ("dehydration.base_url", ("OMBRE_DEHYDRATION_BASE_URL", "OMBRE_BASE_URL"), False),
     ("dehydration.api_key", ("OMBRE_API_KEY",), True),
     ("embedding.enabled", ("OMBRE_EMBEDDING_ENABLED",), False),
-    ("embedding.model", ("OMBRE_EMBEDDING_MODEL",), False),
-    ("embedding.base_url", ("OMBRE_EMBEDDING_BASE_URL",), False),
-    ("embedding.api_key", ("OMBRE_EMBEDDING_API_KEY",), True),
+    ("embedding.model", ("OMBRE_EMBED_MODEL", "OMBRE_EMBEDDING_MODEL"), False),
+    (
+        "embedding.base_url",
+        ("OMBRE_EMBED_BASE_URL", "OMBRE_EMBEDDING_BASE_URL"),
+        False,
+    ),
+    (
+        "embedding.api_key",
+        ("OMBRE_EMBED_API_KEY", "OMBRE_EMBEDDING_API_KEY"),
+        True,
+    ),
     ("reranker.enabled", ("OMBRE_RERANKER_ENABLED",), False),
     ("reranker.model", ("OMBRE_RERANKER_MODEL",), False),
     ("reranker.base_url", ("OMBRE_RERANKER_BASE_URL",), False),
@@ -65,11 +73,28 @@ def effective_config_report(
     environ: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     env = os.environ if environ is None else environ
+    alias_provenance: Mapping[str, str] = {}
+    if env is os.environ:
+        from utils import ENV_ALIAS_PROVENANCE
+
+        alias_provenance = ENV_ALIAS_PROVENANCE
     persisted = _read_yaml(config_path)
     runtime = _read_yaml(runtime_config_path)
     entries = []
     for dotted, env_names, sensitive in _FIELDS:
-        env_source = next((name for name in env_names if str(env.get(name) or "").strip()), "")
+        env_source = next(
+            (
+                name
+                for name in env_names
+                if str(env.get(name) or "").strip()
+                and not (
+                    alias_provenance.get(name)
+                    and str(env.get(name) or "").strip()
+                    == str(env.get(alias_provenance[name]) or "").strip()
+                )
+            ),
+            "",
+        )
         in_runtime, _ = _get_path(runtime, dotted)
         in_persisted, _ = _get_path(persisted, dotted)
         exists, value = _get_path(effective, dotted)

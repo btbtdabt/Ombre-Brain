@@ -139,8 +139,11 @@ OMBRE_GATEWAY_TOKEN=<your-token-if-enabled>
 
 ```text
 OMBRE_GATEWAY_PROVIDER_A_API_KEY=<your-model-api-key>
-OMBRE_EMBEDDING_API_KEY=<your-embedding-key>
+OMBRE_EMBED_API_KEY=<your-embedding-key>
 ```
+
+Existing deployments that use `OMBRE_EMBEDDING_API_KEY` remain compatible;
+new deployments should use `OMBRE_EMBED_API_KEY`.
 
 Volumes：
 

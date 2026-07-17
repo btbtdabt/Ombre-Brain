@@ -454,7 +454,10 @@ class EmbeddingEngine:
 
         api_key = (embed_cfg.get("api_key") or "").strip()
         if not api_key:
-            api_key = os.environ.get("OMBRE_EMBED_API_KEY", "").strip()
+            api_key = (
+                os.environ.get("OMBRE_EMBED_API_KEY", "").strip()
+                or os.environ.get("OMBRE_EMBEDDING_API_KEY", "").strip()
+            )
         # 本地模型没有 key 概念，但 OpenAI 客户端库要求 api_key 非空 → 补占位符。
         # 占位符会作为 Bearer 发给 ollama，ollama 不校验、照单全收。
         if is_local:
@@ -465,7 +468,10 @@ class EmbeddingEngine:
 
         if not api_key:
             # 无 key（仅云端后端会走到这）→ 待机模式：enabled=False，DB 仍初始化，key 热更新后激活
-            logger.warning("[embedding] enabled=true but no api_key — starting in standby (disabled); set OMBRE_EMBED_API_KEY to activate")
+            logger.warning(
+                "[embedding] enabled=true but no api_key — starting in standby "
+                "(disabled); set OMBRE_EMBED_API_KEY to activate"
+            )
             self._init_db()
             return
 

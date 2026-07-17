@@ -1,8 +1,10 @@
 import json
+import os
 
 import yaml
 
 from config_diagnostics import effective_config_report
+from utils import load_config
 
 
 def test_effective_config_report_identifies_sources_and_redacts_secrets(tmp_path):
@@ -42,6 +44,8 @@ def test_effective_config_report_identifies_sources_and_redacts_secrets(tmp_path
         runtime_config_path=str(runtime_path),
         environ={
             "OMBRE_DEHYDRATION_MODEL": "env-model",
+            "OMBRE_EMBED_API_KEY": "canonical-embed-key",
+            "OMBRE_EMBEDDING_API_KEY": "legacy-embed-key",
             "UPSTREAM_SECRET": "gateway-secret",
         },
     )
@@ -49,6 +53,7 @@ def test_effective_config_report_identifies_sources_and_redacts_secrets(tmp_path
 
     assert entries["dehydration.model"]["source"] == "env:OMBRE_DEHYDRATION_MODEL"
     assert entries["embedding.model"]["source"] == "runtime_yaml"
+    assert entries["embedding.api_key"]["source"] == "env:OMBRE_EMBED_API_KEY"
     assert entries["dehydration.api_key"] == {
         "path": "dehydration.api_key",
         "source": "config_yaml",
@@ -59,3 +64,23 @@ def test_effective_config_report_identifies_sources_and_redacts_secrets(tmp_path
     serialized = json.dumps(report)
     for secret in ("yaml-secret", "env-secret", "embed-secret", "gateway-secret"):
         assert secret not in serialized
+
+
+def test_effective_config_report_preserves_legacy_embedding_env_provenance(
+    monkeypatch, tmp_path
+):
+    monkeypatch.delenv("OMBRE_EMBED_API_KEY", raising=False)
+    monkeypatch.setenv("OMBRE_EMBEDDING_API_KEY", "legacy-only-key")
+    effective = load_config(str(tmp_path / "missing-config.yaml"))
+
+    report = effective_config_report(
+        effective,
+        config_path=str(tmp_path / "missing-config.yaml"),
+        runtime_config_path=str(tmp_path / "missing-runtime.yaml"),
+        environ=os.environ,
+    )
+    entries = {entry["path"]: entry for entry in report["entries"]}
+
+    assert entries["embedding.api_key"]["source"] == (
+        "env:OMBRE_EMBEDDING_API_KEY"
+    )

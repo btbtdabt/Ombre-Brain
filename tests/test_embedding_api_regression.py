@@ -49,6 +49,82 @@ def test_gemini_openai_compat_default_dim_matches_gemini_embedding_001(tmp_path)
     assert engine.status()["vector_dim"] == 3072
 
 
+def test_legacy_embedding_api_key_env_remains_supported(monkeypatch, tmp_path):
+    from embedding_engine import APIEmbeddingEngine, EmbeddingEngine
+
+    monkeypatch.delenv("OMBRE_EMBED_API_KEY", raising=False)
+    monkeypatch.setenv("OMBRE_EMBEDDING_API_KEY", "legacy-production-key")
+    buckets_dir = tmp_path / "buckets"
+    buckets_dir.mkdir()
+
+    engine = EmbeddingEngine(
+        {
+            "buckets_dir": str(buckets_dir),
+            "embedding": {
+                "enabled": True,
+                "api_format": "openai_compat",
+                "base_url": GEMINI_OPENAI_BASE_URL,
+                "model": "gemini-embedding-001",
+            },
+        }
+    )
+
+    assert engine.enabled is True
+    assert isinstance(engine._backend, APIEmbeddingEngine)
+    assert engine._backend.api_key == "legacy-production-key"
+
+
+def test_canonical_embedding_key_wins_over_legacy_alias(monkeypatch, tmp_path):
+    from embedding_engine import APIEmbeddingEngine, EmbeddingEngine
+
+    monkeypatch.setenv("OMBRE_EMBED_API_KEY", "canonical-key")
+    monkeypatch.setenv("OMBRE_EMBEDDING_API_KEY", "legacy-key")
+    buckets_dir = tmp_path / "buckets"
+    buckets_dir.mkdir()
+
+    engine = EmbeddingEngine(
+        {
+            "buckets_dir": str(buckets_dir),
+            "embedding": {
+                "enabled": True,
+                "api_format": "openai_compat",
+                "base_url": GEMINI_OPENAI_BASE_URL,
+                "model": "gemini-embedding-001",
+            },
+        }
+    )
+
+    assert isinstance(engine._backend, APIEmbeddingEngine)
+    assert engine._backend.api_key == "canonical-key"
+
+
+def test_embedding_config_key_wins_over_both_environment_names(
+    monkeypatch, tmp_path
+):
+    from embedding_engine import APIEmbeddingEngine, EmbeddingEngine
+
+    monkeypatch.setenv("OMBRE_EMBED_API_KEY", "canonical-env-key")
+    monkeypatch.setenv("OMBRE_EMBEDDING_API_KEY", "legacy-env-key")
+    buckets_dir = tmp_path / "buckets"
+    buckets_dir.mkdir()
+
+    engine = EmbeddingEngine(
+        {
+            "buckets_dir": str(buckets_dir),
+            "embedding": {
+                "enabled": True,
+                "api_key": "config-key",
+                "api_format": "openai_compat",
+                "base_url": GEMINI_OPENAI_BASE_URL,
+                "model": "gemini-embedding-001",
+            },
+        }
+    )
+
+    assert isinstance(engine._backend, APIEmbeddingEngine)
+    assert engine._backend.api_key == "config-key"
+
+
 def test_siliconflow_short_bge_name_is_canonicalized():
     from embedding_engine import APIEmbeddingEngine
 
@@ -77,7 +153,7 @@ def test_provider_detection_uses_exact_hostname():
 
 
 def test_local_mode_ignores_stale_cloud_endpoint_and_secret(monkeypatch, tmp_path):
-    from embedding_engine import EmbeddingEngine
+    from embedding_engine import APIEmbeddingEngine, EmbeddingEngine
 
     monkeypatch.delenv("OMBRE_OLLAMA_URL", raising=False)
     buckets_dir = tmp_path / "buckets"
@@ -96,6 +172,7 @@ def test_local_mode_ignores_stale_cloud_endpoint_and_secret(monkeypatch, tmp_pat
     )
 
     assert engine.enabled is True
+    assert isinstance(engine._backend, APIEmbeddingEngine)
     assert engine._backend.api_key == "ollama"
     assert engine._backend.base_url in {
         "http://127.0.0.1:11434/v1",
@@ -105,7 +182,7 @@ def test_local_mode_ignores_stale_cloud_endpoint_and_secret(monkeypatch, tmp_pat
 
 
 def test_local_mode_preserves_custom_ollama_endpoint(monkeypatch, tmp_path):
-    from embedding_engine import EmbeddingEngine
+    from embedding_engine import APIEmbeddingEngine, EmbeddingEngine
 
     monkeypatch.delenv("OMBRE_OLLAMA_URL", raising=False)
     buckets_dir = tmp_path / "buckets"
@@ -123,12 +200,13 @@ def test_local_mode_preserves_custom_ollama_endpoint(monkeypatch, tmp_path):
         }
     )
 
+    assert isinstance(engine._backend, APIEmbeddingEngine)
     assert engine._backend.base_url == "https://ollama.example/v1"
     assert engine._backend.api_key == "ollama"
 
 
 def test_dedicated_ollama_url_wins_over_embedding_base(monkeypatch, tmp_path):
-    from embedding_engine import EmbeddingEngine
+    from embedding_engine import APIEmbeddingEngine, EmbeddingEngine
 
     monkeypatch.setenv("OMBRE_OLLAMA_URL", "http://ollama.lan:11434/v1")
     buckets_dir = tmp_path / "buckets"
@@ -145,6 +223,7 @@ def test_dedicated_ollama_url_wins_over_embedding_base(monkeypatch, tmp_path):
         }
     )
 
+    assert isinstance(engine._backend, APIEmbeddingEngine)
     assert engine._backend.base_url == "http://ollama.lan:11434/v1"
 
 

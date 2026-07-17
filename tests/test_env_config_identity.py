@@ -238,6 +238,8 @@ def test_v1_environment_names_remain_compatible(monkeypatch, tmp_path):
     monkeypatch.delenv("OMBRE_DASHBOARD_PASSWORD", raising=False)
     monkeypatch.setenv("OMBRE_API_KEY", "legacy-key")
     monkeypatch.setenv("OMBRE_BASE_URL", "https://legacy.example/v1")
+    monkeypatch.delenv("OMBRE_EMBED_API_KEY", raising=False)
+    monkeypatch.setenv("OMBRE_EMBEDDING_API_KEY", "legacy-embedding-key")
     monkeypatch.setenv("PASSWORD", "legacy-password")
     monkeypatch.setenv("OMBRE_VAULT_DIR", str(tmp_path / "vault"))
     monkeypatch.delenv("OMBRE_BUCKETS_DIR", raising=False)
@@ -246,8 +248,32 @@ def test_v1_environment_names_remain_compatible(monkeypatch, tmp_path):
 
     assert config["dehydration"]["api_key"] == "legacy-key"
     assert config["dehydration"]["base_url"] == "https://legacy.example/v1"
+    assert config["embedding"]["api_key"] == "legacy-embedding-key"
+    assert os.environ["OMBRE_EMBED_API_KEY"] == "legacy-embedding-key"
     assert os.environ["OMBRE_DASHBOARD_PASSWORD"] == "legacy-password"
     assert config["media_dir"] == str(tmp_path / "vault" / "_media")
+
+
+@pytest.mark.asyncio
+async def test_env_config_get_reports_legacy_embedding_key(monkeypatch, tmp_path):
+    monkeypatch.delenv("OMBRE_EMBED_API_KEY", raising=False)
+    monkeypatch.setenv("OMBRE_EMBEDDING_API_KEY", "legacy-dashboard-key")
+    monkeypatch.setattr(config_api.sh, "_require_auth", lambda request: None)
+    monkeypatch.setattr(
+        config_api.sh, "_project_env_path", lambda: str(tmp_path / ".env")
+    )
+    monkeypatch.setattr(config_api.sh, "_read_env_var", lambda name: "")
+    config = load_config(str(tmp_path / "missing-config.yaml"))
+    monkeypatch.setattr(config_api.sh, "config", config)
+
+    mcp = FakeMCP()
+    config_api.register(mcp)
+    response = await mcp.routes[("GET", "/api/env-config")](JsonRequest({}))
+    payload = json.loads(response.body)
+
+    field = payload["fields"]["OMBRE_EMBED_API_KEY"]
+    assert field["is_set"] is True
+    assert field["value"] == "lega...-key"
 
 
 @pytest.mark.asyncio

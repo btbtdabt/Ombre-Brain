@@ -126,7 +126,8 @@ decay:
 
 # --- Embedding / 向量化配置 ---
 # 使用 OpenAI 兼容的云端 API（如 Gemini）进行向量化。
-# 需要在环境变量中设置 OMBRE_EMBED_API_KEY。
+# 需要在环境变量中设置 OMBRE_EMBED_API_KEY。旧部署的
+# OMBRE_EMBEDDING_API_KEY 仍作为兼容别名。
 embedding:
   enabled: true                   # Enable embedding / 启用向量化
   background_indexing: true       # Write Markdown first; index asynchronously / 先落盘，后台生成向量
@@ -143,7 +144,7 @@ embedding:
   query_instruction: "Given a memory search query, retrieve relevant long-term memory passages."
   document_instruction: ""
   timeout_seconds: 120             # Embedding request timeout seconds / 向量化请求超时秒数
-  # api_key: ""                   # Use OMBRE_EMBED_API_KEY / 使用 OMBRE_EMBED_API_KEY
+  # api_key: ""                   # Use OMBRE_EMBED_API_KEY (legacy alias: OMBRE_EMBEDDING_API_KEY)
 
 # --- Scoring weights / 检索权重参数 ---
 # total = topic(×4) + emotion(×2) + time(×1.5) + importance(×1)
