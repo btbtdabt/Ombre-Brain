@@ -9,7 +9,7 @@ verification evidence.
 ## Recorded Baselines
 
 - P0luz primary baseline: `v2.7.6` / `6da5158`
-- Yinglianchun secondary baseline: `4756c26`
+- Yinglianchun secondary baseline: `4e0a546`
 - Historical deployed root runtime: `8e68a7d`
 
 The migration branch starts directly from the P0luz baseline. It does not merge
@@ -32,17 +32,17 @@ P0luz `src/`, `src/tools/`, and `src/web/` module structure.
 The P0luz base remains intact while the following historical capabilities are
 ported and tested:
 
-- [ ] Native Anthropic and OpenAI-compatible Gateway routes
-- [ ] Token-selected Claude and Gemini upstream routing
-- [ ] Gateway memory injection, state tracking, and debug traces
-- [ ] Current recall graph, relevance policy, moments, layers, and diffusion
-- [ ] Raw events and source-reference continuity
-- [ ] Persona, portrait, reflection, dream, and reminder workers
-- [ ] Current MCP tool set and affirmative tool descriptions
-- [ ] Darkroom, letters, media, backup, and import behavior
-- [ ] Current Dashboard memory/config/debug surfaces
-- [ ] Production alignment, Cloudflare, relay, and VPS deployment contract
-- [ ] Read-only compatibility with copied production buckets and state
+- [x] Native Anthropic and OpenAI-compatible Gateway routes
+- [x] Token-selected Claude and Gemini upstream routing
+- [x] Gateway memory injection, state tracking, and debug traces
+- [x] Current recall graph, relevance policy, moments, layers, and diffusion
+- [x] Raw events and source-reference continuity
+- [x] Persona, portrait, reflection, dream, and reminder workers
+- [x] Current MCP tool set and affirmative tool descriptions
+- [x] Darkroom, letters, media, backup, and import behavior
+- [x] Current Dashboard memory/config/debug surfaces
+- [x] Production alignment, Cloudflare, relay, and VPS deployment contract
+- [x] Read-only compatibility with copied production buckets and state
 
 Each item is complete only when its compatibility tests pass and the staging
 runtime demonstrates the same externally observable behavior.
@@ -85,12 +85,19 @@ Local verification for this batch:
 - Pyright: zero errors across all 57 changed Python files. The whole-tree debt
   audit remains non-zero in dormant v3/legacy annotations and is not hidden.
 - `docker compose -f compose.cloudflare.yml config --quiet`: passed.
-- Local image build: pending because the Docker Desktop Linux daemon was not
-  running; the exact pushed commit must be built on VPS staging instead.
-
-The recorded Yinglianchun baseline remains `4756c26` until that staging build
-and the Gateway/MCP/persona/relay smoke tests pass. At that point it may advance
-to `4e0a546`, and completed checklist items may be marked above.
+- VPS staging image `ombre-brain:p0luz-staging-07691f1` built from exact commit
+  `07691f1`; Brain and Gateway health checks passed on loopback-only ports.
+- Eleven copied SQLite databases passed `PRAGMA quick_check` before startup.
+- OpenAI Claude, native Anthropic, and native Gemini staging routes returned 200.
+- Authenticated Streamable HTTP MCP initialized a session, exposed 30 tools,
+  contained the current tool set, and successfully called `pulse`.
+- Live SiliconFlow reranking returned two ranked results using the dedicated
+  reranker environment; no 401 or reranker failure remained in staging logs.
+- The saved Dashboard runtime overlay matched the effective Gateway config, and
+  Persona post-reply processing continued in the copied 118-event state database.
+- The relay-facing native Claude and MCP contracts were exercised directly on
+  staging. The public Cloudflare relay remains production-targeted and must be
+  checked end to end immediately after production cutover.
 
 ## Intentional Architecture Exclusions
 
