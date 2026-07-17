@@ -17,6 +17,10 @@
 - `OMBRE_EMBED_TIMEOUT_SECONDS`：向量请求超时秒数。
 - `OMBRE_EMBED_BACKEND`：向量后端，例如 `api` 或 `local`。
 - `OMBRE_OLLAMA_URL`：本地 Ollama 地址。
+- `OMBRE_RERANKER_API_KEY`：语义重排模型密钥。
+- `OMBRE_RERANKER_BASE_URL`：重排 API 地址。
+- `OMBRE_RERANKER_MODEL`：重排模型名。
+- `OMBRE_RERANKER_ENABLED`：是否启用重排；支持 `true` / `false`。
 
 ## 存储、媒体与日志
 

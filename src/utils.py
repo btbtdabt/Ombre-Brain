@@ -764,6 +764,18 @@ def load_config(config_path: Optional[str] = None) -> dict:
     _apply_env_override(config, "OMBRE_EMBED_FORMAT", "embedding", "api_format")
     _apply_env_float_override(config, "OMBRE_EMBED_TIMEOUT_SECONDS", "embedding", "timeout_seconds")
 
+    # 重排组（reranker）—— 专用 key 必须优先于 embedding/dehydration 回退。
+    _apply_env_override(config, "OMBRE_RERANKER_API_KEY", "reranker", "api_key")
+    _apply_env_override(config, "OMBRE_RERANKER_BASE_URL", "reranker", "base_url")
+    _apply_env_override(config, "OMBRE_RERANKER_MODEL", "reranker", "model")
+    _env_reranker_enabled = os.environ.get("OMBRE_RERANKER_ENABLED", "").strip()
+    if _env_reranker_enabled:
+        reranker_config = config.setdefault("reranker", {})
+        reranker_config["enabled"] = parse_bool(
+            _env_reranker_enabled,
+            default=parse_bool(reranker_config.get("enabled", True), default=True),
+        )
+
     # Obsidian / Git / manual Markdown edits cache poll interval.
     _apply_env_float_override(
         config,

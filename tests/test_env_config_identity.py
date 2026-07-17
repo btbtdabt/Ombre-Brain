@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 import web.config_api as config_api
+from reranker_engine import RerankerEngine
 from utils import get_ai_name, load_config
 
 
@@ -274,6 +275,26 @@ async def test_env_config_get_reports_legacy_embedding_key(monkeypatch, tmp_path
     field = payload["fields"]["OMBRE_EMBED_API_KEY"]
     assert field["is_set"] is True
     assert field["value"] == "lega...-key"
+
+
+def test_reranker_environment_overrides_are_loaded(monkeypatch, tmp_path):
+    monkeypatch.setenv("OMBRE_RERANKER_API_KEY", "reranker-key")
+    monkeypatch.setenv("OMBRE_RERANKER_BASE_URL", "https://rerank.example/v1")
+    monkeypatch.setenv("OMBRE_RERANKER_MODEL", "reranker-model")
+    monkeypatch.setenv("OMBRE_RERANKER_ENABLED", "false")
+
+    config = load_config(str(tmp_path / "missing-config.yaml"))
+
+    assert config["reranker"]["api_key"] == "reranker-key"
+    assert config["reranker"]["base_url"] == "https://rerank.example/v1"
+    assert config["reranker"]["model"] == "reranker-model"
+    assert config["reranker"]["enabled"] is False
+
+    engine = RerankerEngine(config)
+    assert engine.api_key == "reranker-key"
+    assert engine.base_url == "https://rerank.example/v1"
+    assert engine.model == "reranker-model"
+    assert engine.enabled is False
 
 
 @pytest.mark.asyncio
