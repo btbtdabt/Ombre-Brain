@@ -245,8 +245,11 @@ _bootstrap_code() {
     return 0
 }
 
-if _bootstrap_code; then
-    echo "[entrypoint] 从持久卷运行: $RUN_ROOT/src/server.py"
+if [ "${OMBRE_PERSIST_CODE:-1}" = "0" ]; then
+    echo "[entrypoint] 持久化代码 bootstrap 已关闭，使用镜像内置代码。"
+    RUN_ROOT="$IMAGE_ROOT"
+elif _bootstrap_code; then
+    echo "[entrypoint] 从持久卷运行: $RUN_ROOT/src"
 else
     echo "[entrypoint] 持久卷代码不可用，回退到镜像内置代码 /app/src（不影响本次运行）"
     RUN_ROOT="$IMAGE_ROOT"
@@ -259,5 +262,24 @@ if [ "${OMBRE_BOOTSTRAP_ONLY:-0}" = "1" ]; then
     exit 0
 fi
 
+case "${OMBRE_SERVICE:-brain}" in
+    brain)
+        SERVICE_ENTRY="src/server.py"
+        ;;
+    gateway)
+        SERVICE_ENTRY="src/gateway.py"
+        ;;
+    *)
+        echo "[entrypoint] FATAL: OMBRE_SERVICE must be 'brain' or 'gateway'."
+        exit 1
+        ;;
+esac
+
+if [ ! -f "$RUN_ROOT/$SERVICE_ENTRY" ]; then
+    echo "[entrypoint] FATAL: service entrypoint not found: $RUN_ROOT/$SERVICE_ENTRY"
+    exit 1
+fi
+
 cd "$RUN_ROOT" 2>/dev/null || cd /app
-exec python src/server.py
+echo "[entrypoint] starting ${OMBRE_SERVICE:-brain}: $SERVICE_ENTRY"
+exec python "$SERVICE_ENTRY"
