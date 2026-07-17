@@ -53,13 +53,44 @@ runtime demonstrates the same externally observable behavior.
 2. Merge P0luz changes into a local update branch and run its full suite.
 3. Review Yinglianchun commits after the recorded baseline.
 4. Port applicable Yinglianchun behavior at the matching P0luz module seam.
-5. Run compatibility tests, copied-data validation, lint, types, and container
+5. Record every commit in both ranges as merged, ported, superseded, or excluded
+   with evidence. A clean merge alone does not establish feature parity.
+6. Run compatibility tests, copied-data validation, lint, types, and container
    build checks.
-6. Advance the baseline hashes in this document only after staging succeeds.
+7. Advance the baseline hashes in this document only after staging succeeds.
 
 Do not resolve upstream conflicts by restoring the repository-root runtime or by
 silently dropping one implementation's feature. Record intentional exclusions
 with their reason and regression evidence.
+
+The historical fixed `OMBRE_CHATGPT_OAUTH_REFRESH_TOKEN` is superseded by the
+P0 OAuth server's persisted, expiring, one-time rotating refresh tokens. The
+configured client ID/secret still pre-registers the client, and the legacy
+fixed access token remains a resource-bound compatibility credential.
+
+## Integration Batch Ledger
+
+### 2026-07-16 P0luz-base migration
+
+| Source range | Disposition | Evidence |
+| --- | --- | --- |
+| P0luz `6da5158..p0luz/main` | No newer commits at integration time | `p0luz/main` still resolves to `6da5158` (`v2.7.6`). |
+| Yinglianchun `4756c26..4e0a546` | Ported | The bounded Operit tagging queue, raw-first durable import, resume/retry state, preflight controls, and Dashboard progress UI are implemented in the modular import/web seams. Covered by `tests/test_operit_tagging_queue.py`, import preflight/start tests, and compatibility import tests. |
+| Historical deployed fork `8e68a7d` | Ported by product boundary | Gateway routing/debug/persona behavior, current MCP tools, recall graph and memory stores, workers, Dashboard routes, OAuth, media/letters/darkroom, backup/import, deployment assets, and production alignment contracts are represented in `src/` and their `tests/compat_*` suites. |
+
+Local verification for this batch:
+
+- `pytest`: 2,144 passed, 79 skipped, 3 known warnings.
+- Ruff: clean across the repository.
+- Pyright: zero errors across all 57 changed Python files. The whole-tree debt
+  audit remains non-zero in dormant v3/legacy annotations and is not hidden.
+- `docker compose -f compose.cloudflare.yml config --quiet`: passed.
+- Local image build: pending because the Docker Desktop Linux daemon was not
+  running; the exact pushed commit must be built on VPS staging instead.
+
+The recorded Yinglianchun baseline remains `4756c26` until that staging build
+and the Gateway/MCP/persona/relay smoke tests pass. At that point it may advance
+to `4e0a546`, and completed checklist items may be marked above.
 
 ## Intentional Architecture Exclusions
 

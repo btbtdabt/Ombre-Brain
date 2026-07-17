@@ -529,6 +529,8 @@ class RuntimeLifecycle:
     logger: Any
     decay_engine: Any = None
     embedding_outbox: Any = None
+    embedding_engine: Any = None
+    current_schedulers: Any = None
     ensure_ollama_child: AsyncCallback | None = None
     stop_ollama_child: AsyncCallback | None = None
     load_tunnel_config: Callable[[], Mapping[str, Any]] | None = None
@@ -608,6 +610,10 @@ class RuntimeLifecycle:
             "embedding outbox start",
             getattr(self.embedding_outbox, "start", None),
         )
+        await self._run_async_step(
+            "current schedulers start",
+            getattr(self.current_schedulers, "start", None),
+        )
         if self.keepalive_url:
             self._keepalive_task = asyncio.create_task(
                 self._keepalive_loop(),
@@ -634,8 +640,16 @@ class RuntimeLifecycle:
                 self.logger.warning("github auto-sync stop failed: %s", exc)
 
         await self._run_async_step(
+            "current schedulers stop",
+            getattr(self.current_schedulers, "stop", None),
+        )
+        await self._run_async_step(
             "embedding outbox stop",
             getattr(self.embedding_outbox, "stop", None),
+        )
+        await self._run_async_step(
+            "embedding engine close",
+            getattr(self.embedding_engine, "aclose", None),
         )
         await self._run_async_step(
             "decay engine stop",

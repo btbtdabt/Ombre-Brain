@@ -31,8 +31,9 @@ import os
 import sys
 import logging
 import asyncio
+import inspect
 import time
-from typing import Optional, Awaitable
+from typing import Any, Optional, Awaitable
 import httpx
 
 
@@ -49,6 +50,7 @@ from embedding_engine import EmbeddingEngine
 from embedding_outbox import EmbeddingOutbox
 from import_memory import ImportEngine
 from migrate_engine import MigrateEngine
+from current_runtime import RuntimeCollaborators
 from utils import get_version, load_config, setup_logging
 from server_app import build_remote_transport_app as _build_remote_transport_app  # noqa: F401
 
@@ -65,6 +67,11 @@ from tools import anchor as _t_anchor
 from tools import plan as _t_plan
 from tools import dream as _t_dream
 from tools import i as _t_i
+from tools.current.manifest import (
+    REGISTERED_TOOL_NAMES,
+    ToolSpec,
+    register_current_tools,
+)
 
 # --- Load config & init logging / 加载配置 & 初始化日志 ---
 config = load_config()
@@ -220,6 +227,16 @@ dehydrator = Dehydrator(config)                      # Dehydrator / 脱水器
 decay_engine = DecayEngine(config, bucket_mgr)       # Decay engine / 衰减引擎
 import_engine = ImportEngine(config, bucket_mgr, dehydrator, embedding_engine)  # Import engine / 导入引擎
 migrate_engine = MigrateEngine(config, bucket_mgr, embedding_engine)              # Migrate engine / 记忆包迁移引擎
+current_runtime = RuntimeCollaborators(
+    config=config,
+    bucket_mgr=bucket_mgr,
+    dehydrator=dehydrator,
+    decay_engine=decay_engine,
+    embedding_engine=embedding_engine,
+    embedding_outbox=embedding_outbox,
+    import_engine=import_engine,
+    logger=logger,
+)
 
 # --- GitHub Sync / GitHub 同步 ---
 from github_sync import GitHubSync  # type: ignore
@@ -243,16 +260,17 @@ async def _github_sync_loop(interval_minutes: int) -> None:
     import asyncio
     logger.info(f"[github_sync] auto-sync loop started, interval={interval_minutes}min")
     # 首次先做一次验证，确认连接可用
-    if _wsh.github_sync_instance and not _wsh.github_sync_instance.is_validated:
+    initial_instance: Any = _wsh.github_sync_instance
+    if initial_instance and not initial_instance.is_validated:
         try:
-            result = await _wsh.github_sync_instance.validate()
+            result = await initial_instance.validate()
             if not result.get("ok"):
                 logger.warning(f"[github_sync] auto-sync: validate failed: {result.get('error')} — loop will retry next cycle")
         except Exception as e:
             logger.warning(f"[github_sync] auto-sync: validate exception: {e}")
     while True:
         await asyncio.sleep(interval_minutes * 60)
-        inst = _wsh.github_sync_instance  # 读当前全局引用（config 更新可能替换实例）
+        inst: Any = _wsh.github_sync_instance  # 读当前全局引用（config 更新可能替换实例）
         if inst is None:
             logger.info("[github_sync] auto-sync: instance gone, stopping loop")
             return
@@ -348,19 +366,17 @@ except Exception as _dpe:
 # 注入业务引擎/版本/仓库根目录到 web 层（类比 tools/_runtime）。
 # 注意：embedding_engine 会被热重载替换 —— 待 embedding/config 路由迁到 web/ 时，
 # 替换处须同时写 _wsh.embedding_engine（目前这些路由仍在本文件、仍走 global）。
-_wsh.init_runtime(
+_web_runtime_kwargs = current_runtime.web_runtime_kwargs()
+_web_runtime_kwargs.update(
     version=__version__,
     repo_root=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    bucket_mgr=bucket_mgr,
     dehydrator=dehydrator,
-    decay_engine=decay_engine,
-    embedding_engine=embedding_engine,
-    embedding_outbox=embedding_outbox,
     import_engine=import_engine,
     migrate_engine=migrate_engine,
     github_sync_instance=github_sync_instance,
     restart_github_auto_task=_restart_github_auto_task,
 )
+_wsh.init_runtime(**_web_runtime_kwargs)
 # 启动时把磁盘上的会话装回内存（容器重启不踢登录）。鉴权/会话逻辑全在 web/_shared.py，
 # server.py 自身已无 @mcp.custom_route 路由，只需启动时载入一次会话。
 from web._shared import _load_sessions
@@ -368,6 +384,17 @@ _load_sessions()
 
 # 注册所有 web/ 路由模块（HTTP 层已全部迁出，见 web/__init__.register_all）
 _web.register_all(mcp)
+from web.current_compat import register_current_routes
+
+_current_web_report = register_current_routes(
+    mcp,
+    current_runtime.web_dependencies(),
+)
+if _current_web_report.missing_required_services:
+    raise RuntimeError(
+        "current web services are incomplete: "
+        f"{sorted(_current_web_report.missing_required_services)}"
+    )
 
 
 # =============================================================
@@ -446,7 +473,11 @@ def _log_op_err(op: str, exc: BaseException) -> None:
     logger.exception(f"op={op} phase=err err={type(exc).__name__}:{exc}")
 
 
-async def _with_notice(coro: Awaitable[str], op: str = "", args: dict | None = None) -> str:
+async def _with_notice(
+    coro: Awaitable[Any],
+    op: str = "",
+    args: dict | None = None,
+) -> Any:
     """所有 MCP 工具调用的包装器。
 
     职责（统一错误规范）：
@@ -489,8 +520,64 @@ async def _with_notice(coro: Awaitable[str], op: str = "", args: dict | None = N
     except Exception:
         extras = ""
     notice = _pop_deletion_notice()
-    body = (notice + result) if notice else result
-    return body + extras if extras else body
+    if isinstance(result, str):
+        body = (notice + result) if notice else result
+        return body + extras if extras else body
+    if notice or extras:
+        logger.warning(
+            "op=%s produced text notices for structured result; notices logged only",
+            op or "unknown",
+        )
+    return result
+
+
+_SENSITIVE_TOOL_ARGUMENTS = {
+    "content",
+    "evidence_context",
+    "fact",
+    "media",
+    "note",
+    "object_value",
+    "reason",
+    "reflection",
+    "tags",
+    "title",
+    "why_remembered",
+}
+
+
+def _current_tool_log_args(
+    spec: ToolSpec,
+    positional: tuple[Any, ...],
+    keyword: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        bound = inspect.signature(spec.handler).bind_partial(*positional, **keyword)
+    except (TypeError, ValueError):
+        return {"positional_count": len(positional), "keyword_count": len(keyword)}
+    safe: dict[str, Any] = {}
+    for name, value in bound.arguments.items():
+        if name in _SENSITIVE_TOOL_ARGUMENTS:
+            suffix = "count" if isinstance(value, (list, tuple, set, dict)) else "len"
+            try:
+                safe[f"{name}_{suffix}"] = len(value)
+            except TypeError:
+                safe[f"{name}_set"] = value is not None
+        else:
+            safe[name] = value
+    return safe
+
+
+async def _invoke_current_tool(
+    spec: ToolSpec,
+    positional: tuple[Any, ...],
+    keyword: dict[str, Any],
+) -> Any:
+    return await _with_notice(
+        spec.handler(*positional, **keyword),
+        op=spec.name,
+        args=_current_tool_log_args(spec, positional, keyword),
+    )
 
 
 # =============================================================
@@ -512,17 +599,12 @@ async def _with_notice(coro: Awaitable[str], op: str = "", args: dict | None = N
 # Wire tools subpackage runtime context
 # 把所有共享对象注入 tools._runtime，让 tools/* 子模块可以访问
 # =============================================================
-_tools_runtime.init(
-    config=config,
-    bucket_mgr=bucket_mgr,
-    dehydrator=dehydrator,
-    decay_engine=decay_engine,
-    embedding_engine=embedding_engine,
-    import_engine=import_engine,
-    logger=logger,
+_tool_runtime_kwargs = current_runtime.tool_runtime_kwargs()
+_tool_runtime_kwargs.update(
     fire_webhook=_fire_webhook,
     mark_op=_mark_op,
 )
+_tools_runtime.init(**_tool_runtime_kwargs)
 
 
 # =============================================================
@@ -555,32 +637,6 @@ async def breath(
             "valence": valence, "arousal": arousal, "max_results": max_results,
             "importance_min": importance_min, "tags": tags, "catalog": catalog,
         },
-    )
-
-
-# Keep the advertised schema parameter-free so claude.ai still auto-loads the
-# default surfacing tool.  The callable deliberately retains the pre-2.6.8
-# signature behind that schema: clients which cached the old tool definition
-# may keep sending those arguments after an upgrade, and FastMCP otherwise
-# silently drops every unknown field before calling a zero-argument function.
-try:
-    _breath_public_tool = mcp._tool_manager.get_tool("breath")
-    if _breath_public_tool is None:
-        raise RuntimeError("registered breath tool is missing")
-    # Unknown/typoed legacy arguments must fail loudly instead of recreating
-    # the original bug by degrading a targeted request into default surfacing.
-    _breath_arg_model = _breath_public_tool.fn_metadata.arg_model
-    _breath_arg_model.model_config["extra"] = "forbid"
-    _breath_arg_model.model_rebuild(force=True)
-    _breath_public_tool.parameters = {
-        "properties": {},
-        "title": "breathArguments",
-        "type": "object",
-    }
-except (AttributeError, RuntimeError, TypeError, ValueError) as _breath_compat_exc:
-    logger.warning(
-        "breath legacy-argument compatibility adapter unavailable: %s",
-        _breath_compat_exc,
     )
 
 
@@ -867,6 +923,24 @@ async def dream(window_hours: Optional[int] = 48) -> str:
     )
 
 
+def _install_current_tool_surface() -> dict[str, Any]:
+    manager = getattr(mcp, "_tool_manager", None)
+    tools = getattr(manager, "_tools", None)
+    if not isinstance(tools, dict):
+        raise RuntimeError("FastMCP tool registry is unavailable")
+    for name in REGISTERED_TOOL_NAMES:
+        tools.pop(name, None)
+    registered = register_current_tools(mcp, invoker=_invoke_current_tool)
+    missing = set(REGISTERED_TOOL_NAMES) - set(tools)
+    if missing:
+        raise RuntimeError(f"current MCP tool registration incomplete: {sorted(missing)}")
+    logger.info("MCP union surface registered: %s tools", len(registered))
+    return registered
+
+
+_current_registered_tools = _install_current_tool_surface()
+
+
 # =============================================================
 # Dashboard API endpoints (for lightweight Web UI)
 # 仪表板 API（轻量 Web UI 用）
@@ -917,40 +991,27 @@ if __name__ == "__main__":
     transport = config.get("transport", "stdio")
     logger.info(f"Ombre Brain starting | transport: {transport}")
 
-    # iter 2.2：合并为单连接器 /mcp。
-    # 当初（iter 2.1）拆 /mcp + /mcp-extra 是因为 claude.ai 连接器存在 5 工具上限；
-    # 该上限现已解除，14 个工具全部挂在主实例 mcp 上对外暴露一条 /mcp 即可，
-    # 顺带消除「第二个连接器」在 Claude.ai 侧的 OAuth/连接器校验疑难。
-    # mcp_extra 仅作历史工具分组容器保留（7 个 @mcp_extra.tool() 注册不动），
-    # 这里把它的工具回灌进 mcp，让 stdio / sse / streamable-http 三种 transport 一致。
-    # 依赖 FastMCP._tool_manager 私有结构；若未来版本变化，降级为仅暴露主集 7 工具。
+    # mcp_extra remains import-compatible for P0 extensions, but the public
+    # /mcp registry was already replaced by the current+P0 union surface.
     from server_app import (
         HTTPRuntimeSettings,
         RuntimeLifecycle,
         build_http_app,
-        merge_mcp_tool_registries,
     )
-
-    try:
-        _extra_count = merge_mcp_tool_registries(mcp, mcp_extra)
-        logger.info(
-            f"单连接器 /mcp：已把 {_extra_count} 个副集工具回灌进主实例，共 "
-            f"{len(mcp._tool_manager._tools)} 个工具对外暴露"
-        )
-    except AttributeError as _merge_exc:
-        logger.warning(
-            f"FastMCP 内部结构变化，工具回灌失败，仅暴露主集 7 工具：{_merge_exc}"
-        )
 
     if transport in ("sse", "streamable-http"):
         import uvicorn
+        from current_schedulers import CurrentSchedulers
         from web import ollama_local as _ollama_local
 
         _http_settings = HTTPRuntimeSettings.from_config(config)
+        _current_schedulers = CurrentSchedulers(current_runtime, logger=logger)
         _runtime_lifecycle = RuntimeLifecycle(
             logger=logger,
             decay_engine=decay_engine,
             embedding_outbox=embedding_outbox,
+            embedding_engine=embedding_engine,
+            current_schedulers=_current_schedulers,
             ensure_ollama_child=_ollama_local.ensure_child_on_boot,
             stop_ollama_child=_ollama_local.stop_child,
             load_tunnel_config=_load_tunnel_config,

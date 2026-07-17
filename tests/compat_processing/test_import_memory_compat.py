@@ -209,7 +209,12 @@ async def test_operit_backup_imports_exact_content_without_an_llm(tmp_path):
         ensure_ascii=False,
     )
 
-    result = await engine.start(backup, filename="operit-memory.json")
+    result = await engine.start(
+        backup,
+        filename="operit-memory.json",
+        import_mode="operit",
+        operit_tagging=False,
+    )
 
     assert result["status"] == "completed"
     assert result["import_format"] == "operit"
@@ -237,7 +242,12 @@ def test_import_state_loads_production_counters_for_old_state_files(tmp_path):
     assert state.data["memories_failed"] == 0
     assert state.data["embeddings_created"] == 0
     assert state.data["embeddings_failed"] == 0
+    assert state.data["embeddings_total"] == 0
+    assert state.data["embeddings_processed"] == 0
     assert state.data["import_format"] == ""
+    assert state.data["operit_phase"] == ""
+    assert state.data["tagging_pending"] == 0
+    assert state.data["_operit_tagging_attempts"] == {}
 
 
 def test_import_engine_honors_production_configuration_surface(tmp_path):
@@ -257,6 +267,10 @@ def test_import_engine_honors_production_configuration_surface(tmp_path):
                 "merge_require_domain_overlap": False,
                 "merge_require_source_match": False,
                 "merge_block_disjoint_dates": False,
+                "operit_tagging_enabled": False,
+                "operit_tagging_concurrency": 4,
+                "operit_tagging_max_attempts": 5,
+                "operit_tagging_retry_base_seconds": 0.25,
             },
         },
         RecordingBucketManager(),
@@ -274,6 +288,10 @@ def test_import_engine_honors_production_configuration_surface(tmp_path):
     assert engine.merge_require_domain_overlap is False
     assert engine.merge_require_source_match is False
     assert engine.merge_block_disjoint_dates is False
+    assert engine.operit_tagging_enabled is False
+    assert engine.operit_tagging_concurrency == 4
+    assert engine.operit_tagging_max_attempts == 5
+    assert engine.operit_tagging_retry_base_seconds == 0.25
     assert engine.state.state_file == str(tmp_path / "state" / "import_state.json")
 
 

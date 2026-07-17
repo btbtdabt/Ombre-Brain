@@ -5,6 +5,7 @@ import threading
 import pytest
 
 import web.import_api as import_api
+from import_memory import preview_import
 
 
 class FakeMCP:
@@ -65,6 +66,17 @@ def test_preview_import_warns_when_invalid_json_falls_back_to_text():
     assert any("JSON" in warning for warning in preview["warnings"])
 
 
+def test_preview_conversation_mode_bypasses_operit_detection():
+    preview = preview_import(
+        '{"exportDate":1,"memories":[{"uuid":"a","content":"exact"}]}',
+        filename="operit.json",
+        import_mode="conversation",
+    )
+
+    assert preview["ok"] is True
+    assert preview["detected_format"] != "operit"
+
+
 @pytest.mark.asyncio
 async def test_import_preflight_route_returns_preview_with_runtime_readiness(monkeypatch):
     monkeypatch.setattr(import_api.sh, "_require_auth", lambda request: None)
@@ -86,6 +98,55 @@ async def test_import_preflight_route_returns_preview_with_runtime_readiness(mon
     assert payload["filename"] == "chat.md"
     assert payload["turns_count"] == 2
     assert payload["chunks_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_import_preflight_honors_explicit_operit_mode_and_tagging(monkeypatch):
+    class NoLlmDehydrator:
+        api_available = False
+
+    class OperitImportEngine:
+        is_running = False
+        dehydrator = NoLlmDehydrator()
+        operit_tagging_enabled = True
+
+    monkeypatch.setattr(import_api.sh, "_require_auth", lambda request: None)
+    monkeypatch.setattr(import_api.sh, "import_engine", OperitImportEngine())
+    monkeypatch.setattr(import_api.sh, "config", {"human": "Amy"})
+    mcp = FakeMCP()
+    import_api.register(mcp)
+    request = BodyRequest(
+        '{"exportDate":1,"memories":[{"uuid":"a","content":"exact"}]}',
+        filename="operit.json",
+    )
+    request.query_params.update(
+        {"import_mode": "operit", "operit_tagging": "false"}
+    )
+
+    response = await mcp.routes[("POST", "/api/import/preflight")](request)
+    payload = json.loads(response.body)
+
+    assert payload["detected_format"] == "operit"
+    assert payload["import_mode"] == "operit"
+    assert payload["operit_tagging_enabled"] is False
+    assert payload["llm_required"] is False
+    assert payload["llm_ready"] is False
+    assert payload["can_start"] is True
+
+
+@pytest.mark.asyncio
+async def test_import_preflight_rejects_unknown_mode(monkeypatch):
+    monkeypatch.setattr(import_api.sh, "_require_auth", lambda request: None)
+    monkeypatch.setattr(import_api.sh, "import_engine", FakeImportEngine())
+    mcp = FakeMCP()
+    import_api.register(mcp)
+    request = BodyRequest("Human: hello")
+    request.query_params["import_mode"] = "guess"
+
+    response = await mcp.routes[("POST", "/api/import/preflight")](request)
+
+    assert response.status_code == 400
+    assert "mode" in json.loads(response.body)["error"].lower()
 
 
 @pytest.mark.asyncio

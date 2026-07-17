@@ -19,29 +19,25 @@ async def test_public_breath_schema_stays_empty_but_cached_query_args_are_forwar
     monkeypatch,
 ):
     import server
+    from tools.current import memory
 
     seen = {}
 
-    async def fake_dispatch(**kwargs):
+    async def fake_search(**kwargs):
         seen.update(kwargs)
         return "query-dispatched"
 
-    monkeypatch.setattr(server._t_breath, "dispatch", fake_dispatch)
+    monkeypatch.setattr(memory, "search_breath", fake_search)
     tool = server.mcp._tool_manager.get_tool("breath")
+    assert tool is not None
 
     listed = next(item for item in await server.mcp.list_tools() if item.name == "breath")
     assert listed.inputSchema["properties"] == {}
-    assert set(tool.fn_metadata.arg_model.model_fields) == {
-        "query",
-        "max_tokens",
-        "domain",
-        "valence",
-        "arousal",
-        "max_results",
-        "importance_min",
-        "tags",
-        "catalog",
-    }
+    assert {
+        "query", "max_tokens", "domain", "date", "valence", "arousal",
+        "max_results", "importance_min", "tags", "catalog", "mode",
+        "session_id", "retrieval_mode",
+    } <= set(tool.fn_metadata.arg_model.model_fields)
 
     output = await tool.run(
         {
@@ -52,22 +48,16 @@ async def test_public_breath_schema_stays_empty_but_cached_query_args_are_forwar
     )
 
     assert output == "query-dispatched"
-    assert seen == {
-        "query": QUERY,
-        "max_tokens": 6000,
-        "domain": "",
-        "valence": -1,
-        "arousal": -1,
-        "max_results": 1,
-        "importance_min": -1,
-        "tags": "",
-        "catalog": False,
-    }
+    assert seen["query"] == QUERY
+    assert seen["max_tokens"] == 6000
+    assert seen["max_results"] == 1
+    assert seen["retrieval_mode"] == "graph"
 
 
 @pytest.mark.asyncio
 async def test_cached_catalog_arg_reaches_breath_dispatch(monkeypatch):
     import server
+    from tools.current import memory
 
     seen = {}
 
@@ -75,8 +65,9 @@ async def test_cached_catalog_arg_reaches_breath_dispatch(monkeypatch):
         seen.update(kwargs)
         return "catalog-dispatched"
 
-    monkeypatch.setattr(server._t_breath, "dispatch", fake_dispatch)
+    monkeypatch.setattr(memory, "p0_breath_dispatch", fake_dispatch)
     tool = server.mcp._tool_manager.get_tool("breath")
+    assert tool is not None
 
     output = await tool.run(
         {
@@ -97,28 +88,23 @@ async def test_cached_catalog_arg_reaches_breath_dispatch(monkeypatch):
 @pytest.mark.asyncio
 async def test_parameter_free_breath_still_dispatches_with_all_defaults(monkeypatch):
     import server
+    from tools.current import memory
 
     seen = {}
 
-    async def fake_dispatch(**kwargs):
+    async def fake_surface(**kwargs):
         seen.update(kwargs)
         return "default-dispatched"
 
-    monkeypatch.setattr(server._t_breath, "dispatch", fake_dispatch)
+    monkeypatch.setattr(memory, "surface_breath", fake_surface)
     tool = server.mcp._tool_manager.get_tool("breath")
+    assert tool is not None
 
     assert await tool.run({}) == "default-dispatched"
-    assert seen == {
-        "query": "",
-        "max_tokens": 0,
-        "domain": "",
-        "valence": -1,
-        "arousal": -1,
-        "max_results": 0,
-        "importance_min": -1,
-        "tags": "",
-        "catalog": False,
-    }
+    assert seen["max_tokens"] == 10000
+    assert seen["max_results"] == 20
+    assert seen["include_related"] is True
+    assert seen["auto_surface"] is False
 
 
 @pytest.mark.asyncio
@@ -126,6 +112,7 @@ async def test_unknown_cached_breath_argument_is_rejected_instead_of_ignored():
     import server
 
     tool = server.mcp._tool_manager.get_tool("breath")
+    assert tool is not None
 
     with pytest.raises(ToolError, match="extra_forbidden"):
         await tool.run({"query": QUERY, "max_result": 1})

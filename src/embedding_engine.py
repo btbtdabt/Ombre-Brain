@@ -179,6 +179,10 @@ class BaseEmbeddingEngine(abc.ABC):
         """子类可选：提前把模型加载到内存，避免首次调用延迟。"""
         return None
 
+    async def aclose(self) -> None:
+        """Release async provider resources when the backend owns any."""
+        return None
+
 
 # ============================================================
 # API 后端：OpenAI 兼容（默认 Gemini）
@@ -272,6 +276,9 @@ class APIEmbeddingEngine(BaseEmbeddingEngine):
                 f"err={type(e).__name__}: {e}" + (f" {_hint}" if _hint else "")
             )
             return []
+
+    async def aclose(self) -> None:
+        await self._client.close()
 
     @staticmethod
     def _record_e001(detail: str) -> None:
@@ -537,6 +544,10 @@ class EmbeddingEngine:
 
     def attach_v3_runtime(self, runtime) -> None:
         self.v3_runtime = runtime
+
+    async def aclose(self) -> None:
+        if self._backend is not None:
+            await self._backend.aclose()
 
     # -------------------- SQLite 初始化 --------------------
 
@@ -1125,15 +1136,29 @@ class EmbeddingEngine:
                                 f"{type(_emb_exc).__name__}: {_emb_exc}"
                             )
                             continue
-                        if not self._row_matches_current_model(
-                            stored_model,
-                            stored_dimension,
-                            stored_embedding,
-                        ):
-                            continue
                         if len(stored_embedding) != query_dim:
                             # Preserve the pairwise helper's existing contract:
-                            # a dimension mismatch contributes a 0.0 score.
+                            # a dimension mismatch contributes a 0.0 score. A
+                            # row from another model or with internally
+                            # inconsistent metadata is still stale/corrupt and
+                            # must not enter the candidate set.
+                            stored_model_name = str(stored_model or "").strip()
+                            if stored_model_name and _norm_model(
+                                stored_model_name
+                            ) != _norm_model(self._current_model_name()):
+                                continue
+                            try:
+                                declared_dimension = (
+                                    int(stored_dimension)
+                                    if stored_dimension is not None
+                                    else 0
+                                )
+                            except (TypeError, ValueError):
+                                continue
+                            if declared_dimension and declared_dimension != len(
+                                stored_embedding
+                            ):
+                                continue
                             logger.warning(
                                 f"[embedding] {label} dimension mismatch for {bucket_id!r}: "
                                 f"stored={len(stored_embedding)}, query={query_dim}"
@@ -1142,6 +1167,12 @@ class EmbeddingEngine:
                             best_scores[owner] = (
                                 0.0 if current is None else max(current, 0.0)
                             )
+                            continue
+                        if not self._row_matches_current_model(
+                            stored_model,
+                            stored_dimension,
+                            stored_embedding,
+                        ):
                             continue
                         candidate_vectors.append(stored_embedding)
                         candidate_owners.append(owner)

@@ -279,6 +279,56 @@ async def test_upload_schedule_failure_releases_reservation(tmp_path, monkeypatc
     assert response_again.status_code == 500
 
 
+@pytest.mark.asyncio
+async def test_upload_threads_explicit_import_options_into_reserved_job(monkeypatch):
+    class CapturingEngine:
+        def __init__(self):
+            self.active_job_id = ""
+            self.is_running = False
+            self.kwargs = None
+            self.started = asyncio.Event()
+
+        def reserve_start(self):
+            self.active_job_id = "job-options"
+            self.is_running = True
+            return self.active_job_id
+
+        def release_start_reservation(self, job_id):
+            assert job_id == "job-options"
+            self.active_job_id = ""
+            self.is_running = False
+            return True
+
+        async def start(self, *_args, **kwargs):
+            self.kwargs = kwargs
+            self.started.set()
+            return {"status": "completed"}
+
+    engine = CapturingEngine()
+    monkeypatch.setattr(import_api.sh, "_require_auth", lambda _request: None)
+    monkeypatch.setattr(import_api.sh, "import_engine", engine, raising=False)
+    mcp = FakeMCP()
+    import_api.register(mcp)
+    request = BodyRequest("Human: mode\nAssistant: explicit", "mode.md")
+    request.query_params.update(
+        {
+            "import_mode": "conversation",
+            "operit_tagging": "false",
+            "resume": "true",
+        }
+    )
+
+    response = await mcp.routes[("POST", "/api/import/upload")](request)
+    await asyncio.wait_for(engine.started.wait(), timeout=2)
+
+    assert response.status_code == 200
+    assert engine.kwargs is not None
+    assert engine.kwargs["import_mode"] == "conversation"
+    assert engine.kwargs["operit_tagging"] is False
+    assert engine.kwargs["resume"] is True
+    assert engine.kwargs["reservation_id"] == "job-options"
+
+
 def test_history_import_limit_is_safe_by_default_and_hard_capped(monkeypatch):
     monkeypatch.setattr(import_api.sh, "config", {}, raising=False)
     assert import_api._max_import_upload_bytes() == 4 * 1024 * 1024
@@ -299,6 +349,7 @@ async def test_cancelled_parser_is_reaped_and_persisted_as_error(tmp_path, monke
         object(),
         ImmediateDehydrator(),
     )
+    engine.state.data["import_format"] = "operit"
     entered = threading.Event()
     release = threading.Event()
 

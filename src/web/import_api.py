@@ -19,14 +19,24 @@ import asyncio
 import math
 import threading
 import tempfile
+from collections.abc import AsyncIterable, Awaitable
 from contextlib import AsyncExitStack
 from datetime import datetime as _dt
-from typing import Awaitable, Callable
+from typing import TYPE_CHECKING, Callable, cast
 
 from starlette.requests import Request
 from starlette.responses import FileResponse, Response
 
 from . import _shared as sh
+from .upload_limits import (
+    read_multipart_form_limited as _read_multipart_form_limited,
+)
+
+if TYPE_CHECKING:
+    from ..bucket_manager import BucketManager
+    from ..dehydrator import Dehydrator
+    from ..import_memory import ImportEngine
+    from ..migrate_engine import MigrateEngine
 
 try:
     from utils import parse_bool, sanitize_name  # type: ignore
@@ -69,7 +79,69 @@ except ImportError:  # pragma: no cover
 
 _DEFAULT_MAX_IMPORT_UPLOAD_BYTES = 4 * 1024 * 1024
 _HARD_MAX_IMPORT_UPLOAD_BYTES = 8 * 1024 * 1024
-_MAX_MULTIPART_OVERHEAD_BYTES = 1024 * 1024
+_IMPORT_MODES = frozenset({"auto", "operit", "conversation"})
+_TRUE_QUERY_VALUES = frozenset({"1", "true", "yes", "on"})
+_FALSE_QUERY_VALUES = frozenset({"0", "false", "no", "off"})
+
+
+def _require_dependency(value: object | None, name: str) -> object:
+    if value is None:
+        raise RuntimeError(f"Web dependency is not initialized: {name}")
+    return value
+
+
+def _require_bucket_manager() -> "BucketManager":
+    return cast(
+        "BucketManager",
+        _require_dependency(sh.bucket_mgr, "bucket_mgr"),
+    )
+
+
+def _require_dehydrator() -> "Dehydrator":
+    return cast(
+        "Dehydrator",
+        _require_dependency(sh.dehydrator, "dehydrator"),
+    )
+
+
+def _require_import_engine() -> "ImportEngine":
+    return cast(
+        "ImportEngine",
+        _require_dependency(sh.import_engine, "import_engine"),
+    )
+
+
+def _require_migrate_engine() -> "MigrateEngine":
+    return cast(
+        "MigrateEngine",
+        _require_dependency(sh.migrate_engine, "migrate_engine"),
+    )
+
+
+def _coerce_int(value: object, *, default: int) -> int:
+    if isinstance(value, (str, bytes, bytearray, int, float)):
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError):
+            pass
+    return default
+
+
+def _import_query_options(request: Request) -> tuple[str, bool | None]:
+    mode = str(request.query_params.get("import_mode", "auto") or "auto")
+    mode = mode.strip().lower()
+    if mode not in _IMPORT_MODES:
+        raise ValueError(f"Unsupported import mode: {mode}")
+
+    raw_tagging = request.query_params.get("operit_tagging")
+    if raw_tagging is None:
+        return mode, None
+    normalized = str(raw_tagging).strip().lower()
+    if normalized in _TRUE_QUERY_VALUES:
+        return mode, True
+    if normalized in _FALSE_QUERY_VALUES:
+        return mode, False
+    raise ValueError(f"Invalid operit_tagging value: {raw_tagging}")
 
 
 class _CleanupFileResponse(FileResponse):
@@ -126,9 +198,14 @@ async def _read_body_limited(request: Request, limit: int) -> bytes:
 
     stream = getattr(request, "stream", None)
     if callable(stream):
+        stream_result = stream()
+        if not isinstance(stream_result, AsyncIterable):
+            raise TypeError("Request stream must be an async iterable")
         chunks: list[bytes] = []
         total = 0
-        async for chunk in stream():
+        async for chunk in stream_result:
+            if not isinstance(chunk, bytes):
+                raise TypeError("Request stream yielded a non-bytes chunk")
             total += len(chunk)
             if total > limit:
                 raise ValueError(f"Upload too large ({total} bytes > {limit} byte limit)")
@@ -199,51 +276,6 @@ async def _spool_file_field_limited(file_field, limit: int) -> str:
             yield chunk
 
     return await _spool_chunks_to_temp(chunks(), limit)
-
-
-async def _read_multipart_form_limited(request: Request, payload_limit: int):
-    """Parse one upload while bounding the raw multipart stream itself.
-
-    UploadFile spooling happens inside Starlette's parser, so checking the file
-    after ``request.form()`` is too late for a chunked disk-filling request.
-    Count ASGI receive bytes while the parser consumes them and cap auxiliary
-    fields/header overhead separately from the allowed file payload.
-    """
-    request_limit = payload_limit + _MAX_MULTIPART_OVERHEAD_BYTES
-    raw_length = str(request.headers.get("content-length", "") or "").strip()
-    if raw_length:
-        try:
-            declared_length = int(raw_length)
-        except ValueError as exc:
-            raise ValueError("Invalid Content-Length") from exc
-        if declared_length < 0 or declared_length > request_limit:
-            raise ValueError(
-                f"Upload too large ({declared_length} bytes > {request_limit} byte request limit)"
-            )
-
-    original_receive = request._receive
-    received = 0
-
-    async def limited_receive():
-        nonlocal received
-        message = await original_receive()
-        if isinstance(message, dict) and message.get("type") == "http.request":
-            received += len(message.get("body", b""))
-            if received > request_limit:
-                raise ValueError(
-                    f"Upload too large ({received} bytes > {request_limit} byte request limit)"
-                )
-        return message
-
-    request._receive = limited_receive
-    try:
-        return await request.form(
-            max_files=1,
-            max_fields=8,
-            max_part_size=64 * 1024,
-        )
-    finally:
-        request._receive = original_receive
 
 
 async def _read_import_upload_text(request: Request) -> tuple[str, str, int]:
@@ -422,6 +454,11 @@ def register(mcp) -> None:
         if err:
             return err
 
+        try:
+            import_mode, requested_tagging = _import_query_options(request)
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
         if not history_ingest_lock.acquire(blocking=False):
             return JSONResponse(
                 {
@@ -457,21 +494,35 @@ def register(mcp) -> None:
                 )
 
             human_label = str((sh.config or {}).get("human") or "用户")
+            tagging_enabled = (
+                bool(getattr(sh.import_engine, "operit_tagging_enabled", True))
+                if requested_tagging is None
+                else requested_tagging
+            )
             preview = await _await_history_worker(
                 preview_import,
                 raw_content,
                 filename,
                 human_label,
+                import_mode,
+                tagging_enabled,
             )
             raw_content = ""
             llm_ready = _import_llm_ready()
+            llm_required = (
+                preview.get("detected_format") != "operit" or tagging_enabled
+            )
             return JSONResponse({
                 **preview,
                 "filename": filename,
                 "size_bytes": size_bytes,
+                "import_mode": import_mode,
+                "operit_tagging_enabled": tagging_enabled,
                 "import_running": False,
                 "llm_ready": llm_ready,
-                "can_start": bool(preview.get("ok")) and llm_ready,
+                "llm_required": llm_required,
+                "can_start": bool(preview.get("ok"))
+                and (llm_ready or not llm_required),
             })
         finally:
             history_ingest_lock.release()
@@ -484,23 +535,29 @@ def register(mcp) -> None:
         err = sh._require_auth(request)
         if err:
             return err
+        import_engine = _require_import_engine()
+
+        try:
+            import_mode, operit_tagging = _import_query_options(request)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
 
         if not history_ingest_lock.acquire(blocking=False):
             return JSONResponse(
                 {
                     "error": "History import processing already active",
-                    "job_id": getattr(sh.import_engine, "active_job_id", ""),
+                    "job_id": getattr(import_engine, "active_job_id", ""),
                 },
                 status_code=409,
             )
 
-        job_id = sh.import_engine.reserve_start()
+        job_id = import_engine.reserve_start()
         if job_id is None:
             history_ingest_lock.release()
             return JSONResponse(
                 {
                     "error": "Import already running",
-                    "job_id": sh.import_engine.active_job_id,
+                    "job_id": import_engine.active_job_id,
                 },
                 status_code=409,
             )
@@ -514,7 +571,7 @@ def register(mcp) -> None:
                 if released:
                     return
                 released = True
-            sh.import_engine.release_start_reservation(job_id)
+            import_engine.release_start_reservation(job_id)
             history_ingest_lock.release()
 
         try:
@@ -538,11 +595,13 @@ def register(mcp) -> None:
         async def _run_import():
             nonlocal raw_content
             try:
-                start_coro = sh.import_engine.start(
+                start_coro = import_engine.start(
                     raw_content,
                     filename,
-                    preserve_raw,
-                    resume,
+                    preserve_raw=preserve_raw,
+                    resume=resume,
+                    import_mode=import_mode,
+                    operit_tagging=operit_tagging,
                     reservation_id=job_id,
                 )
                 raw_content = ""
@@ -576,6 +635,8 @@ def register(mcp) -> None:
             "job_id": job_id,
             "filename": filename,
             "size_bytes": size_bytes,
+            "import_mode": import_mode,
+            "operit_tagging": operit_tagging,
         })
 
 
@@ -586,7 +647,8 @@ def register(mcp) -> None:
         err = sh._require_auth(request)
         if err:
             return err
-        return JSONResponse(sh.import_engine.get_status())
+        import_engine = _require_import_engine()
+        return JSONResponse(import_engine.get_status())
 
 
     @mcp.custom_route("/api/import/pause", methods=["POST"])
@@ -596,9 +658,10 @@ def register(mcp) -> None:
         err = sh._require_auth(request)
         if err:
             return err
-        if not sh.import_engine.is_running:
+        import_engine = _require_import_engine()
+        if not import_engine.is_running:
             return JSONResponse({"error": "No import running"}, status_code=400)
-        sh.import_engine.pause()
+        import_engine.pause()
         return JSONResponse({"status": "pause_requested"})
 
 
@@ -609,8 +672,9 @@ def register(mcp) -> None:
         err = sh._require_auth(request)
         if err:
             return err
+        import_engine = _require_import_engine()
         try:
-            patterns = await sh.import_engine.detect_patterns()
+            patterns = await import_engine.detect_patterns()
             return JSONResponse({"patterns": patterns})
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
@@ -623,12 +687,13 @@ def register(mcp) -> None:
         err = sh._require_auth(request)
         if err:
             return err
+        bucket_manager = _require_bucket_manager()
         try:
             limit = max(1, min(int(request.query_params.get("limit", "50")), 200))
         except (TypeError, ValueError, OverflowError):
             return JSONResponse({"error": "limit must be an integer in [1,200]"}, status_code=400)
         try:
-            all_buckets = await sh.bucket_mgr.list_all(include_archive=False)
+            all_buckets = await bucket_manager.list_all(include_archive=False)
             # Sort by created time, newest first
             all_buckets.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
             results = []
@@ -655,6 +720,7 @@ def register(mcp) -> None:
         err = sh._require_auth(request)
         if err:
             return err
+        bucket_manager = _require_bucket_manager()
         try:
             body = await sh._read_json_object(request)
         except Exception:
@@ -689,7 +755,7 @@ def register(mcp) -> None:
                     # Reading inside the lock avoids treating an already-high
                     # bucket as a new slot after a concurrent review action.
                     async with _quota_turn("high_importance"):
-                        bucket = await sh.bucket_mgr.get(bid)
+                        bucket = await bucket_manager.get(bid)
                         if not bucket:
                             errors += 1
                             continue
@@ -731,13 +797,13 @@ def register(mcp) -> None:
                                 continue
 
                         if target_importance != current_importance:
-                            ok = await sh.bucket_mgr.update(
+                            ok = await bucket_manager.update(
                                 bid, importance=target_importance
                             )
                             if not ok:
                                 errors += 1
                                 continue
-                            persisted = await sh.bucket_mgr.get(bid)
+                            persisted = await bucket_manager.get(bid)
                             try:
                                 actual_importance = int(
                                     (persisted or {}).get("metadata", {}).get(
@@ -757,7 +823,7 @@ def register(mcp) -> None:
                         await quota_stack.enter_async_context(
                             _quota_turn("high_importance")
                         )
-                        bucket = await sh.bucket_mgr.get(bid)
+                        bucket = await bucket_manager.get(bid)
                         if not bucket:
                             errors += 1
                             continue
@@ -778,11 +844,11 @@ def register(mcp) -> None:
                                 )
                                 errors += 1
                                 continue
-                            ok = await sh.bucket_mgr.update(bid, pinned=True)
+                            ok = await bucket_manager.update(bid, pinned=True)
                             if not ok:
                                 errors += 1
                                 continue
-                        persisted = await sh.bucket_mgr.get(bid)
+                        persisted = await bucket_manager.get(bid)
                         actual_pinned = parse_bool(
                             (persisted or {}).get("metadata", {}).get("pinned"),
                             default=False,
@@ -802,7 +868,7 @@ def register(mcp) -> None:
                         await quota_stack.enter_async_context(
                             _quota_turn("high_importance")
                         )
-                        bucket = await sh.bucket_mgr.get(bid)
+                        bucket = await bucket_manager.get(bid)
                         if not bucket:
                             errors += 1
                             continue
@@ -817,13 +883,13 @@ def register(mcp) -> None:
                         ):
                             errors += 1
                             continue
-                        ok = await sh.bucket_mgr.update(
+                        ok = await bucket_manager.update(
                             bid, resolved=True, importance=1
                         )
                         if not ok:
                             errors += 1
                             continue
-                        persisted = await sh.bucket_mgr.get(bid)
+                        persisted = await bucket_manager.get(bid)
                         persisted_metadata = (persisted or {}).get(
                             "metadata", {}
                         )
@@ -846,7 +912,7 @@ def register(mcp) -> None:
                             errors += 1
                             continue
                 elif action == "delete":
-                    ok = await sh.bucket_mgr.delete(bid)
+                    ok = await bucket_manager.delete(bid)
                     if not ok:
                         errors += 1
                         continue
@@ -874,8 +940,9 @@ def register(mcp) -> None:
         err = sh._require_auth(request)
         if err:
             return err
+        bucket_manager = _require_bucket_manager()
         bucket_id = request.path_params["bucket_id"]
-        bucket = await sh.bucket_mgr.get(bucket_id)
+        bucket = await bucket_manager.get(bucket_id)
         if not bucket:
             return JSONResponse({"error": "bucket not found"}, status_code=404)
         try:
@@ -928,10 +995,7 @@ def register(mcp) -> None:
                     return [part.strip() for part in raw.split(",") if part.strip()]
                 return list(raw or []) if isinstance(raw, (list, tuple, set)) else []
             if field == "importance":
-                try:
-                    return int(raw)
-                except (TypeError, ValueError):
-                    return 5
+                return _coerce_int(raw, default=5)
             if field == "weight":
                 if raw is None:
                     return None
@@ -1183,7 +1247,10 @@ def register(mcp) -> None:
             eligibility_field_changed
             or (
                 importance_changed
-                and max(final_importance, before_values["importance"])
+                and max(
+                    final_importance,
+                    _coerce_int(before_values["importance"], default=5),
+                )
                 >= _HIGH_IMP_THRESHOLD
             )
         )
@@ -1214,7 +1281,7 @@ def register(mcp) -> None:
                 # a concurrent edit cannot make this request count itself as a
                 # new high-importance row or write from a stale pin snapshot.
                 if pin_state_changed or needs_high_importance_lock:
-                    locked_bucket = await sh.bucket_mgr.get(bucket_id)
+                    locked_bucket = await bucket_manager.get(bucket_id)
                     if not locked_bucket:
                         return reject(
                             "bucket changed concurrently; reload and retry",
@@ -1297,9 +1364,9 @@ def register(mcp) -> None:
                 ):
                     expected_values["type"] = "dynamic"
 
-                ok = await sh.bucket_mgr.update(bucket_id, **updates)
+                ok = await bucket_manager.update(bucket_id, **updates)
                 if not ok:
-                    latest = await sh.bucket_mgr.get(bucket_id)
+                    latest = await bucket_manager.get(bucket_id)
                     if _is_terminal_memory_metadata(
                         (latest or {}).get("metadata", {})
                     ):
@@ -1309,7 +1376,7 @@ def register(mcp) -> None:
                             conflict="archived",
                         )
                     return reject("update failed", status_code=500)
-                persisted_bucket = await sh.bucket_mgr.get(bucket_id)
+                persisted_bucket = await bucket_manager.get(bucket_id)
                 if not persisted_bucket:
                     return reject(
                         "updated bucket could not be reloaded", status_code=500
@@ -1331,10 +1398,13 @@ def register(mcp) -> None:
         ]
 
         if "content" in actual_updated:
-            try:
-                sh.dehydrator.invalidate_cache(before_values["content"])
-            except Exception:
-                pass
+            previous_content = before_values["content"]
+            if isinstance(previous_content, str):
+                try:
+                    dehydrator = _require_dehydrator()
+                    dehydrator.invalidate_cache(previous_content)
+                except Exception:
+                    pass
 
         if not_applied:
             return JSONResponse({
@@ -1368,6 +1438,7 @@ def register(mcp) -> None:
         err = sh._require_auth(request)
         if err:
             return err
+        bucket_manager = _require_bucket_manager()
 
         buckets_dir = sh.config.get("buckets_dir", "")
         if not buckets_dir or not os.path.isdir(buckets_dir):
@@ -1396,7 +1467,7 @@ def register(mcp) -> None:
                 },
             }
             try:
-                meta["stats"] = await sh.bucket_mgr.get_stats()
+                meta["stats"] = await bucket_manager.get_stats()
             except Exception as exc:
                 logger.warning("export: stats unavailable: %s", exc)
 
@@ -1463,8 +1534,9 @@ def register(mcp) -> None:
         err = sh._require_auth(request)
         if err:
             return err
+        migrate_engine = _require_migrate_engine()
 
-        reservation_id = sh.migrate_engine.reserve_parse()
+        reservation_id = migrate_engine.reserve_parse()
         if reservation_id is None:
             return JSONResponse({"error": "已有迁移任务正在进行，请等待完成后再上传"}, status_code=409)
 
@@ -1485,14 +1557,17 @@ def register(mcp) -> None:
                 finally:
                     close = getattr(form, "close", None)
                     if callable(close):
-                        await close()
+                        close_result = close()
+                        if not isinstance(close_result, Awaitable):
+                            raise TypeError("Multipart form close must be awaitable")
+                        await close_result
             else:
                 upload_path = await _spool_body_limited(request, MAX_ARCHIVE_BYTES)
 
             if not upload_path or os.path.getsize(upload_path) == 0:
                 raise ValueError("文件为空")
         except asyncio.CancelledError:
-            sh.migrate_engine.abandon_parse(
+            migrate_engine.abandon_parse(
                 reservation_id,
                 "读取上传内容已取消",
             )
@@ -1503,7 +1578,7 @@ def register(mcp) -> None:
                     pass
             raise
         except Exception as e:
-            sh.migrate_engine.abandon_parse(reservation_id, f"读取上传内容失败: {e}")
+            migrate_engine.abandon_parse(reservation_id, f"读取上传内容失败: {e}")
             if upload_path:
                 try:
                     os.unlink(upload_path)
@@ -1512,7 +1587,7 @@ def register(mcp) -> None:
             return JSONResponse({"error": f"读取上传内容失败: {e}"}, status_code=400)
 
         try:
-            result = await sh.migrate_engine.parse_zip_file(
+            result = await migrate_engine.parse_zip_file(
                 upload_path,
                 reservation_id=reservation_id,
             )
@@ -1533,7 +1608,8 @@ def register(mcp) -> None:
         err = sh._require_auth(request)
         if err:
             return err
-        return JSONResponse(sh.migrate_engine.get_status())
+        migrate_engine = _require_migrate_engine()
+        return JSONResponse(migrate_engine.get_status())
 
 
     @mcp.custom_route("/api/migrate/apply", methods=["POST"])
@@ -1551,6 +1627,7 @@ def register(mcp) -> None:
         err = sh._require_auth(request)
         if err:
             return err
+        migrate_engine = _require_migrate_engine()
 
         try:
             body = await sh._read_json_object(request)
@@ -1569,19 +1646,19 @@ def register(mcp) -> None:
                 decisions[bid] = decision
 
         job_id = str(body.get("job_id") or "").strip()
-        if not job_id or job_id != sh.migrate_engine.job_id:
+        if not job_id or job_id != migrate_engine.job_id:
             return JSONResponse(
                 {
                     "error": "迁移 job_id 已过期或缺失，请重新上传并确认当前解析结果",
-                    "current_job_id": sh.migrate_engine.job_id,
+                    "current_job_id": migrate_engine.job_id,
                 },
                 status_code=409,
             )
-        reservation_id = sh.migrate_engine.reserve_apply(job_id)
+        reservation_id = migrate_engine.reserve_apply(job_id)
         if reservation_id is None:
             return JSONResponse(
                 {
-                    "error": f"当前状态为 '{sh.migrate_engine.phase}'，apply 需要先完成 upload 解析（phase=parsed）"
+                    "error": f"当前状态为 '{migrate_engine.phase}'，apply 需要先完成 upload 解析（phase=parsed）"
                 },
                 status_code=409,
             )
@@ -1589,7 +1666,7 @@ def register(mcp) -> None:
         # 后台执行（apply 可能耗时较长，含重新向量化）
         async def _run_apply():
             try:
-                await sh.migrate_engine.apply(
+                await migrate_engine.apply(
                     decisions,
                     reservation_id=reservation_id,
                 )
@@ -1601,7 +1678,7 @@ def register(mcp) -> None:
             asyncio.create_task(apply_coro)
         except Exception as exc:
             apply_coro.close()
-            abandon = getattr(sh.migrate_engine, "abandon_apply", None)
+            abandon = getattr(migrate_engine, "abandon_apply", None)
             if callable(abandon):
                 abandon(reservation_id, f"task scheduling failed: {exc}")
             logger.error("[migrate] failed to schedule apply: %s", exc)

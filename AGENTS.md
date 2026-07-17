@@ -26,7 +26,7 @@ git log --oneline <recorded-p0-baseline>..p0luz/main
 git log --oneline <recorded-origin-baseline>..origin/main
 ```
 
-Merge tested P0luz updates into the local branch. Review every Yinglianchun commit after the recorded baseline and port its behavior at the corresponding `src/tools`, `src/web`, engine, or Gateway seam. Add or update a parity test for each retained feature. Advance either recorded baseline in `docs/upstream-integration.md` only after the complete integration batch passes verification.
+Merge tested P0luz updates into the local branch. Review every Yinglianchun commit after the recorded baseline and port its behavior at the corresponding `src/tools`, `src/web`, engine, or Gateway seam. Maintain a commit ledger for both upstream ranges in `docs/upstream-integration.md`; classify every commit as merged, ported, superseded by a compatible implementation, or intentionally excluded with evidence. A conflict-free Git merge is not proof of feature parity. Add or update a parity test for each retained feature, and advance either recorded baseline only after every commit in its range is accounted for and the complete integration batch passes staging verification.
 
 ## Local First, Then Align
 
@@ -105,11 +105,18 @@ python scripts\check_production_alignment.py
 For a migration batch, run as applicable:
 
 ```powershell
-python -m pytest --asyncio-mode=auto
+python -m pytest tests --asyncio-mode=auto
 python -m ruff check .
-pyright
+python -m pyright <all changed Python files>
 docker build .
 ```
+
+Run plain `python -m pyright` as a whole-tree debt audit. The intentionally
+dormant v3/distributed stack and historical compatibility tests still contain
+pre-existing annotation debt, so do not hide that output by weakening Pyright
+or adding blanket ignores. Every changed Python file must remain at zero
+Pyright errors, and an integration batch must not increase the recorded
+whole-tree error count.
 
 Also review the diff, validate copied production data, and exercise Gateway/MCP/persona/relay flows on staging. Do not call a migration complete with failing tests, an unexplained lint/type regression, or unverified production data.
 

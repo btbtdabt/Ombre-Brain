@@ -24,7 +24,9 @@ server.py（会循环 import）。
 ========================================
 """
 
-from typing import Any, Awaitable, Callable, Optional
+import inspect
+from collections.abc import Awaitable, Callable
+from typing import Any, Optional, Protocol, TypeGuard
 
 from ombrebrain.app.execution import ExecutionEnvelope
 
@@ -34,13 +36,46 @@ bucket_mgr: Any = None
 dehydrator: Any = None
 decay_engine: Any = None
 embedding_engine: Any = None
+embedding_outbox: Any = None
 import_engine: Any = None
 logger: Any = None
 v3_runtime: Any = None
 
+# Current-production compatibility services.  These are deliberately only
+# injection slots; process assembly remains the responsibility of server.py.
+reminder_store: Any = None
+letter_service: Any = None
+darkroom_store: Any = None
+memory_edge_store: Any = None
+memory_moment_store: Any = None
+memory_node_store: Any = None
+entity_edge_store: Any = None
+memory_write_gate: Any = None
+recall_policy: Any = None
+reranker_engine: Any = None
+recall_diagnostics: Any = None
+persona_engine: Any = None
+portrait_engine: Any = None
+dream_engine: Any = None
+raw_event_store: Any = None
+gateway_state_store: Any = None
+identity_semantic_store: Any = None
+word_map_store: Any = None
+reflection_engine: Any = None
+queue_embedding_refresh: Any = None
+refresh_bucket_indexes: Any = None
+
 # --- 共享辅助回调（也由 server.py 注入，避免反向 import）---
 fire_webhook: Optional[Callable[[str, dict], Awaitable[None]]] = None
 mark_op: Optional[Callable[..., None]] = None
+
+
+class _SupportsToDict(Protocol):
+    def to_dict(self) -> dict[str, Any]: ...
+
+
+def _supports_to_dict(value: object) -> TypeGuard[_SupportsToDict]:
+    return hasattr(value, "to_dict") and callable(getattr(value, "to_dict", None))
 
 
 def init(**kwargs: Any) -> None:
@@ -112,9 +147,7 @@ def record_v3_tool_event(tool_name: str, payload: dict[str, Any] | None = None) 
                 permissions=("mcp:call",),
             )
             plan = planner(envelope)
-            event_payload["command_plan"] = (
-                plan.to_dict() if hasattr(plan, "to_dict") else plan
-            )
+            event_payload["command_plan"] = plan.to_dict() if _supports_to_dict(plan) else plan
         except Exception as exc:
             _warn("v3 tool command planning failed for %s: %s", name, exc)
     try:
@@ -191,7 +224,10 @@ async def run_v3_async_operation(
         protected_paths=protected_paths,
         feature_flags=feature_flags,
     )
-    return await runner(envelope, handler)
+    result = runner(envelope, handler)
+    if inspect.isawaitable(result):
+        return await result
+    return result
 
 
 _DEFAULT_RUNTIME_HELPERS = {

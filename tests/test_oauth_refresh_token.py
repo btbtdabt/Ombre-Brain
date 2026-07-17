@@ -6,8 +6,10 @@ import json
 import threading
 import time
 import urllib.parse
+from typing import cast
 
 import pytest
+from starlette.requests import Request
 
 import web.oauth as oauth_mod
 
@@ -52,7 +54,13 @@ def _payload(response):
     return json.loads(response.body)
 
 
-def _fresh_oauth_routes(monkeypatch, tmp_path, *, auth_required=True):
+def _fresh_oauth_routes(
+    monkeypatch,
+    tmp_path,
+    *,
+    auth_required=True,
+    fixed_client: dict[str, str] | None = None,
+):
     oauth_mod._oauth_clients.clear()
     oauth_mod._oauth_codes.clear()
     oauth_mod._mcp_tokens.clear()
@@ -69,6 +77,17 @@ def _fresh_oauth_routes(monkeypatch, tmp_path, *, auth_required=True):
         oauth_mod._oauth_registration_source_attempts.clear()
     if hasattr(oauth_mod, "_oauth_registration_global_attempts"):
         oauth_mod._oauth_registration_global_attempts.clear()
+    fixed_env = {
+        "OMBRE_CHATGPT_OAUTH_CLIENT_ID": "",
+        "OMBRE_CHATGPT_OAUTH_CLIENT_SECRET": "",
+        "OMBRE_CHATGPT_OAUTH_ACCESS_TOKEN": "",
+        "OMBRE_CHATGPT_OAUTH_PUBLIC_BASE_URL": "",
+        "OMBRE_CHATGPT_OAUTH_REDIRECT_PREFIX": "",
+        "OMBRE_CHATGPT_OAUTH_REDIRECT_URIS": "",
+    }
+    fixed_env.update(fixed_client or {})
+    for name, value in fixed_env.items():
+        monkeypatch.setenv(name, value)
     monkeypatch.setattr(oauth_mod.sh, "config", {
         "buckets_dir": str(tmp_path / "buckets"),
         "mcp_require_auth": auth_required,
@@ -85,6 +104,25 @@ def oauth_routes(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_oauth_token_rejects_malformed_basic_credentials(oauth_routes):
+    malformed = base64.b64encode(b"client-without-secret-separator").decode()
+
+    response = await oauth_routes[("POST", "/oauth/token")](
+        JsonRequest(
+            {"grant_type": "authorization_code"},
+            headers={
+                "authorization": f"Basic {malformed}",
+                "content-type": "application/json",
+                "host": "ombre.example",
+            },
+        )
+    )
+
+    assert response.status_code == 400
+    assert _payload(response)["error"] == "invalid_grant"
+
+
+@pytest.mark.asyncio
 async def test_oauth_metadata_and_registration_advertise_refresh_token(oauth_routes):
     metadata_response = await oauth_routes[("GET", "/.well-known/oauth-authorization-server")](
         JsonRequest()
@@ -98,6 +136,199 @@ async def test_oauth_metadata_and_registration_advertise_refresh_token(oauth_rou
 
     assert "refresh_token" in metadata["grant_types_supported"]
     assert "refresh_token" in registration["grant_types"]
+
+
+@pytest.mark.asyncio
+async def test_fixed_chat_client_coexists_with_dynamic_oauth(monkeypatch, tmp_path):
+    verifier = "v" * 43
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode()).digest()
+    ).rstrip(b"=").decode()
+
+    monkeypatch.setenv("OMBRE_DASHBOARD_PASSWORD", "dashboard-password")
+    routes = _fresh_oauth_routes(
+        monkeypatch,
+        tmp_path,
+        fixed_client={
+            "OMBRE_CHATGPT_OAUTH_CLIENT_ID": "fixed-client",
+            "OMBRE_CHATGPT_OAUTH_CLIENT_SECRET": "fixed-secret",
+            "OMBRE_CHATGPT_OAUTH_ACCESS_TOKEN": "fixed-access",
+            "OMBRE_CHATGPT_OAUTH_PUBLIC_BASE_URL": "https://ombre.example",
+            "OMBRE_CHATGPT_OAUTH_REDIRECT_URIS": (
+                "https://claude.ai/api/mcp/auth_callback"
+            ),
+        },
+    )
+
+    metadata_response = await routes[
+        ("GET", "/.well-known/oauth-authorization-server")
+    ](JsonRequest(method="GET"))
+    metadata = _payload(metadata_response)
+    authorize_response = await routes[("GET", "/oauth/authorize")](
+        JsonRequest(
+            method="GET",
+            query_params={
+                "client_id": "fixed-client",
+                "redirect_uri": "https://claude.ai/api/mcp/auth_callback",
+                "response_type": "code",
+                "state": "state-1",
+                "scope": "mcp",
+                "resource": "https://ombre.example/mcp",
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+            },
+        )
+    )
+    assert authorize_response.status_code == 200
+    authorize_response = await routes[("POST", "/oauth/authorize")](
+        JsonRequest(
+            {
+                "password": "dashboard-password",
+                "client_id": "fixed-client",
+                "redirect_uri": "https://claude.ai/api/mcp/auth_callback",
+                "state": "state-1",
+                "scope": "mcp",
+                "resource": "https://ombre.example/mcp",
+                "code_challenge": challenge,
+            },
+            method="POST",
+        )
+    )
+    assert authorize_response.status_code == 302, authorize_response.body.decode()
+    code = urllib.parse.parse_qs(
+        urllib.parse.urlsplit(authorize_response.headers["location"]).query
+    )["code"][0]
+    missing_credentials_response = await routes[("POST", "/oauth/token")](
+        JsonRequest(
+            {
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": "https://claude.ai/api/mcp/auth_callback",
+                "resource": "https://ombre.example/mcp",
+                "code_verifier": verifier,
+            }
+        )
+    )
+    rejected_token_response = await routes[("POST", "/oauth/token")](
+        JsonRequest(
+            {
+                "grant_type": "authorization_code",
+                "code": code,
+                "client_id": "fixed-client",
+                "client_secret": "wrong-secret",
+                "redirect_uri": "https://claude.ai/api/mcp/auth_callback",
+                "resource": "https://ombre.example/mcp",
+                "code_verifier": verifier,
+            }
+        )
+    )
+    token_response = await routes[("POST", "/oauth/token")](
+        JsonRequest(
+            {
+                "grant_type": "authorization_code",
+                "code": code,
+                "client_id": "fixed-client",
+                "client_secret": "fixed-secret",
+                "redirect_uri": "https://claude.ai/api/mcp/auth_callback",
+                "resource": "https://ombre.example/mcp",
+                "code_verifier": verifier,
+            }
+        )
+    )
+
+    token_payload = _payload(token_response)
+    missing_refresh_credentials_response = await routes[("POST", "/oauth/token")](
+        JsonRequest(
+            {
+                "grant_type": "refresh_token",
+                "refresh_token": token_payload["refresh_token"],
+                "resource": "https://ombre.example/mcp",
+            }
+        )
+    )
+    refresh_response = await routes[("POST", "/oauth/token")](
+        JsonRequest(
+            {
+                "grant_type": "refresh_token",
+                "refresh_token": token_payload["refresh_token"],
+                "client_secret": "fixed-secret",
+                "resource": "https://ombre.example/mcp",
+            }
+        )
+    )
+
+    assert metadata["token_endpoint_auth_methods_supported"] == [
+        "none",
+        "client_secret_post",
+        "client_secret_basic",
+    ]
+    assert authorize_response.status_code == 302
+    assert missing_credentials_response.status_code == 401
+    assert rejected_token_response.status_code == 401
+    assert missing_refresh_credentials_response.status_code == 401
+    assert refresh_response.status_code == 200
+    assert "state=state-1" in authorize_response.headers["location"]
+    assert token_payload["access_token"] != "fixed-access"
+    assert oauth_mod._is_valid_mcp_token(
+        token_payload["access_token"],
+        resource="https://ombre.example/mcp",
+    ) is True
+    assert oauth_mod._is_valid_mcp_token("fixed-access") is True
+    assert oauth_mod._is_valid_mcp_token(
+        "fixed-access", resource="https://other.example/mcp"
+    ) is False
+
+    routes_without_fixed = _fresh_oauth_routes(monkeypatch, tmp_path)
+    stale_client_response = await routes_without_fixed[("GET", "/oauth/authorize")](
+        JsonRequest(
+            method="GET",
+            query_params={
+                "client_id": "fixed-client",
+                "redirect_uri": "https://claude.ai/api/mcp/auth_callback",
+                "response_type": "code",
+                "scope": "mcp",
+                "resource": "https://ombre.example/mcp",
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+            },
+        )
+    )
+    assert stale_client_response.status_code == 400
+    assert "fixed-client" not in oauth_mod._oauth_clients
+
+
+@pytest.mark.asyncio
+async def test_fixed_chat_client_still_requires_pkce(monkeypatch, tmp_path):
+    monkeypatch.setenv("OMBRE_DASHBOARD_PASSWORD", "dashboard-password")
+    routes = _fresh_oauth_routes(
+        monkeypatch,
+        tmp_path,
+        fixed_client={
+            "OMBRE_CHATGPT_OAUTH_CLIENT_ID": "fixed-client",
+            "OMBRE_CHATGPT_OAUTH_ACCESS_TOKEN": "fixed-access",
+            "OMBRE_CHATGPT_OAUTH_REDIRECT_URIS": (
+                "https://claude.ai/api/mcp/auth_callback"
+            ),
+        },
+    )
+
+    response = await routes[("GET", "/oauth/authorize")](
+        JsonRequest(
+            method="GET",
+            query_params={
+                "client_id": "fixed-client",
+                "redirect_uri": "https://claude.ai/api/mcp/auth_callback",
+                "response_type": "code",
+                "scope": "mcp",
+                "resource": "https://ombre.example/mcp",
+            },
+        )
+    )
+
+    assert response.status_code == 400
+    assert oauth_mod._is_valid_mcp_token(
+        "fixed-access", resource="https://ombre.example/mcp"
+    ) is False
 
 
 @pytest.mark.asyncio
@@ -695,7 +926,7 @@ def test_oauth_registration_limiter_is_atomic_across_threads(monkeypatch):
     oauth_mod._oauth_registration_global_attempts.clear()
     monkeypatch.setattr(oauth_mod, "_OAUTH_REGISTRATION_SOURCE_MAX", 3)
     monkeypatch.setattr(oauth_mod, "_OAUTH_REGISTRATION_GLOBAL_MAX", 3)
-    request = JsonRequest(client_host="198.51.100.61")
+    request = cast(Request, JsonRequest(client_host="198.51.100.61"))
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
         results = list(
@@ -718,7 +949,7 @@ def test_oauth_registration_source_tracking_is_bounded(monkeypatch):
 
     for index in range(1, 4):
         assert oauth_mod._reserve_oauth_registration(
-            JsonRequest(client_host=f"198.51.100.{index}")
+            cast(Request, JsonRequest(client_host=f"198.51.100.{index}"))
         ) == 0
 
     assert len(oauth_mod._oauth_registration_source_attempts) == 2
@@ -1004,8 +1235,8 @@ def test_oauth_forwarded_host_is_only_used_from_trusted_proxy(monkeypatch):
         "x-forwarded-proto": "http",
     }
 
-    direct = JsonRequest(headers=headers, client_host="198.51.100.4")
-    proxied = JsonRequest(headers=headers, client_host="127.0.0.1")
+    direct = cast(Request, JsonRequest(headers=headers, client_host="198.51.100.4"))
+    proxied = cast(Request, JsonRequest(headers=headers, client_host="127.0.0.1"))
 
     assert oauth_mod._public_base_url(direct) == "https://ombre.example"
     assert oauth_mod._public_base_url(proxied) == "http://evil.example"

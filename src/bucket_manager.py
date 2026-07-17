@@ -39,7 +39,7 @@ import time
 import tempfile
 import uuid
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from contextlib import asynccontextmanager
 from datetime import date, datetime
 from functools import wraps
@@ -305,6 +305,7 @@ import jieba
 from utils import (
     atomic_write_text,
     bucket_content_for_recall,
+    bucket_text_for_embedding,
     generate_bucket_id,
     sanitize_name,
     safe_path,
@@ -725,7 +726,7 @@ class BucketManager:
                     yield root, fname, os.path.join(root, fname)
 
     @staticmethod
-    def _primary_domain(domain: list[str] | str | None) -> str:
+    def _primary_domain(domain: Sequence[str] | str | None) -> str:
         """取 domain[0] 作为主域子目录名，空/缺失 → 默认 ``未分类``。
 
         在 create / _move_bucket / archive 三处使用。sanitize_name 后才能当路径用。
@@ -882,7 +883,7 @@ class BucketManager:
         except Exception as exc:
             logger.warning(f"meaning embedding failed for {bucket_id}: {exc}")
 
-    async def _index_after_write(self, bucket_id: str, content: str) -> None:
+    async def _index_after_write(self, bucket_id: str, content: str) -> bool:
         """Queue derived indexing after Markdown is safely on disk.
 
         The server runtime starts a durable outbox worker, so this returns
@@ -901,7 +902,7 @@ class BucketManager:
                     exc,
                 )
             if queued and getattr(outbox, "running", False):
-                return
+                return True
 
         try:
             indexed = await self._sync_embedding(bucket_id, content)
@@ -923,6 +924,17 @@ class BucketManager:
                 "Memory saved without vector; pending retry / 记忆已落盘，向量待重试: %s",
                 bucket_id,
             )
+        return bool(indexed or queued)
+
+    async def ensure_embedding_index(self, bucket_id: str) -> bool:
+        """Ensure a bucket has either a vector or a durable pending job."""
+        bucket = await self.get(bucket_id)
+        if not bucket:
+            return False
+        return await self._index_after_write(
+            bucket_id,
+            bucket_text_for_embedding(bucket),
+        )
 
     def _invalidate_bm25(self) -> None:
         """写操作后调用：标记 BM25 需重建 + 清活跃桶缓存（集合已变，缓存作废）。
@@ -1564,7 +1576,12 @@ class BucketManager:
     # Move bucket between directories
     # 在目录间移动桶文件
     # ---------------------------------------------------------
-    def _move_bucket(self, file_path: str, target_type_dir: str, domain: Optional[list[str]] = None) -> str:
+    def _move_bucket(
+        self,
+        file_path: str,
+        target_type_dir: str,
+        domain: Sequence[str] | str | None = None,
+    ) -> str:
         """
         Move a bucket file to a new type directory, preserving domain subfolder.
         Returns new file path.
@@ -1583,7 +1600,7 @@ class BucketManager:
         self,
         file_path: str,
         bucket_type: str,
-        domain: Optional[list[str]] = None,
+        domain: Sequence[str] | str | None = None,
         status: str = "",
     ) -> str:
         """Return the canonical storage path for an editable bucket type.
@@ -3512,7 +3529,13 @@ class BucketManager:
         all_b = await self.list_all(include_archive=False)
         return sum(1 for b in all_b if b.get("metadata", {}).get("anchor"))
 
-    async def set_anchor(self, bucket_id: str, value: bool) -> dict:
+    async def set_anchor(
+        self,
+        bucket_id: str,
+        value: bool,
+        *,
+        limit: int | None = None,
+    ) -> dict:
         """
         Toggle the anchor flag on a bucket. Hard-rejects if cap reached.
         切换桶的 anchor 标记。设为 True 且当前已满 24 时拒绝。
@@ -3522,13 +3545,34 @@ class BucketManager:
         # anchor 上限 24 是「先数后写」的两步操作；没有这把锁，两个并发
         # set_anchor(True) 都能在对方提交前读到同一个 count<limit，一起通过
         # 检查后各自 update()，把总数冲破硬上限。
+        hard_limit = max(1, int(self.ANCHOR_LIMIT))
+        try:
+            effective_limit = hard_limit if limit is None else max(1, int(limit))
+        except (TypeError, ValueError, OverflowError):
+            effective_limit = hard_limit
+        effective_limit = min(hard_limit, effective_limit)
         async with _filesystem_turn(str(self.base_dir), "quota-anchor"):
-            return await self._set_anchor_locked(bucket_id, value)
+            return await self._set_anchor_locked(
+                bucket_id,
+                value,
+                limit=effective_limit,
+            )
 
-    async def _set_anchor_locked(self, bucket_id: str, value: bool) -> dict:
+    async def _set_anchor_locked(
+        self,
+        bucket_id: str,
+        value: bool,
+        *,
+        limit: int,
+    ) -> dict:
         bucket = await self.get(bucket_id)
         if not bucket:
-            return {"ok": False, "error": "bucket not found", "count": 0, "limit": self.ANCHOR_LIMIT}
+            return {
+                "ok": False,
+                "error": "bucket not found",
+                "count": 0,
+                "limit": limit,
+            }
         current_value = parse_bool(
             bucket["metadata"].get("anchor", False), default=False
         )
@@ -3536,7 +3580,13 @@ class BucketManager:
         # Idempotent: same state → noop
         if current_value == target:
             count = await self.count_anchors()
-            return {"ok": True, "anchor": target, "count": count, "limit": self.ANCHOR_LIMIT, "noop": True}
+            return {
+                "ok": True,
+                "anchor": target,
+                "count": count,
+                "limit": limit,
+                "noop": True,
+            }
         if target is True:
             # pinned/protected 与 anchor 互斥：pinned=永远置顶浮现（核心准则），
             # anchor=刻意不浮现（坐标系），两者语义直接矛盾。允许并存会让一个
@@ -3547,15 +3597,15 @@ class BucketManager:
                     "ok": False,
                     "error": "这是 pinned 核心准则，不能同时设为 anchor（两者互斥）。要改成坐标系请先 trace(pinned=0)。",
                     "count": await self.count_anchors(),
-                    "limit": self.ANCHOR_LIMIT,
+                    "limit": limit,
                 }
             count = await self.count_anchors()
-            if count >= self.ANCHOR_LIMIT:
+            if count >= limit:
                 return {
                     "ok": False,
-                    "error": f"anchor 已达上限 {self.ANCHOR_LIMIT}。请先 release 一条再 anchor 新的。",
+                    "error": f"anchor 已达上限 {limit}。请先 release 一条再 anchor 新的。",
                     "count": count,
-                    "limit": self.ANCHOR_LIMIT,
+                    "limit": limit,
                 }
         # iter 2.0：钉为 anchor 时同步把 source_tool 改为 "anchor"，
         # 释放时恢复为原始来源（保存在 _pre_anchor_source_tool 里）。
@@ -3574,9 +3624,19 @@ class BucketManager:
             update_kwargs["_pre_anchor_source_tool"] = None  # 删除字段
         ok = await self.update(bucket_id, **update_kwargs)
         if not ok:
-            return {"ok": False, "error": "update failed", "count": 0, "limit": self.ANCHOR_LIMIT}
+            return {
+                "ok": False,
+                "error": "update failed",
+                "count": 0,
+                "limit": limit,
+            }
         new_count = await self.count_anchors()
-        return {"ok": True, "anchor": target, "count": new_count, "limit": self.ANCHOR_LIMIT}
+        return {
+            "ok": True,
+            "anchor": target,
+            "count": new_count,
+            "limit": limit,
+        }
 
     async def list_anchors(self) -> list[dict]:
         """Return all buckets with anchor=True, sorted by created ascending."""

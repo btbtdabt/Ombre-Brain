@@ -242,6 +242,10 @@ import:
   merge_require_domain_overlap: true
   merge_require_source_match: true
   merge_block_disjoint_dates: true
+  operit_tagging_enabled: true        # raw entries land first; model tagging runs afterward
+  operit_tagging_concurrency: 2       # fixed worker count; never fan out the whole backup
+  operit_tagging_max_attempts: 3      # total attempts per entry, including the first call
+  operit_tagging_retry_base_seconds: 1.0
 
 # --- Write path / 写入路径 ---
 # Semantic related-memory lookup is useful, but should not hold MCP responses

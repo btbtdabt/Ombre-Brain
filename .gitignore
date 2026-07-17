@@ -6,6 +6,10 @@ __pycache__/
 .DS_Store
 .coverage
 .coverage.*
+.pytest_cache/
+.pytest-*/
+# Some filesystem-hardening tests create an unreadable root temp directory.
+tmp????????/
 config.yaml.dir/
 .env
 cloudflare.env

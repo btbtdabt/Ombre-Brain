@@ -30,6 +30,7 @@ import html as _html_escape
 import ipaddress as _ipaddress
 import re as _re
 import threading as _threading
+from collections.abc import Mapping
 
 from starlette.requests import Request
 from starlette.responses import Response
@@ -87,6 +88,133 @@ _oauth_registration_global_attempts: _deque[float] = _deque()
 _oauth_registration_rate_lock = _threading.RLock()
 _oauth_client_state_lock = _threading.RLock()
 _oauth_grant_state_lock = _threading.RLock()
+
+_FIXED_OAUTH_REDIRECT_PREFIX = "https://chatgpt.com/connector/oauth/"
+_FIXED_OAUTH_DEFAULT_REDIRECT_URI = "https://claude.ai/api/mcp/auth_callback"
+_fixed_oauth_client: dict[str, object] = {}
+
+
+def _split_csv(value: str) -> tuple[str, ...]:
+    return tuple(item.strip() for item in str(value or "").split(",") if item.strip())
+
+
+def _positive_int(value: object, default: int) -> int:
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def fixed_oauth_client_from_env() -> dict[str, object]:
+    redirect_env = os.environ.get("OMBRE_CHATGPT_OAUTH_REDIRECT_URIS")
+    redirect_uris = _split_csv(
+        _FIXED_OAUTH_DEFAULT_REDIRECT_URI if redirect_env is None else redirect_env
+    )
+    return {
+        "client_id": os.environ.get("OMBRE_CHATGPT_OAUTH_CLIENT_ID", "").strip(),
+        "client_secret": os.environ.get(
+            "OMBRE_CHATGPT_OAUTH_CLIENT_SECRET", ""
+        ).strip(),
+        "access_token": os.environ.get(
+            "OMBRE_CHATGPT_OAUTH_ACCESS_TOKEN", ""
+        ).strip(),
+        "public_base_url": os.environ.get(
+            "OMBRE_CHATGPT_OAUTH_PUBLIC_BASE_URL", ""
+        ).strip().rstrip("/"),
+        "redirect_prefix": os.environ.get(
+            "OMBRE_CHATGPT_OAUTH_REDIRECT_PREFIX",
+            _FIXED_OAUTH_REDIRECT_PREFIX,
+        ).strip(),
+        "redirect_uris": redirect_uris,
+        "token_ttl_seconds": _positive_int(
+            os.environ.get("OMBRE_CHATGPT_OAUTH_TOKEN_TTL_SECONDS"),
+            _MCP_TOKEN_TTL,
+        ),
+    }
+
+
+def _fixed_oauth_enabled(client: dict[str, object] | None = None) -> bool:
+    data = _fixed_oauth_client if client is None else client
+    return bool(str(data.get("client_id") or "") and str(data.get("access_token") or ""))
+
+
+def _fixed_oauth_token_methods(client: dict[str, object]) -> list[str]:
+    if str(client.get("client_secret") or ""):
+        return ["client_secret_post", "client_secret_basic"]
+    return []
+
+
+def _replace_fixed_oauth_client(client: dict[str, object]) -> None:
+    with _oauth_grant_state_lock:
+        _fixed_oauth_client.clear()
+        _fixed_oauth_client.update(client)
+
+
+def _fixed_client_matches(client_id: object, client: dict[str, object]) -> bool:
+    expected = str(client.get("client_id") or "")
+    supplied = str(client_id or "")
+    return bool(expected and supplied) and _hmac.compare_digest(supplied, expected)
+
+
+def _fixed_secret_matches(client_secret: object, client: dict[str, object]) -> bool:
+    expected = str(client.get("client_secret") or "")
+    if not expected:
+        return True
+    supplied = str(client_secret or "")
+    return bool(supplied) and _hmac.compare_digest(supplied, expected)
+
+
+def _fixed_redirect_matches(redirect_uri: object, client: dict[str, object]) -> bool:
+    supplied = str(redirect_uri or "")
+    if not supplied or not _valid_redirect_uri(supplied):
+        return False
+    prefix = str(client.get("redirect_prefix") or "")
+    redirects = client.get("redirect_uris")
+    allowed = redirects if isinstance(redirects, tuple) else ()
+    if supplied in allowed:
+        return True
+    if not prefix:
+        return False
+    try:
+        candidate = _urlparse.urlsplit(supplied)
+        expected = _urlparse.urlsplit(prefix)
+    except ValueError:
+        return False
+    if (
+        expected.scheme not in {"http", "https"}
+        or not expected.hostname
+        or expected.username
+        or expected.password
+        or expected.query
+        or expected.fragment
+    ):
+        return False
+    expected_path = expected.path.rstrip("/")
+    path_matches = candidate.path == expected_path or candidate.path.startswith(
+        expected_path + "/"
+    )
+    return bool(
+        candidate.scheme.lower() == expected.scheme.lower()
+        and candidate.hostname
+        and candidate.hostname.lower() == expected.hostname.lower()
+        and candidate.port == expected.port
+        and path_matches
+    )
+
+
+def _fixed_basic_credentials(authorization: str) -> tuple[str, str]:
+    parts = str(authorization or "").strip().split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "basic":
+        return "", ""
+    try:
+        decoded = _base64.b64decode(parts[1]).decode("utf-8")
+        if ":" not in decoded:
+            return "", ""
+        client_id, client_secret = decoded.split(":", 1)
+        return client_id, client_secret
+    except (ValueError, UnicodeDecodeError):
+        return "", ""
 
 
 class OAuthPersistenceError(RuntimeError):
@@ -149,6 +277,52 @@ def _public_base_url(
     return normalize_public_origin(
         f"{request.url.scheme}://{request.url.netloc}"
     )
+
+
+def authorization_server_metadata(
+    request: Request,
+    config: Mapping[str, object],
+    *,
+    fixed_client: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Build canonical discovery metadata for dynamic and fixed OAuth clients."""
+    client = fixed_oauth_client_from_env() if fixed_client is None else fixed_client
+    configured_origin = str(client.get("public_base_url") or "") or configured_public_origin(
+        config
+    )
+    base = _public_base_url(request, configured_origin)
+    methods = ["none", *_fixed_oauth_token_methods(client)]
+    return {
+        "issuer": base,
+        "authorization_endpoint": f"{base}/oauth/authorize",
+        "token_endpoint": f"{base}/oauth/token",
+        "registration_endpoint": f"{base}/oauth/register",
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code", "refresh_token"],
+        "code_challenge_methods_supported": ["S256"],
+        "token_endpoint_auth_methods_supported": methods,
+        "scopes_supported": [_MCP_SCOPE],
+    }
+
+
+def protected_resource_metadata(
+    request: Request,
+    config: Mapping[str, object],
+    *,
+    fixed_client: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Build discovery metadata for the one canonical MCP resource."""
+    client = fixed_oauth_client_from_env() if fixed_client is None else fixed_client
+    configured_origin = str(client.get("public_base_url") or "") or configured_public_origin(
+        config
+    )
+    base = _public_base_url(request, configured_origin)
+    return {
+        "resource": f"{base}/mcp",
+        "authorization_servers": [base],
+        "bearer_methods_supported": ["header"],
+        "scopes_supported": [_MCP_SCOPE],
+    }
 
 
 def _reserve_oauth_registration(request: Request) -> int:
@@ -260,6 +434,8 @@ def _evict_oldest_pending_client_locked(
 
 def _activate_oauth_client(client_id: str) -> bool:
     """Extend a DCR client only after the user successfully authorizes it."""
+    if _fixed_client_matches(client_id, _fixed_oauth_client):
+        return True
     with _oauth_client_state_lock:
         data = _oauth_clients.get(client_id)
         if not isinstance(data, dict):
@@ -745,16 +921,28 @@ def _is_valid_mcp_token(token: str, resource: str = "") -> bool:
     with sh._credential_state_guard():
         with _oauth_grant_state_lock:
             expiry = _mcp_tokens.get(token)
-            if expiry is None:
-                return False
-            if _time_mod.time() > expiry:
+            if expiry is not None and _time_mod.time() > expiry:
                 del _mcp_tokens[token]
                 _mcp_token_resources.pop(token, None)
+                expiry = None
+            if expiry is not None:
+                bound_resource = _mcp_token_resources.get(token, "")
+                if resource and bound_resource:
+                    return _normalize_resource(resource) == _normalize_resource(
+                        bound_resource
+                    )
+                return True
+            fixed_access_token = str(_fixed_oauth_client.get("access_token") or "")
+            if not fixed_access_token or not _hmac.compare_digest(
+                token, fixed_access_token
+            ):
                 return False
-            bound_resource = _mcp_token_resources.get(token, "")
-            if resource and bound_resource:
+            fixed_resource = str(_fixed_oauth_client.get("resource") or "")
+            if not fixed_resource:
+                return False
+            if resource:
                 return _normalize_resource(resource) == _normalize_resource(
-                    bound_resource
+                    fixed_resource
                 )
             return True
 
@@ -826,6 +1014,10 @@ def _validate_authorize_redirect(client_id: str, redirect_uri: str) -> tuple[boo
         return False, "missing client_id"
     if not redirect_uri:
         return False, "missing redirect_uri"
+    if _fixed_client_matches(client_id, _fixed_oauth_client):
+        if _fixed_redirect_matches(redirect_uri, _fixed_oauth_client):
+            return True, ""
+        return False, "redirect_uri mismatch"
     with _oauth_client_state_lock:
         client_info = _oauth_clients.get(client_id)
         if isinstance(client_info, dict):
@@ -846,9 +1038,14 @@ def _oauth_authorize_html(client_id: str, redirect_uri: str, state: str,
     except ImportError:  # pragma: no cover
         from ..utils import get_ai_name  # type: ignore
     ai_name = e(get_ai_name())
-    with _oauth_client_state_lock:
-        stored_client = _oauth_clients.get(client_id, {})
-        client_info = dict(stored_client) if isinstance(stored_client, dict) else {}
+    if _fixed_client_matches(client_id, _fixed_oauth_client):
+        client_info = {"client_name": "Configured MCP Client"}
+    else:
+        with _oauth_client_state_lock:
+            stored_client = _oauth_clients.get(client_id, {})
+            client_info = (
+                dict(stored_client) if isinstance(stored_client, dict) else {}
+            )
     client_name = e(str(client_info.get("client_name") or "MCP Client"))
     callback = e(redirect_uri[:240])
     err_html = f'<p style="color:#ff6b6b;font-size:13px;margin-top:12px;">{e(error)}</p>' if error else ""
@@ -898,6 +1095,16 @@ def register(mcp) -> None:
     # Saving a new public URL therefore cannot split token issuance from token
     # validation in the interval before the documented process restart.
     oauth_public_origin = configured_public_origin(sh.config)
+    fixed_client = fixed_oauth_client_from_env()
+    fixed_public_origin = str(fixed_client.get("public_base_url") or "") or str(
+        oauth_public_origin or ""
+    )
+    if fixed_public_origin:
+        fixed_client["public_base_url"] = fixed_public_origin
+        fixed_client["resource"] = _normalize_resource(
+            f"{fixed_public_origin.rstrip('/')}/mcp"
+        )
+    _replace_fixed_oauth_client(fixed_client)
     if oauth_required:
         _load_mcp_tokens()   # Docker 重启后恢复 token，不强制重新 OAuth
         _load_oauth_clients()
@@ -909,7 +1116,6 @@ def register(mcp) -> None:
         if not oauth_required:
             return _oauth_not_found()
 
-        base = _public_base_url(request, oauth_public_origin)
         # Ombre exposes one MCP endpoint. Do not let retired or invented paths
         # complete OAuth discovery and appear connected before failing at use.
         sub = str(request.path_params.get("resource_path", "") or "").strip("/")
@@ -918,13 +1124,14 @@ def register(mcp) -> None:
         # The root discovery URL still describes the only real MCP resource;
         # it must never advertise the web origin itself as a protected MCP
         # endpoint.  Path-scoped discovery accepts /mcp only (checked above).
-        resource = f"{base}/mcp"
-        return JSONResponse({
-            "resource": resource,
-            "authorization_servers": [base],
-            "bearer_methods_supported": ["header"],
-            "scopes_supported": [_MCP_SCOPE],
-        }, headers={"Cache-Control": "no-store"})
+        return JSONResponse(
+            protected_resource_metadata(
+                request,
+                sh.config,
+                fixed_client=fixed_client,
+            ),
+            headers={"Cache-Control": "no-store"},
+        )
 
     @mcp.custom_route("/.well-known/oauth-authorization-server", methods=["GET"])
     async def oauth_authorization_server(request: Request) -> Response:
@@ -932,18 +1139,14 @@ def register(mcp) -> None:
         if not oauth_required:
             return _oauth_not_found()
 
-        base = _public_base_url(request, oauth_public_origin)
-        return JSONResponse({
-            "issuer": base,
-            "authorization_endpoint": f"{base}/oauth/authorize",
-            "token_endpoint": f"{base}/oauth/token",
-            "registration_endpoint": f"{base}/oauth/register",
-            "response_types_supported": ["code"],
-            "grant_types_supported": ["authorization_code", "refresh_token"],
-            "code_challenge_methods_supported": ["S256"],
-            "token_endpoint_auth_methods_supported": ["none"],
-            "scopes_supported": ["mcp"],
-        })
+        return JSONResponse(
+            authorization_server_metadata(
+                request,
+                sh.config,
+                fixed_client=fixed_client,
+            ),
+            headers={"Cache-Control": "no-store"},
+        )
 
     @mcp.custom_route("/oauth/register", methods=["POST"])
     async def oauth_register(request: Request) -> Response:
@@ -1220,6 +1423,12 @@ def register(mcp) -> None:
             return JSONResponse({"error": "invalid_request"}, status_code=400)
         if not isinstance(body, dict):
             return JSONResponse({"error": "invalid_request"}, status_code=400)
+        body = dict(body)
+        basic_client_id, basic_client_secret = _fixed_basic_credentials(
+            request.headers.get("authorization", "")
+        )
+        if basic_client_id:
+            body["client_id"] = basic_client_id
         _cleanup_oauth_state()
 
         grant_type = body.get("grant_type")
@@ -1249,6 +1458,12 @@ def register(mcp) -> None:
             stored_client_id = str(refresh_data.get("client_id", ""))
             if client_id and stored_client_id and client_id != stored_client_id:
                 return JSONResponse({"error": "invalid_grant", "error_description": "client_id mismatch"}, status_code=400)
+            if _fixed_client_matches(stored_client_id, fixed_client):
+                supplied_secret = basic_client_secret or str(
+                    body.get("client_secret") or ""
+                )
+                if not _fixed_secret_matches(supplied_secret, fixed_client):
+                    return JSONResponse({"error": "invalid_client"}, status_code=401)
             stored_resource = str(refresh_data.get("resource", ""))
             requested_resource = str(body.get("resource", ""))
             resource_ok, canonical_resource = _mcp_resource(
@@ -1316,8 +1531,15 @@ def register(mcp) -> None:
             return JSONResponse({"error": "invalid_grant", "error_description": "code expired"}, status_code=400)
 
         client_id = str(body.get("client_id", ""))
-        if client_id and client_id != str(code_data.get("client_id", "")):
+        stored_client_id = str(code_data.get("client_id", ""))
+        if client_id and client_id != stored_client_id:
             return JSONResponse({"error": "invalid_grant", "error_description": "client_id mismatch"}, status_code=400)
+        if _fixed_client_matches(stored_client_id, fixed_client):
+            supplied_secret = basic_client_secret or str(
+                body.get("client_secret") or ""
+            )
+            if not _fixed_secret_matches(supplied_secret, fixed_client):
+                return JSONResponse({"error": "invalid_client"}, status_code=401)
         redirect_uri = str(body.get("redirect_uri", ""))
         if redirect_uri and redirect_uri != str(code_data.get("redirect_uri", "")):
             return JSONResponse({"error": "invalid_grant", "error_description": "redirect_uri mismatch"}, status_code=400)

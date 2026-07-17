@@ -2028,8 +2028,8 @@
 
 <div class="content" id="import-view" style="display:none">
   <div style="max-width:720px;margin:0 auto;">
-    <h3>历史对话导入 <span class="en">Import Conversations</span></h3>
-    <p style="color:var(--text-dim);font-size:13px;">支持 Claude JSON、ChatGPT 导出、DeepSeek、Markdown、纯文本格式</p>
+    <h3>历史对话 / Operit 导入 <span class="en">Memory Import</span></h3>
+    <p style="color:var(--text-dim);font-size:13px;">支持 Claude JSON、ChatGPT 导出、DeepSeek、Markdown、纯文本与 Operit 备份</p>
 
     <div id="import-upload-zone" style="border:2px dashed var(--border);border-radius:16px;padding:40px;text-align:center;cursor:pointer;margin:20px 0;transition:border-color .2s;">
       <div style="font-size:32px;margin-bottom:8px;color:var(--text-dim);"><i data-lucide="folder-up" style="width:32px;height:32px;"></i></div>
@@ -2037,13 +2037,29 @@
       <input type="file" id="import-file-input" accept=".json,.txt,.md,.jsonl" style="display:none" />
     </div>
 
-    <div style="margin:12px 0;">
+    <div style="display:grid;grid-template-columns:minmax(150px,220px) 1fr;gap:10px 16px;align-items:center;margin:12px 0;">
+      <label for="import-mode" style="font-size:12px;color:var(--text-dim);">导入模式 <span class="en">Mode</span></label>
+      <select id="import-mode" onchange="refreshImportPreflight()" style="width:100%;max-width:320px;">
+        <option value="auto" selected>自动识别 Auto</option>
+        <option value="operit">Operit 备份</option>
+        <option value="conversation">对话记录 Conversation</option>
+      </select>
+    </div>
+
+    <div style="margin:12px 0;display:flex;gap:18px;flex-wrap:wrap;">
       <div class="hw-toggle-row" style="gap:10px;align-items:center;">
         <span class="hw-switch" id="import-preserve-raw-sw" role="switch" aria-checked="false"
-          onclick="syncHwSwitch(this,'import-preserve-raw')"></span>
+          onclick="syncHwSwitch(this,'import-preserve-raw');refreshImportPreflight()"></span>
         <span style="font-size:13px;color:var(--text);cursor:pointer;" onclick="document.getElementById('import-preserve-raw-sw').click()">保留原文模式 <span class="en">Keep Raw</span><span style="font-size:11px;color:var(--text-light);">（特殊情境/暗号/仪式性内容不摘要）</span></span>
         <input type="checkbox" id="import-preserve-raw" style="display:none"
           onchange="syncSwFromCb('import-preserve-raw','import-preserve-raw-sw','')">
+      </div>
+      <div class="hw-toggle-row" style="gap:10px;align-items:center;">
+        <span class="hw-switch" id="import-operit-tagging-sw" role="switch" aria-checked="true"
+          onclick="syncHwSwitch(this,'import-operit-tagging');refreshImportPreflight()"></span>
+        <span style="font-size:13px;color:var(--text);cursor:pointer;" onclick="document.getElementById('import-operit-tagging-sw').click()">Operit 模型打标 <span class="en">Auto Tag</span></span>
+        <input type="checkbox" id="import-operit-tagging" style="display:none" checked
+          onchange="syncSwFromCb('import-operit-tagging','import-operit-tagging-sw','')">
       </div>
     </div>
 
@@ -2069,11 +2085,26 @@
       <div class="progress-track">
         <div id="import-progress-bar" class="progress-fill"></div>
       </div>
-      <div style="display:flex;gap:16px;margin-top:8px;font-size:13px;color:var(--text-dim);">
+      <div id="import-tagging-progress" style="display:none;margin-top:12px;">
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:12px;color:var(--text-dim);">
+          <span>模型打标 <span class="en">Tagging</span></span>
+          <span id="import-tagging-progress-text">0/0</span>
+        </div>
+        <div class="progress-track" style="height:8px;">
+          <div id="import-tagging-progress-bar" class="progress-fill"></div>
+        </div>
+      </div>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:8px;font-size:13px;color:var(--text-dim);">
         <span>API调用 Calls: <b id="import-api-calls">0</b></span>
         <span>新建 New: <b id="import-created">0</b></span>
         <span>合并 Merged: <b id="import-merged">0</b></span>
+        <span>重复 Skipped: <b id="import-duplicate-skipped">0</b></span>
         <span>原文 Raw: <b id="import-raw">0</b></span>
+        <span>Embedding: <b id="import-embeddings-created">0</b></span>
+        <span>Embedding 失败: <b id="import-embeddings-failed">0</b></span>
+        <span>打标成功: <b id="import-tagging-succeeded">0</b></span>
+        <span>待打标: <b id="import-tagging-pending">0</b></span>
+        <span>打标失败: <b id="import-tagging-failed">0</b></span>
       </div>
       <div style="margin-top:12px;">
         <button id="import-pause-btn" onclick="pauseImport()" style="display:none;align-items:center;gap:4px;"><svg class="icon" aria-hidden="true"><use href="#i-pause"></use></svg> 暂停 Pause</button>
@@ -7707,6 +7738,8 @@ window.addEventListener('load', function() {
 const uploadZone = document.getElementById('import-upload-zone');
 const fileInput = document.getElementById('import-file-input');
 let pendingImportFile = null;
+let importPreflightRunning = false;
+let importPreflightQueued = false;
 
 uploadZone.addEventListener('click', () => fileInput.click());
 uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.style.borderColor = 'var(--accent)'; });
@@ -7717,6 +7750,19 @@ uploadZone.addEventListener('drop', e => {
   if (e.dataTransfer.files.length) runImportPreflight(e.dataTransfer.files[0]);
 });
 fileInput.addEventListener('change', () => { if (fileInput.files.length) runImportPreflight(fileInput.files[0]); });
+
+function selectedImportOptions() {
+  const mode = document.getElementById('import-mode');
+  const tagging = document.getElementById('import-operit-tagging');
+  return {
+    importMode: mode ? mode.value : 'auto',
+    operitTagging: tagging ? !!tagging.checked : true,
+  };
+}
+
+function refreshImportPreflight() {
+  if (pendingImportFile) runImportPreflight(pendingImportFile);
+}
 
 function renderImportPreflight(data) {
   const panel = document.getElementById('import-preflight-panel');
@@ -7738,12 +7784,13 @@ function renderImportPreflight(data) {
   }
   summary.style.color = data.can_start ? 'var(--text-dim)' : 'var(--warning)';
   summary.innerHTML =
-    '格式：<b>' + esc(data.detected_format || 'unknown') + '</b>'
+    '模式：<b>' + esc(data.import_mode || 'auto') + '</b>'
+    + ' · 格式：<b>' + esc(data.detected_format || 'unknown') + '</b>'
     + ' · 轮次：<b>' + (data.turns_count || 0) + '</b>'
     + ' · 分块：<b>' + (data.chunks_count || 0) + '</b>'
     + ' · 预计 API 调用：<b>' + (data.estimated_api_calls || 0) + '</b>'
     + ' · 大小：<b>' + Math.round((data.size_bytes || 0) / 1024) + ' KB</b>'
-    + (!data.llm_ready ? '<br><span style="color:var(--negative)">压缩/打标 LLM 未就绪，暂不能导入。</span>' : '')
+    + (data.llm_required && !data.llm_ready ? '<br><span style="color:var(--negative)">压缩/打标 LLM 未就绪，暂不能导入。</span>' : '')
     + (data.import_running ? '<br><span style="color:var(--negative)">已有导入任务运行中，请完成后再开始。</span>' : '');
   const warnings = data.warnings || [];
   if (warn) {
@@ -7759,25 +7806,45 @@ function renderImportPreflight(data) {
 
 async function runImportPreflight(file) {
   pendingImportFile = file;
-  const panel = document.getElementById('import-preflight-panel');
-  const summary = document.getElementById('import-preflight-summary');
-  const btn = document.getElementById('import-start-confirm-btn');
-  if (panel) panel.style.display = '';
-  if (summary) { summary.style.color = 'var(--text-dim)'; summary.textContent = '预检中… / Pre-checking…'; }
-  if (btn) btn.disabled = true;
-  const fd = new FormData();
-  fd.append('file', file);
+  importPreflightQueued = true;
+  if (importPreflightRunning) return;
+  importPreflightRunning = true;
   try {
-    const res = await fetch(BASE + '/api/import/preflight', { method: 'POST', body: fd });
-    const data = await res.json();
-    renderImportPreflight(data);
-  } catch (e) {
-    renderImportPreflight({ ok: false, error: e.message || String(e), filename: file.name });
+    while (importPreflightQueued && pendingImportFile) {
+      importPreflightQueued = false;
+      const currentFile = pendingImportFile;
+      const panel = document.getElementById('import-preflight-panel');
+      const summary = document.getElementById('import-preflight-summary');
+      const btn = document.getElementById('import-start-confirm-btn');
+      if (panel) panel.style.display = '';
+      if (summary) { summary.style.color = 'var(--text-dim)'; summary.textContent = '预检中… / Pre-checking…'; }
+      if (btn) btn.disabled = true;
+      const fd = new FormData();
+      fd.append('file', currentFile);
+      const options = selectedImportOptions();
+      const params = new URLSearchParams({
+        import_mode: options.importMode,
+        operit_tagging: options.operitTagging ? '1' : '0',
+      });
+      let data;
+      try {
+        const res = await fetch(BASE + '/api/import/preflight?' + params.toString(), { method: 'POST', body: fd });
+        data = await res.json();
+      } catch (e) {
+        data = { ok: false, error: e.message || String(e), filename: currentFile.name };
+      }
+      if (!importPreflightQueued && pendingImportFile === currentFile) {
+        renderImportPreflight(data);
+      }
+    }
+  } finally {
+    importPreflightRunning = false;
   }
 }
 
 function clearImportPreflight() {
   pendingImportFile = null;
+  importPreflightQueued = false;
   if (fileInput) fileInput.value = '';
   const panel = document.getElementById('import-preflight-panel');
   if (panel) panel.style.display = 'none';
@@ -7794,10 +7861,17 @@ async function confirmStartImport() {
 
 async function startImport(file) {
   const preserveRaw = document.getElementById('import-preserve-raw').checked;
+  const options = selectedImportOptions();
   const fd = new FormData();
   fd.append('file', file);
+  const params = new URLSearchParams({
+    preserve_raw: preserveRaw ? '1' : '0',
+    resume: '1',
+    import_mode: options.importMode,
+    operit_tagging: options.operitTagging ? '1' : '0',
+  });
   try {
-    const res = await fetch(BASE + '/api/import/upload?preserve_raw=' + (preserveRaw ? '1' : '0'), { method: 'POST', body: fd });
+    const res = await fetch(BASE + '/api/import/upload?' + params.toString(), { method: 'POST', body: fd });
     const data = await res.json();
     if (data.error) { alert('导入失败: ' + data.error); return; }
     clearImportPreflight();
@@ -7837,9 +7911,30 @@ function updateImportUI(s) {
   document.getElementById('import-api-calls').textContent = s.api_calls;
   document.getElementById('import-created').textContent = s.memories_created;
   document.getElementById('import-merged').textContent = s.memories_merged;
+  document.getElementById('import-duplicate-skipped').textContent = s.memories_duplicate_skipped || 0;
   document.getElementById('import-raw').textContent = s.memories_raw;
+  document.getElementById('import-embeddings-created').textContent = s.embeddings_created || 0;
+  document.getElementById('import-embeddings-failed').textContent = s.embeddings_failed || 0;
+  document.getElementById('import-tagging-succeeded').textContent = s.tagging_succeeded || 0;
+  document.getElementById('import-tagging-pending').textContent = s.tagging_pending || 0;
+  document.getElementById('import-tagging-failed').textContent = s.tagging_failed || 0;
+  const taggingProgress = document.getElementById('import-tagging-progress');
+  const showTagging = s.import_format === 'operit' && !!s.operit_tagging_enabled;
+  taggingProgress.style.display = showTagging ? '' : 'none';
+  const taggingPct = s.tagging_total ? Math.round((s.tagging_processed || 0) / s.tagging_total * 100) : 0;
+  document.getElementById('import-tagging-progress-bar').style.width = taggingPct + '%';
+  document.getElementById('import-tagging-progress-text').textContent = (s.tagging_processed || 0) + '/' + (s.tagging_total || 0);
   const statusMap = { running: _SV.clock+' 导入中…', paused: _SV.pause+' 已暂停', completed: _SV.ok+' 完成', error: _SV.err+' 出错' };
-  document.getElementById('import-status-text').innerHTML = statusMap[s.status] || esc(s.status);
+  const operitPhaseMap = {
+    raw: _SV.clock+' Operit 原文落盘中…',
+    embedding: _SV.clock+' Embedding 排队中…',
+    tagging: _SV.clock+' Operit 模型打标中…',
+  };
+  document.getElementById('import-status-text').innerHTML = (
+    s.status === 'running' && s.import_format === 'operit'
+      ? (operitPhaseMap[s.operit_phase] || statusMap[s.status])
+      : (statusMap[s.status] || esc(s.status))
+  );
   document.getElementById('import-pause-btn').style.display = s.status === 'running' ? '' : 'none';
   if (s.status !== 'running') clearInterval(importPollTimer);
   if (s.status === 'completed') loadImportResults();
