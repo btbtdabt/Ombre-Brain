@@ -205,6 +205,68 @@ def test_letter_read_falls_back_to_lexical_when_global_vector_hits_are_not_lette
     assert "silver lighthouse" in asyncio.run(letters.read(query="lighthouse"))
 
 
+def test_letter_explicit_ai_name_overrides_configured_identity(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    manager = BucketManager(config)
+    letters = LetterService(config, manager, EmbeddingEngine(config))
+
+    result = asyncio.run(
+        letters.write(author="ai", content="signed explicitly", ai_name="Nocturne")
+    )
+
+    assert "[Nocturne]" in result
+    stored = asyncio.run(manager.list_letters())
+    assert stored[0]["metadata"]["author"] == "Nocturne"
+
+
+def test_letter_rejects_empty_author(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    manager = BucketManager(config)
+    letters = LetterService(config, manager, EmbeddingEngine(config))
+
+    result = asyncio.run(letters.write(author="   ", content="unsigned"))
+
+    assert result == "author 不能为空。"
+    assert asyncio.run(manager.list_letters()) == []
+
+
+def test_letter_ai_filter_includes_legacy_claude_signature(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    manager = BucketManager(config)
+    letters = LetterService(config, manager, EmbeddingEngine(config))
+    asyncio.run(
+        manager.create(
+            content="legacy Claude letter",
+            bucket_type="letter",
+            domain=["letter"],
+            extra_metadata={"author": "claude", "source_tool": "letter"},
+        )
+    )
+    asyncio.run(letters.write(author="user", content="human letter"))
+
+    result = asyncio.run(letters.read(author="ai"))
+
+    assert "legacy Claude letter" in result
+    assert "human letter" not in result
+
+
+def test_letter_query_filters_lexically_when_embeddings_are_disabled(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    manager = BucketManager(config)
+    letters = LetterService(config, manager, EmbeddingEngine(config))
+    asyncio.run(letters.write(author="Amy", content="A letter about apples and orchards."))
+    asyncio.run(letters.write(author="Amy", content="A letter about trains and stations."))
+
+    missing = asyncio.run(letters.read(query="nonexistent zebra phrase"))
+    apples = asyncio.run(letters.read(query="orchards"))
+
+    assert "没有找到匹配的信件" in missing
+    assert "apples and orchards" in apples
+    assert "trains and stations" not in apples
+
+
 def test_pulse_counts_and_lists_isolated_letters(tmp_path: Path, monkeypatch) -> None:
     import server
 

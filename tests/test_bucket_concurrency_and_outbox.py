@@ -2,6 +2,7 @@ import asyncio
 import json
 import threading
 import time
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -125,6 +126,77 @@ def test_bucket_move_rolls_back_without_duplicate_when_rewrite_fails(tmp_path, m
     assert source_path.exists()
     assert list(Path(manager.archive_dir).rglob("*.md")) == []
     assert asyncio.run(manager.get(bucket_id))["content"] == "original"
+
+
+def test_concurrent_archive_and_update_leaves_at_most_one_copy(tmp_path, monkeypatch):
+    manager = BucketManager(_config(tmp_path))
+
+    async def scenario():
+        bucket_id = await manager.create(content="before concurrent mutation")
+        archive_entered = asyncio.Event()
+        release_archive = asyncio.Event()
+        archive_unlocked = getattr(BucketManager.archive, "__wrapped__")
+
+        async def gated_archive(requested_id):
+            async with manager._bucket_turn(requested_id):
+                archive_entered.set()
+                await release_archive.wait()
+                return await archive_unlocked(manager, requested_id)
+
+        monkeypatch.setattr(manager, "archive", gated_archive)
+        archive_task = asyncio.create_task(manager.archive(bucket_id))
+        await asyncio.wait_for(archive_entered.wait(), timeout=0.5)
+        update_task = asyncio.create_task(
+            manager.update(bucket_id, content="updated concurrently")
+        )
+        await asyncio.sleep(0)
+        release_archive.set()
+
+        archived, updated = await asyncio.gather(archive_task, update_task)
+        assert archived is True
+        assert updated is False
+
+        matches = [
+            bucket
+            for bucket in await manager.list_all(include_archive=True)
+            if bucket["id"] == bucket_id
+        ]
+        assert len(matches) == 1
+        assert matches[0]["content"] == "before concurrent mutation"
+        assert matches[0]["metadata"]["type"] == "archived"
+
+    asyncio.run(scenario())
+
+
+def test_concurrent_touch_and_delete_never_duplicates_bucket(tmp_path, monkeypatch):
+    manager = BucketManager(_config(tmp_path))
+
+    async def scenario():
+        bucket_id = await manager.create(content="before concurrent delete")
+        touch_entered = asyncio.Event()
+        release_touch = asyncio.Event()
+        original_touch_locked = manager._touch_locked
+
+        async def gated_touch_locked(requested_id):
+            touch_entered.set()
+            await release_touch.wait()
+            return await original_touch_locked(requested_id)
+
+        monkeypatch.setattr(manager, "_touch_locked", gated_touch_locked)
+        touch_task = asyncio.create_task(manager.touch(bucket_id, ripple=False))
+        await asyncio.wait_for(touch_entered.wait(), timeout=0.5)
+        delete_task = asyncio.create_task(manager.delete(bucket_id))
+        await asyncio.sleep(0)
+        release_touch.set()
+
+        touched, deleted = await asyncio.gather(touch_task, delete_task)
+        assert touched is None
+        assert deleted is True
+        assert await manager.get(bucket_id) is None
+        tombstone = Path(manager.tombstone_dir) / f"{bucket_id}.json"
+        assert json.loads(tombstone.read_text(encoding="utf-8"))["id"] == bucket_id
+
+    asyncio.run(scenario())
 
 
 class _Manager:
@@ -255,5 +327,148 @@ def test_embedding_outbox_background_processing_is_nonblocking(tmp_path):
         finally:
             engine.release.set()
             await outbox.stop()
+
+    asyncio.run(scenario())
+
+
+def test_embedding_outbox_reconcile_preserves_newer_pending_content(tmp_path):
+    config = _config(tmp_path)
+    manager = _Manager(content="stale vault snapshot")
+    engine = _Engine(manager)
+    outbox = EmbeddingOutbox(config, manager, engine)
+    stale_bucket = asyncio.run(manager.get(manager.bucket_id))
+    assert stale_bucket is not None
+    stale_text = bucket_text_for_embedding(stale_bucket)
+    engine.hashes[manager.bucket_id] = content_hash(stale_text)
+
+    manager.content = "newer content already queued"
+    newer_bucket = asyncio.run(manager.get(manager.bucket_id))
+    assert newer_bucket is not None
+    newer_text = bucket_text_for_embedding(newer_bucket)
+    outbox.enqueue(manager.bucket_id, newer_text)
+    manager.content = "stale vault snapshot"
+
+    assert asyncio.run(outbox.reconcile(include_archive=False)) == 0
+    assert outbox._items[manager.bucket_id]["content_hash"] == content_hash(newer_text)
+
+
+def test_embedding_outbox_reconcile_index_failure_avoids_reindex_storm(tmp_path):
+    config = _config(tmp_path)
+    manager = _Manager()
+
+    class BrokenIndexEngine(_Engine):
+        def list_content_ids(self):
+            raise RuntimeError("index unavailable")
+
+    outbox = EmbeddingOutbox(config, manager, BrokenIndexEngine(manager))
+
+    assert asyncio.run(outbox.reconcile()) == 0
+    assert outbox.status()["pending"] == 0
+
+
+def test_embedding_outbox_requeues_content_changed_during_indexing(tmp_path):
+    config = _config(tmp_path)
+    manager = _Manager()
+
+    class BlockingEngine(_Engine):
+        def __init__(self, manager):
+            super().__init__(manager)
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def generate_and_store(self, bucket_id, content):
+            self.calls.append((bucket_id, content))
+            if len(self.calls) == 1:
+                self.started.set()
+                await self.release.wait()
+            self.hashes[bucket_id] = content_hash(content)
+            return True
+
+    async def scenario():
+        engine = BlockingEngine(manager)
+        outbox = EmbeddingOutbox(config, manager, engine)
+        first_bucket = await manager.get(manager.bucket_id)
+        assert first_bucket is not None
+        first_text = bucket_text_for_embedding(first_bucket)
+        outbox.enqueue(manager.bucket_id, first_text)
+
+        first_pass = asyncio.create_task(outbox.process_once())
+        try:
+            await asyncio.wait_for(engine.started.wait(), timeout=0.5)
+            manager.content = "changed while indexing"
+            second_bucket = await manager.get(manager.bucket_id)
+            assert second_bucket is not None
+            second_text = bucket_text_for_embedding(second_bucket)
+            engine.release.set()
+            assert await first_pass is True
+
+            assert outbox.is_pending(manager.bucket_id) is True
+            assert await outbox.process_once() is True
+            assert outbox.is_pending(manager.bucket_id) is False
+            assert engine.calls == [
+                (manager.bucket_id, first_text),
+                (manager.bucket_id, second_text),
+            ]
+            assert engine.hashes[manager.bucket_id] == content_hash(second_text)
+        finally:
+            engine.release.set()
+            if not first_pass.done():
+                first_pass.cancel()
+            with suppress(asyncio.CancelledError):
+                await first_pass
+
+    asyncio.run(scenario())
+
+
+def test_embedding_outbox_failed_item_does_not_block_other_due_item(tmp_path):
+    config = _config(tmp_path)
+
+    class MultiManager:
+        def __init__(self):
+            self.contents = {"bad": "cannot embed", "good": "can embed"}
+
+        async def get(self, bucket_id):
+            content = self.contents.get(bucket_id)
+            if content is None:
+                return None
+            return {"id": bucket_id, "content": content, "metadata": {"name": bucket_id}}
+
+        async def list_all(self, include_archive=True):
+            return [await self.get(bucket_id) for bucket_id in self.contents]
+
+    class SelectiveEngine:
+        enabled = True
+
+        def __init__(self):
+            self.calls = []
+            self.hashes = {}
+
+        async def generate_and_store(self, bucket_id, content):
+            self.calls.append((bucket_id, content))
+            if bucket_id == "bad":
+                return False
+            self.hashes[bucket_id] = content_hash(content)
+            return True
+
+        def delete_embedding(self, bucket_id):
+            self.hashes.pop(bucket_id, None)
+
+    async def scenario():
+        manager = MultiManager()
+        engine = SelectiveEngine()
+        outbox = EmbeddingOutbox(config, manager, engine)
+        for bucket_id in ("bad", "good"):
+            bucket = await manager.get(bucket_id)
+            assert bucket is not None
+            outbox.enqueue(
+                bucket_id,
+                bucket_text_for_embedding(bucket),
+            )
+
+        assert await outbox.process_once() is True
+        assert outbox.is_pending("bad") is True
+        assert await outbox.process_once() is True
+        assert outbox.is_pending("good") is False
+        assert "good" in engine.hashes
 
     asyncio.run(scenario())
