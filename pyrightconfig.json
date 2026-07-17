@@ -1,0 +1,25 @@
+{
+  "include": [
+    "src",
+    "tools",
+    "tests",
+    "*.py"
+  ],
+  "exclude": [
+    ".venv",
+    "buckets",
+    "state"
+  ],
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.12",
+  "typeCheckingMode": "basic",
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "extraPaths": [
+        "src"
+      ]
+    }
+  ]
+}
