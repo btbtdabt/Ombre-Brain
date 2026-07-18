@@ -3407,7 +3407,7 @@
   <div style="max-width:720px;margin:0 auto;">
     <h3>历史对话 / Operit 记忆导入</h3>
     <p style="color:var(--text-dim);font-size:13px;">支持 Claude JSON、ChatGPT 导出、DeepSeek、Markdown、纯文本，以及 Operit 记忆备份 JSON</p>
-    <p style="color:var(--text-dim);font-size:12px;">Operit 备份会按条目保留 content 原文，不经过脱水；仅保留原标签、补 <code>operit_import</code> 来源标记与 embedding。</p>
+    <p style="color:var(--text-dim);font-size:12px;">Operit 备份会先按条目写入 content 原文与 embedding，再由限流队列逐条打标；模型不会改写正文。</p>
 
     <div class="config-section" style="margin:20px 0;">
       <h3>记忆库备份与恢复</h3>
@@ -3433,8 +3433,13 @@
       <input type="file" id="import-file-input" accept=".json,.txt,.md,.jsonl" style="display:none" />
     </div>
 
+    <div id="import-detection-status" style="display:none;margin:10px 0;padding:10px 12px;background:var(--surface);border-radius:8px;font-size:13px;"></div>
+
     <div style="margin:12px 0;">
       <label><input type="checkbox" id="import-preserve-raw" /> 保留原文模式（特殊情境/暗号/仪式性内容不摘要）</label>
+    </div>
+    <div style="margin:12px 0;">
+      <label><input type="checkbox" id="import-operit-tagging" checked /> Operit 原文全部落盘后自动逐条打标（并发 2，可续跑）</label>
     </div>
 
     <div id="import-progress" style="display:none;margin:20px 0;">
@@ -3445,6 +3450,15 @@
       <div style="background:var(--surface);border-radius:8px;height:12px;overflow:hidden;">
         <div id="import-progress-bar" style="height:100%;background:var(--accent);border-radius:8px;transition:width .3s;width:0%;"></div>
       </div>
+      <div id="import-tagging-progress" style="display:none;margin-top:12px;">
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:13px;">
+          <span>模型打标</span>
+          <span id="import-tagging-progress-text">0/0</span>
+        </div>
+        <div style="background:var(--surface);border-radius:8px;height:8px;overflow:hidden;">
+          <div id="import-tagging-progress-bar" style="height:100%;background:var(--positive);border-radius:8px;transition:width .3s;width:0%;"></div>
+        </div>
+      </div>
       <div style="display:flex;gap:16px;margin-top:8px;font-size:13px;color:var(--text-dim);">
         <span>API调用: <b id="import-api-calls">0</b></span>
         <span>新建: <b id="import-created">0</b></span>
@@ -3453,6 +3467,9 @@
         <span>原文: <b id="import-raw">0</b></span>
         <span>Embedding: <b id="import-embeddings-created">0</b></span>
         <span>Embedding失败: <b id="import-embeddings-failed">0</b></span>
+        <span>打标成功: <b id="import-tagging-succeeded">0</b></span>
+        <span>待打标: <b id="import-tagging-pending">0</b></span>
+        <span>打标失败: <b id="import-tagging-failed">0</b></span>
       </div>
       <div style="margin-top:12px;">
         <button id="import-pause-btn" onclick="pauseImport()" style="display:none;">⏸ 暂停</button>
@@ -8875,13 +8892,32 @@ fileInput.addEventListener('change', () => {
   startImport(selectedFile);
 });
 
+async function inspectOperitBackupFile(file) {
+  const status = document.getElementById('import-detection-status');
+  status.style.display = '';
+  status.textContent = '正在识别导入格式…';
+  try {
+    const parsed = JSON.parse(await file.text());
+    if (parsed && !Array.isArray(parsed) && Array.isArray(parsed.memories)) {
+      status.innerHTML = '✓ 已识别 Operit 备份：<strong>' + parsed.memories.length + '</strong> 条；将按 UUID 逐条保留原文。';
+      return { count: parsed.memories.length };
+    }
+  } catch (e) {}
+  status.textContent = '未识别为 Operit 备份，将使用普通对话导入。';
+  return null;
+}
+
 async function startImport(file) {
+  const operitInfo = await inspectOperitBackupFile(file);
   const preserveRaw = document.getElementById('import-preserve-raw').checked;
+  const operitTagging = document.getElementById('import-operit-tagging').checked;
   const fd = new FormData();
   fd.append('file', file);
   const params = new URLSearchParams({
     preserve_raw: preserveRaw ? '1' : '0',
     resume: '1',
+    import_mode: operitInfo ? 'operit' : 'auto',
+    operit_tagging: operitInfo && operitTagging ? '1' : '0',
   });
   try {
     const res = await authFetch(BASE + '/api/import/upload?' + params.toString(), { method: 'POST', body: fd });
@@ -8928,8 +8964,22 @@ function updateImportUI(s) {
   document.getElementById('import-raw').textContent = s.memories_raw;
   document.getElementById('import-embeddings-created').textContent = s.embeddings_created || 0;
   document.getElementById('import-embeddings-failed').textContent = s.embeddings_failed || 0;
+  document.getElementById('import-tagging-succeeded').textContent = s.tagging_succeeded || 0;
+  document.getElementById('import-tagging-pending').textContent = s.tagging_pending || 0;
+  document.getElementById('import-tagging-failed').textContent = s.tagging_failed || 0;
+  const taggingProgress = document.getElementById('import-tagging-progress');
+  const showTagging = s.import_format === 'operit' && s.operit_tagging_enabled;
+  taggingProgress.style.display = showTagging ? '' : 'none';
+  const taggingPct = s.tagging_total ? Math.round((s.tagging_processed || 0) / s.tagging_total * 100) : 0;
+  document.getElementById('import-tagging-progress-bar').style.width = taggingPct + '%';
+  document.getElementById('import-tagging-progress-text').textContent = (s.tagging_processed || 0) + '/' + (s.tagging_total || 0);
   const statusMap = { running: '⏳ 导入中…', paused: '⏸ 已暂停', completed: '✅ 完成', error: '❌ 出错' };
-  document.getElementById('import-status-text').textContent = statusMap[s.status] || s.status;
+  const operitPhaseMap = { raw: '⏳ 原文落盘中…', embedding: '⏳ 补 Embedding 中…', tagging: '⏳ 模型逐条打标中…' };
+  document.getElementById('import-status-text').textContent = (
+    s.status === 'running' && s.import_format === 'operit'
+      ? (operitPhaseMap[s.operit_phase] || statusMap[s.status])
+      : (statusMap[s.status] || s.status)
+  );
   document.getElementById('import-pause-btn').style.display = s.status === 'running' ? '' : 'none';
   if (s.status !== 'running') clearInterval(importPollTimer);
   const errDiv = document.getElementById('import-errors');
