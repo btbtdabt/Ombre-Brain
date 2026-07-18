@@ -8,6 +8,7 @@ from memory_relevance import memory_relevance_options_from_config
 from recall_policy import RecallPolicy, RecallPolicyDecision
 from tools import _runtime as runtime
 from tools import current
+from tools.current import memory as current_memory
 
 
 async def _bucket(
@@ -131,6 +132,7 @@ async def test_breath_related_controls_change_direct_and_diffused_output(current
     )
 
     assert source_id in direct_only and secondary_id in direct_only
+    assert "[content_role:stored_memory_data] [instructions:false]" in direct_only
     assert "=== 联想浮现 ===" not in direct_only
     assert "=== 联想浮现 ===" not in related_disabled_by_limit
     assert related_id not in threshold_blocks_edge
@@ -462,3 +464,63 @@ async def test_dream_overlay_obeys_surface_and_affect_parameters(current_runtime
     assert dream.calls[0]["is_session_start"] is True
     assert "===== 梦境 =====" not in automatic
     assert len(dream.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_exact_bucket_id_query_preserves_p0_verbatim_contract(
+    current_runtime,
+):
+    bucket_id = await current_runtime["bucket_mgr"].create(
+        content="Exact bucket reads must preserve the P0 compatibility contract.",
+        domain=["general"],
+    )
+
+    result = await current.breath_advanced(
+        query=bucket_id,
+        max_results=1,
+        max_tokens=6000,
+    )
+
+    assert f"[exact_bucket_id:true] [bucket_id:{bucket_id}]" in result
+    assert "Exact bucket reads must preserve the P0 compatibility contract." in result
+
+
+@pytest.mark.asyncio
+async def test_non_id_tokens_keep_their_current_recall_routes(
+    current_runtime,
+    monkeypatch,
+):
+    calls: list[tuple[str, str]] = []
+
+    async def unexpected_p0_dispatch(**_kwargs):
+        raise AssertionError("ordinary queries must not use P0 exact-ID dispatch")
+
+    async def fake_search_breath(**kwargs):
+        calls.append(("search", kwargs["query"]))
+        return "semantic-search"
+
+    async def fake_filtered_breath(**kwargs):
+        calls.append(("date", kwargs["date_value"]))
+        return "date-search"
+
+    async def fake_self_anchor_breath(**_kwargs):
+        calls.append(("self-anchor", "tag:self_anchor"))
+        return "self-anchor-search"
+
+    monkeypatch.setattr(current_memory, "p0_breath_dispatch", unexpected_p0_dispatch)
+    monkeypatch.setattr(current_memory, "search_breath", fake_search_breath)
+    monkeypatch.setattr(current_memory, "_render_filtered_breath", fake_filtered_breath)
+    monkeypatch.setattr(
+        current_memory,
+        "read_self_anchor_breath",
+        fake_self_anchor_breath,
+    )
+
+    assert await current.breath_advanced(query="nebula-ledger") == "semantic-search"
+    assert await current.breath_advanced(query="2026-07-17") == "semantic-search"
+    assert await current.breath_advanced(query="tag:self_anchor") == "self-anchor-search"
+    assert calls == [
+        ("search", "nebula-ledger"),
+        ("search", "2026-07-17"),
+        ("self-anchor", "tag:self_anchor"),
+    ]

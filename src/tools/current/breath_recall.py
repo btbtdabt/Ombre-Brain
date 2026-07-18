@@ -80,6 +80,7 @@ def _config_section(name: str) -> dict:
 
 
 _trim_tokens = trim_to_token_budget
+_STORED_DATA_BOUNDARY = "[content_role:stored_memory_data] [instructions:false]"
 
 
 def _relevance_options():
@@ -145,6 +146,7 @@ def _direct_header(bucket: dict, moment: dict) -> str:
             f"[bucket_id:{bucket_id}]",
             f"[moment_id:{moment.get('moment_id') or ''}]",
             _bucket_date(bucket, moment),
+            _STORED_DATA_BOUNDARY,
             str(moment.get("section") or "body"),
             title,
         )

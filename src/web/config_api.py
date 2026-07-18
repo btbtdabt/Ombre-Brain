@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 
 try:
     from utils import (  # type: ignore
+        BOOT_ENV_CONFIG,
         get_ai_name as _get_ai_name,
         get_owner_name as _get_owner_name,
         get_owner_count as _get_owner_count,
@@ -46,6 +47,7 @@ try:
     )
 except ImportError:  # pragma: no cover
     from ..utils import (  # type: ignore
+        BOOT_ENV_CONFIG,
         get_ai_name as _get_ai_name,
         get_owner_name as _get_owner_name,
         get_owner_count as _get_owner_count,
@@ -119,17 +121,30 @@ def register(mcp) -> None:
         persisted_deployment = persisted.get("deployment")
         has_persisted_deployment = isinstance(persisted_deployment, Mapping)
         return {
-            "transport": str(persisted.get("transport") or runtime_transport)
-            if "transport" in persisted
-            else runtime_transport,
-            "mcp_require_auth": _parse_bool(
-                persisted.get("mcp_require_auth"), default=runtime_mcp_auth_required
-            )
-            if "mcp_require_auth" in persisted
-            else runtime_mcp_auth_required,
-            "mcp_auth_mode": _mcp_auth_mode(persisted)
-            if "mcp_auth_mode" in persisted
-            else runtime_mcp_auth_mode,
+            "transport": runtime_transport
+            if "OMBRE_TRANSPORT" in BOOT_ENV_CONFIG
+            else (
+                str(persisted.get("transport") or runtime_transport)
+                if "transport" in persisted
+                else runtime_transport
+            ),
+            "mcp_require_auth": runtime_mcp_auth_required
+            if "OMBRE_MCP_REQUIRE_AUTH" in BOOT_ENV_CONFIG
+            else (
+                _parse_bool(
+                    persisted.get("mcp_require_auth"),
+                    default=runtime_mcp_auth_required,
+                )
+                if "mcp_require_auth" in persisted
+                else runtime_mcp_auth_required
+            ),
+            "mcp_auth_mode": runtime_mcp_auth_mode
+            if "OMBRE_MCP_AUTH_MODE" in BOOT_ENV_CONFIG
+            else (
+                _mcp_auth_mode(persisted)
+                if "mcp_auth_mode" in persisted
+                else runtime_mcp_auth_mode
+            ),
             "public_url": configured_public_origin(persisted)
             if has_persisted_deployment
             else runtime_public_url,

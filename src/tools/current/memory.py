@@ -21,9 +21,12 @@ from .._common import (
     check_content_size,
     check_grow_input_size,
     check_grow_items_payload,
+    check_metadata_size,
     check_pinned_quota,
+    check_query_size,
     check_duplicate_for,
     check_plan_resolution,
+    merge_or_create,
 )
 from ..breath import dispatch as p0_breath_dispatch
 from ..dream import dispatch as p0_dream_dispatch
@@ -247,6 +250,10 @@ async def breath(
 ) -> str:
     """只读检索记忆。查主题用 query；新窗口轻交接用 mode="handoff"；date 或 query 里的日期可查当天普通记忆；domain="feel"/"whisper" 读私密通道，domain="daily_impression" 才读日印象。日期支持 2026-06-15、2026.06.15、2026年6月15日、25年6月15日、6月15日。"""
     await ensure_decay_started()
+    if query_error := check_query_size(str(query or "")):
+        return query_error
+    if metadata_error := check_metadata_size(domain=domain, tags=tags):
+        return metadata_error
     max_results = int_between(max_results, 20, 1, 50)
     max_tokens = int_between(max_tokens, 10000, 0, 20000)
     importance_min = int_between(importance_min, -1, -1, 10)
@@ -267,6 +274,23 @@ async def breath(
             importance_min=importance_min,
             tags=tags,
             catalog=catalog,
+        )
+
+    # A generated bucket ID is an address only when it already exists.  The
+    # broader public ID validator also accepts ordinary search tokens, dates,
+    # and tag queries, so it cannot safely select this exact-read path alone.
+    exact_bucket_id = coerce_id(query)
+    exact_bucket = None
+    if re.fullmatch(r"[0-9a-fA-F]{12}", exact_bucket_id):
+        exact_bucket = await require_runtime("bucket_mgr").get(exact_bucket_id)
+    if exact_bucket is not None:
+        return await p0_breath_dispatch(
+            query=exact_bucket_id,
+            max_tokens=max_tokens,
+            domain=domain,
+            valence=valence,
+            arousal=arousal,
+            max_results=max_results,
         )
 
     include_related = bool_value(include_related, True)
@@ -693,23 +717,54 @@ async def hold(
             )
         return f"📌钉选→{bucket_id} {','.join(domains)}"
 
-    bucket_id = await _create_current_bucket(
-        content,
-        tags=final_tags,
-        importance=importance,
-        domains=domains,
-        valence=final_valence,
-        arousal=final_arousal,
-        name=name,
-        date=str(date or "").strip(),
-        media=media,
-        why_remembered=why_remembered,
-        meaning=meaning,
-        test_data=test_data,
-    )
+    event_date = str(date or "").strip()
+    if event_date:
+        # Dated memories retain current's explicit event-date contract. P0's
+        # merge boundary has no date field and must not silently discard it.
+        bucket_id = await _create_current_bucket(
+            content,
+            tags=final_tags,
+            importance=importance,
+            domains=domains,
+            valence=final_valence,
+            arousal=final_arousal,
+            name=name,
+            date=event_date,
+            media=media,
+            why_remembered=why_remembered,
+            meaning=meaning,
+            test_data=test_data,
+        )
+        is_merged = False
+        embed_warning = ""
+    else:
+        bucket_id, is_merged, embed_warning = await merge_or_create(
+            content=content,
+            tags=final_tags,
+            importance=importance,
+            domain=domains,
+            valence=final_valence,
+            arousal=final_arousal,
+            name=name,
+            raw_merge=True,
+            why_remembered=why_remembered,
+            source_tool="hold",
+            meaning=meaning,
+            media=media,
+            test_data=test_data,
+        )
     asyncio.create_task(check_plan_resolution(content, source_bucket_id=bucket_id))
-    asyncio.create_task(check_duplicate_for(bucket_id, content))
-    return f"新建→{name or bucket_id} {','.join(domains)}"
+    if not is_merged:
+        asyncio.create_task(check_duplicate_for(bucket_id, content))
+    action = "合并" if is_merged else "新建"
+    display_name = bucket_id if is_merged else (name or bucket_id)
+    result = (
+        f"{action}→{display_name} {','.join(domains)} "
+        f"[bucket_id:{bucket_id}]"
+    )
+    if embed_warning:
+        result += f"\n⚠️ {embed_warning}"
+    return result
 
 
 def _format_write_gate_result(decision: Any, gate: Any) -> str:
@@ -882,7 +937,10 @@ async def grow(
             created += 1
             asyncio.create_task(check_duplicate_for(bucket_id, item_content))
     asyncio.create_task(check_plan_resolution(content))
-    return f"{gate_prefix}{len(items)}条|新{created}合0\n" + "\n".join(results)
+    return (
+        f"{gate_prefix}{len(items)}条|新{created}合0 batch:{batch_id}\n"
+        + "\n".join(results)
+    )
 
 
 def _profile_fact_body(*, fact: str, evidence_context: str, reflection: str) -> str:

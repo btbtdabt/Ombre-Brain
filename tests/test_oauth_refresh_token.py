@@ -1238,8 +1238,8 @@ def test_oauth_forwarded_host_is_only_used_from_trusted_proxy(monkeypatch):
     direct = cast(Request, JsonRequest(headers=headers, client_host="198.51.100.4"))
     proxied = cast(Request, JsonRequest(headers=headers, client_host="127.0.0.1"))
 
-    assert oauth_mod._public_base_url(direct) == "https://ombre.example"
-    assert oauth_mod._public_base_url(proxied) == "http://evil.example"
+    assert oauth_mod._public_base_url(direct, "") == "https://ombre.example"
+    assert oauth_mod._public_base_url(proxied, "") == "http://evil.example"
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,4 @@
-"""Real streamable-HTTP integration coverage for all 14 public MCP tools.
+"""Real streamable-HTTP integration coverage for the canonical MCP surface.
 
 Run this file against an isolated Docker service by setting
 OMBRE_DOCKER_INTEGRATION_URL=http://ombre-brain:8000/mcp.
@@ -7,6 +7,7 @@ has a working compression provider; otherwise the long-form grow test verifies
 the documented provider-unavailable error path.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -16,6 +17,11 @@ from concurrent.futures import ThreadPoolExecutor
 import httpx
 import pytest
 
+from tests.mcp_contract_snapshot import (
+    EXPECTED_PARAMETERS,
+    EXPECTED_REQUIRED_PARAMETERS,
+)
+
 
 MCP_URL = os.environ.get("OMBRE_DOCKER_INTEGRATION_URL", "").strip()
 EXPECT_COMPRESSION_PROVIDER = os.environ.get(
@@ -23,94 +29,14 @@ EXPECT_COMPRESSION_PROVIDER = os.environ.get(
 ).strip().lower() in {"1", "true", "yes", "on"}
 pytestmark = pytest.mark.skipif(not MCP_URL, reason="Docker MCP integration service is not configured")
 
-EXPECTED_TOOLS = {
-    "breath",
-    "breath_search",
-    "breath_advanced",
-    "hold",
-    "grow",
-    "trace",
-    "anchor",
-    "release",
-    "pulse",
-    "plan",
-    "letter_write",
-    "letter_read",
-    "I",
-    "dream",
-}
-
+EXPECTED_TOOLS = set(EXPECTED_PARAMETERS)
 EXPECTED_TOOL_PROPERTIES = {
-    "breath": set(),
-    "breath_search": {"query", "domain", "max_results"},
-    "breath_advanced": {
-        "query",
-        "max_tokens",
-        "domain",
-        "valence",
-        "arousal",
-        "max_results",
-        "importance_min",
-        "tags",
-        "catalog",
-    },
-    "hold": {
-        "content",
-        "tags",
-        "importance",
-        "pinned",
-        "feel",
-        "source_bucket",
-        "valence",
-        "arousal",
-        "why_remembered",
-        "meaning",
-        "media",
-        "test_data",
-    },
-    "grow": {"content", "items"},
-    "trace": {
-        "bucket_id",
-        "name",
-        "domain",
-        "valence",
-        "arousal",
-        "importance",
-        "tags",
-        "resolved",
-        "pinned",
-        "digested",
-        "content",
-        "delete",
-        "status",
-        "weight",
-        "dont_surface",
-        "why_remembered",
-        "meaning_append",
-        "meaning_replace",
-        "media_append",
-        "media_replace",
-        "hard_delete",
-        "delete_reason",
-    },
-    "anchor": {"bucket_id"},
-    "release": {"bucket_id"},
-    "pulse": {"include_archive"},
-    "plan": {"content", "status", "related_bucket", "weight", "why_remembered"},
-    "letter_write": {"author", "content", "user_name", "title", "date", "ai_name"},
-    "letter_read": {"query", "limit", "author", "date_from", "date_to"},
-    "I": {"content", "aspect", "read", "limit"},
-    "dream": {"window_hours"},
+    name: set() if name == "breath" else set(parameters)
+    for name, parameters in EXPECTED_PARAMETERS.items()
 }
-
 EXPECTED_REQUIRED_PROPERTIES = {
-    "breath_search": {"query"},
-    "hold": {"content"},
-    "trace": {"bucket_id"},
-    "anchor": {"bucket_id"},
-    "release": {"bucket_id"},
-    "plan": {"content"},
-    "letter_write": {"author", "content"},
+    name: set(parameters)
+    for name, parameters in EXPECTED_REQUIRED_PARAMETERS.items()
 }
 
 
@@ -201,6 +127,19 @@ class MCPClient:
         assert text, result
         return text
 
+    def call_json(self, name: str, arguments: dict | None = None) -> dict:
+        result = self.call_result(name, arguments)
+        assert result.get("isError") is not True, result
+        structured = result.get("structuredContent")
+        if isinstance(structured, dict):
+            payload = structured.get("result", structured)
+            if isinstance(payload, dict):
+                return payload
+        text = self.result_text(result)
+        payload = json.loads(text)
+        assert isinstance(payload, dict), payload
+        return payload
+
 
 class MCPClientContext(MCPClient):
     def __enter__(self):
@@ -234,17 +173,29 @@ def _bucket_ids(text: str) -> set[str]:
 
 
 def _hold(mcp_client: MCPClient, marker: str, **overrides) -> str:
-    arguments = {"content": marker, "tags": "docker,mcp", "importance": 7}
+    title = f"docker-{hashlib.sha256(marker.encode()).hexdigest()[:16]}"
+    arguments = {
+        "content": marker,
+        "tags": "docker,mcp",
+        "importance": 7,
+        "title": title,
+    }
     arguments.update(overrides)
-    return _bucket_id(
-        mcp_client.call(
-            "hold",
-            arguments,
-        )
-    )
+    title = str(arguments.get("title") or title)
+    result = mcp_client.call("hold", arguments)
+    assert result.startswith(("新建→", "合并→")), result
+
+    listing = mcp_client.call_json("list_buckets_light", {"limit": 500})
+    matches = [
+        item
+        for item in listing.get("buckets", [])
+        if str(item.get("name") or "").endswith(title)
+    ]
+    assert matches, (title, result)
+    return str(matches[0]["id"])
 
 
-def test_manifest_exposes_exactly_the_documented_14_tools(mcp_client):
+def test_manifest_exposes_exactly_the_canonical_tools(mcp_client):
     tools = mcp_client.list_tools()
     tools_by_name = {tool["name"]: tool for tool in tools}
     assert set(tools_by_name) == EXPECTED_TOOLS
@@ -306,15 +257,20 @@ def test_hold_writes_a_memory_and_returns_bucket_id(mcp_client):
 def test_hold_rejects_invalid_feel_and_test_data_combinations(mcp_client):
     missing_source = mcp_client.call(
         "hold",
-        {"content": _marker("feel"), "feel": True, "valence": 0.5, "arousal": 0.5},
+        {
+            "content": f"我会记住这次 {_marker('feel')}。",
+            "feel": True,
+            "valence": 0.5,
+            "arousal": 0.5,
+        },
     )
-    assert "source_bucket 不能为空" in missing_source
+    assert "whisper" in missing_source
 
     non_erasable_mode = mcp_client.call(
         "hold",
         {"content": _marker("test-pin"), "test_data": True, "pinned": True},
     )
-    assert "测试数据不能创建为 pinned 或 feel" in non_erasable_mode
+    assert "测试数据不能创建为 pinned、feel 或 whisper" in non_erasable_mode
 
 
 def test_breath_returns_matching_stored_content(mcp_client):
@@ -680,18 +636,39 @@ def test_http_transport_rejects_body_above_global_limit():
 
 def test_concurrent_identical_hold_calls_converge_on_one_bucket():
     marker = _marker("concurrent-hold")
+    title = f"docker-{hashlib.sha256(marker.encode()).hexdigest()[:16]}"
 
     def write_once(_index):
         client = MCPClient(MCP_URL)
         try:
             client.initialize()
-            return _hold(client, marker)
+            return client.call(
+                "hold",
+                {
+                    "content": marker,
+                    "tags": "docker,mcp",
+                    "importance": 7,
+                    "title": title,
+                },
+            )
         finally:
             client.close()
 
     with ThreadPoolExecutor(max_workers=8) as pool:
-        bucket_ids = list(pool.map(write_once, range(8)))
-    assert len(set(bucket_ids)) == 1
+        results = list(pool.map(write_once, range(8)))
+    assert all(result.startswith(("新建→", "合并→")) for result in results)
+
+    with MCPClientContext(MCP_URL) as verifier:
+        listing = verifier.call_json("list_buckets_light", {"limit": 500})
+        bucket_ids = {
+            str(item["id"])
+            for item in listing.get("buckets", [])
+            if str(item.get("name") or "").endswith(title)
+        }
+        assert len(bucket_ids) == 1
+        for bucket_id in bucket_ids:
+            bucket = verifier.call_json("read_bucket", {"bucket_id": bucket_id})
+            assert bucket["content"] == marker
 
 
 def test_concurrent_trace_updates_never_corrupt_the_bucket():

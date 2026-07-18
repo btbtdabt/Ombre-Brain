@@ -316,6 +316,49 @@ async def test_dashboard_oauth_switch_persists_to_config(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_dashboard_startup_state_honors_boot_environment_precedence(
+    monkeypatch,
+):
+    runtime = {
+        "transport": "streamable-http",
+        "mcp_require_auth": False,
+        "mcp_auth_mode": "token",
+    }
+    persisted = {
+        "transport": "stdio",
+        "mcp_require_auth": True,
+        "mcp_auth_mode": "oauth",
+    }
+    monkeypatch.setattr(config_api.sh, "_require_auth", lambda _request: None)
+    monkeypatch.setattr(config_api.sh, "config", runtime)
+    monkeypatch.setattr(config_api, "read_config_yaml", lambda: persisted)
+    monkeypatch.setattr(
+        config_api,
+        "BOOT_ENV_CONFIG",
+        frozenset(
+            {
+                "OMBRE_TRANSPORT",
+                "OMBRE_MCP_REQUIRE_AUTH",
+                "OMBRE_MCP_AUTH_MODE",
+            }
+        ),
+    )
+    mcp = FakeMCP()
+    config_api.register(mcp)
+
+    response = await mcp.routes[("GET", "/api/config")](JsonRequest())
+    payload = _json(response)
+
+    assert payload["transport"] == "streamable-http"
+    assert payload["transport_effective"] == "streamable-http"
+    assert payload["mcp_require_auth"] is False
+    assert payload["mcp_require_auth_effective"] is False
+    assert payload["mcp_auth_mode"] == "token"
+    assert payload["mcp_auth_mode_effective"] == "token"
+    assert payload["restart_required"] is False
+
+
+@pytest.mark.asyncio
 async def test_dashboard_mcp_startup_settings_require_persistence_and_do_not_publish_on_failure(
     monkeypatch,
 ):

@@ -40,6 +40,22 @@ async def test_hold_persists_p0_metadata_and_trace_can_erase_test_data(
 
 
 @pytest.mark.asyncio
+async def test_identical_current_hold_calls_preserve_p0_merge_contract(
+    current_runtime,
+) -> None:
+    content = "Identical ordinary hold calls must converge on one durable bucket."
+
+    first = await current.hold(content, title="P0 merge contract")
+    second = await current.hold(content, title="P0 merge contract")
+    buckets = await current_runtime["bucket_mgr"].list_all()
+
+    assert first.startswith("新建→P0 merge contract")
+    assert len(buckets) == 1
+    assert second.startswith(f"合并→{buckets[0]['id']}")
+    assert buckets[0]["content"] == content
+
+
+@pytest.mark.asyncio
 async def test_grow_accepts_p0_pre_split_items_without_rewriting(
     current_runtime,
 ) -> None:
