@@ -383,18 +383,17 @@ class GatewayStateStore:
             where_clause += " AND session_id = ?"
             params.append(safe_session_id)
         params.append(safe_limit)
+        # where_clause is assembled only from the fixed predicates above; all
+        # profile, time, session, and limit values remain bound parameters.
+        query = (
+            "SELECT id, profile_id, session_id, round_id, created_at, "
+            "user_text, assistant_text, model, client, route "
+            "FROM conversation_turns "
+            f"WHERE {where_clause} "  # nosec B608
+            "ORDER BY id DESC LIMIT ?"
+        )
         with self._connect() as connection:
-            rows = connection.execute(
-                f"""
-                SELECT id, profile_id, session_id, round_id, created_at,
-                       user_text, assistant_text, model, client, route
-                FROM conversation_turns
-                WHERE {where_clause}
-                ORDER BY id DESC
-                LIMIT ?
-                """,
-                params,
-            ).fetchall()
+            rows = connection.execute(query, params).fetchall()
         return [self._conversation_row_payload(row) for row in rows]
 
     def list_conversation_turns_between(

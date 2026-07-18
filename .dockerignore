@@ -54,10 +54,28 @@ docs/**/*
 !docs/INTERNALS.md
 !docs/MULTI_OWNER.md
 !docs/OPERATIONS.md
+!docs/adr/
+!docs/adr/ADR-*.md
 tests/
 tools/
 kernel/
 deploy/
+# Runtime diagnostics inspect these immutable release assets. Keep the allowlist
+# narrow so maintenance scripts and the rest of the Rust workspace stay excluded.
+!tools/
+tools/*
+!tools/vnext_preflight.py
+!tools/clean_orphan_embeddings.py
+!kernel/
+kernel/*
+!kernel/rust/
+kernel/rust/*
+!kernel/rust/ombre-kernel/
+kernel/rust/ombre-kernel/*
+!kernel/rust/ombre-kernel/Cargo.toml
+!kernel/rust/ombre-kernel/src/
+kernel/rust/ombre-kernel/src/*
+!kernel/rust/ombre-kernel/src/lib.rs
 # 例外：构建期需要它下载 cloudflared（见 Dockerfile 的 COPY），必须进构建上下文
 !deploy/fetch_cloudflared.py
 *.md
@@ -66,6 +84,8 @@ deploy/
 !docs/INTERNALS.md
 !docs/MULTI_OWNER.md
 !docs/OPERATIONS.md
+!docs/adr/
+!docs/adr/ADR-*.md
 !README.md
 !CHANGELOG.md
 

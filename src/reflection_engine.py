@@ -3539,7 +3539,10 @@ class ReflectionEngine:
 
     @staticmethod
     def _daily_chat_memory_candidate_id(key: str, kind: str, content: str) -> str:
-        digest = hashlib.sha1(f"{key}|{kind}|{content}".encode("utf-8")).hexdigest()[:10]
+        digest = hashlib.sha1(
+            f"{key}|{kind}|{content}".encode("utf-8"),
+            usedforsecurity=False,
+        ).hexdigest()[:10]
         return f"daily_chat_memory_{str(key).replace('-', '')}_{digest}"
 
     def _fallback_reflection(self, period: str, key: str, materials: dict) -> dict:

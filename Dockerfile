@@ -57,6 +57,10 @@ RUN chmod +x ./entrypoint.sh
 # 出现「服务装完了但模型没拿到使用约定」的 onboarding 断点。内部设计稿
 # （docs/superpowers、docs/secrets 等）不在此列，仍被 .dockerignore 挡在外面。
 COPY docs/CLAUDE_PROMPT.md docs/ENVIRONMENT_VARIABLES.md docs/INTERNALS.md docs/MULTI_OWNER.md docs/OPERATIONS.md ./docs/
+COPY docs/adr/ ./docs/adr/
+COPY tools/vnext_preflight.py tools/clean_orphan_embeddings.py ./tools/
+COPY kernel/rust/ombre-kernel/Cargo.toml ./kernel/rust/ombre-kernel/Cargo.toml
+COPY kernel/rust/ombre-kernel/src/lib.rs ./kernel/rust/ombre-kernel/src/lib.rs
 COPY README.md ./README.md
 COPY CHANGELOG.md ./CHANGELOG.md
 

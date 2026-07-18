@@ -478,20 +478,20 @@ class MemoryMomentStore:
             conditions.append("? LIKE '%' || a.alias_key || '%'")
             params.append(full_query_key)
 
+        condition_sql = " OR ".join(conditions)
+        # condition_sql contains only the fixed predicates appended above; all
+        # query terms remain bound through params.
+        query = (
+            "SELECT a.*, counts.bucket_count "
+            "FROM memory_retrieval_aliases AS a "
+            "JOIN ("
+            "SELECT alias_key, COUNT(DISTINCT bucket_id) AS bucket_count "
+            "FROM memory_retrieval_aliases GROUP BY alias_key"
+            ") AS counts ON counts.alias_key = a.alias_key "
+            f"WHERE {condition_sql}"  # nosec B608
+        )
         conn = self._connect()
-        rows = conn.execute(
-            f"""
-            SELECT a.*, counts.bucket_count
-            FROM memory_retrieval_aliases AS a
-            JOIN (
-                SELECT alias_key, COUNT(DISTINCT bucket_id) AS bucket_count
-                FROM memory_retrieval_aliases
-                GROUP BY alias_key
-            ) AS counts ON counts.alias_key = a.alias_key
-            WHERE {' OR '.join(conditions)}
-            """,
-            params,
-        ).fetchall()
+        rows = conn.execute(query, params).fetchall()
         conn.close()
 
         results = []
@@ -1897,4 +1897,7 @@ def _moment_id(bucket_id: str, source: str, section: str, ordinal: int, source_i
 
 
 def _sha1(text: str) -> str:
-    return hashlib.sha1(str(text).encode("utf-8")).hexdigest()
+    return hashlib.sha1(
+        str(text).encode("utf-8"),
+        usedforsecurity=False,
+    ).hexdigest()

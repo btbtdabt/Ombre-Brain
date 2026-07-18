@@ -668,23 +668,15 @@ class WordMapStore:
             if not card_terms:
                 return _empty_hint_payload(cleaned_terms)
             placeholders = ",".join("?" for _ in card_terms)
-            rows = conn.execute(
-                f"""
-                SELECT
-                    c.bucket_id,
-                    c.term,
-                    c.source,
-                    c.kind,
-                    c.weight,
-                    c.updated_at,
-                    COALESCE(n.bucket_count, 1) AS bucket_count
-                FROM word_card_nodes c
-                LEFT JOIN word_nodes n ON n.term = c.term
-                WHERE c.term IN ({placeholders})
-                ORDER BY c.weight DESC, c.bucket_id ASC
-                """,
-                tuple(card_terms),
-            ).fetchall()
+            query = (
+                "SELECT c.bucket_id, c.term, c.source, c.kind, c.weight, "
+                "c.updated_at, COALESCE(n.bucket_count, 1) AS bucket_count "
+                "FROM word_card_nodes c "
+                "LEFT JOIN word_nodes n ON n.term = c.term "
+                f"WHERE c.term IN ({placeholders}) "  # nosec B608
+                "ORDER BY c.weight DESC, c.bucket_id ASC"
+            )
+            rows = conn.execute(query, tuple(card_terms)).fetchall()
         finally:
             conn.close()
 

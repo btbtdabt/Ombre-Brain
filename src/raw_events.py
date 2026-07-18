@@ -261,27 +261,22 @@ class RawEventStore:
             session_id=session_id,
         )
         conn = self._connect()
+        # filters contains only fixed predicates from _search_filters; all
+        # source/conversation/session values remain bound through params.
         if safe_limit > 0:
-            rows = conn.execute(
-                f"""
-                SELECT e.*
-                FROM raw_events e
-                WHERE 1 = 1 {filters}
-                ORDER BY e.id DESC
-                LIMIT ?
-                """,
-                [*params, max(safe_limit, 500)],
-            ).fetchall()
+            query = (
+                "SELECT e.* FROM raw_events e WHERE 1 = 1 "
+                f"{filters} "  # nosec B608
+                "ORDER BY e.id DESC LIMIT ?"
+            )
+            rows = conn.execute(query, [*params, max(safe_limit, 500)]).fetchall()
         else:
-            rows = conn.execute(
-                f"""
-                SELECT e.*
-                FROM raw_events e
-                WHERE 1 = 1 {filters}
-                ORDER BY e.id DESC
-                """,
-                params,
-            ).fetchall()
+            query = (
+                "SELECT e.* FROM raw_events e WHERE 1 = 1 "
+                f"{filters} "  # nosec B608
+                "ORDER BY e.id DESC"
+            )
+            rows = conn.execute(query, params).fetchall()
         conn.close()
 
         compare_tz = start_at.tzinfo or end_at.tzinfo
@@ -527,53 +522,42 @@ class RawEventStore:
         if not self.fts_enabled or not query:
             return []
         match = '"' + query.replace('"', '""') + '"'
+        sql = (
+            "SELECT e.* FROM raw_events_fts f "
+            "JOIN raw_events e ON e.id = f.rowid "
+            "WHERE raw_events_fts MATCH ? "
+            f"{filters} "  # nosec B608
+            "ORDER BY bm25(raw_events_fts), e.created_at DESC, e.id DESC LIMIT ?"
+        )
         conn = self._connect()
         try:
-            return conn.execute(
-                f"""
-                SELECT e.*
-                FROM raw_events_fts f
-                JOIN raw_events e ON e.id = f.rowid
-                WHERE raw_events_fts MATCH ? {filters}
-                ORDER BY bm25(raw_events_fts), e.created_at DESC, e.id DESC
-                LIMIT ?
-                """,
-                [match, *params, limit],
-            ).fetchall()
+            return conn.execute(sql, [match, *params, limit]).fetchall()
         except sqlite3.OperationalError:
             return []
         finally:
             conn.close()
 
     def _search_like(self, query: str, filters: str, params: list[Any], limit: int) -> list[sqlite3.Row]:
+        sql = (
+            "SELECT e.* FROM raw_events e WHERE e.text LIKE ? "
+            f"{filters} "  # nosec B608
+            "ORDER BY e.created_at DESC, e.id DESC LIMIT ?"
+        )
         conn = self._connect()
         try:
-            return conn.execute(
-                f"""
-                SELECT e.*
-                FROM raw_events e
-                WHERE e.text LIKE ? {filters}
-                ORDER BY e.created_at DESC, e.id DESC
-                LIMIT ?
-                """,
-                [f"%{query}%", *params, limit],
-            ).fetchall()
+            return conn.execute(sql, [f"%{query}%", *params, limit]).fetchall()
         finally:
             conn.close()
 
     def _search_recent(self, filters: str, params: list[Any], limit: int) -> list[sqlite3.Row]:
+        sql = (
+            "SELECT e.* FROM raw_events e WHERE 1 = 1 "
+            f"{filters} "  # nosec B608
+            "ORDER BY e.created_at DESC, e.id DESC LIMIT ?"
+        )
         conn = self._connect()
         try:
-            return conn.execute(
-                f"""
-                SELECT e.*
-                FROM raw_events e
-                WHERE 1 = 1 {filters}
-                ORDER BY e.created_at DESC, e.id DESC
-                LIMIT ?
-                """,
-                [*params, limit],
-            ).fetchall()
+            return conn.execute(sql, [*params, limit]).fetchall()
         finally:
             conn.close()
 

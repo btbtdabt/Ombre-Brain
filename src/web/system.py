@@ -268,6 +268,44 @@ def _read_adr_documents_from_repo(repo_root: str) -> dict[str, Any]:
     }
 
 
+def _diagnostic_asset_candidates(repo_root: str) -> list[str]:
+    candidates = [os.path.abspath(str(repo_root or ""))]
+    image_root = str(os.environ.get("OMBRE_IMAGE_ROOT") or "").strip()
+    if image_root:
+        normalized = os.path.abspath(image_root)
+        if normalized not in candidates:
+            candidates.append(normalized)
+    return candidates
+
+
+def _diagnostic_asset_root(repo_root: str, *relative_paths: str) -> str:
+    """Prefer live source, then immutable image assets for release diagnostics."""
+
+    candidates = _diagnostic_asset_candidates(repo_root)
+    for candidate in candidates:
+        if candidate and all(
+            os.path.exists(os.path.join(candidate, path))
+            for path in relative_paths
+        ):
+            return candidate
+    return candidates[0]
+
+
+def _diagnostic_adr_root(repo_root: str) -> str:
+    """Select the first diagnostics root that contains an actual ADR document."""
+
+    candidates = _diagnostic_asset_candidates(repo_root)
+    for candidate in candidates:
+        adr_dir = os.path.join(candidate, "docs", "adr")
+        if os.path.isdir(adr_dir) and any(
+            filename.startswith("ADR-") and filename.endswith(".md")
+            for _root, _dirs, files in os.walk(adr_dir)
+            for filename in files
+        ):
+            return candidate
+    return candidates[0]
+
+
 def _build_code_standard_artifacts(repo_root: str) -> list[CodeArtifactSpec]:
     candidates = (
         (
@@ -868,7 +906,8 @@ async def build_system_diagnostics(
         ))
 
     try:
-        adr_manifest = _read_adr_documents_from_repo(sh.repo_root)
+        adr_root = _diagnostic_adr_root(sh.repo_root)
+        adr_manifest = _read_adr_documents_from_repo(adr_root)
         documents = list(adr_manifest.get("documents", []))
         if not adr_manifest.get("ok"):
             checks.append(_check(
@@ -1080,7 +1119,12 @@ async def build_system_diagnostics(
         ))
 
     try:
-        preflight_cli_report = _build_preflight_cli_diagnostics(sh.repo_root)
+        preflight_root = _diagnostic_asset_root(
+            sh.repo_root,
+            "tools/vnext_preflight.py",
+            "src/web/system.py",
+        )
+        preflight_cli_report = _build_preflight_cli_diagnostics(preflight_root)
         checks.append(_check(
             "preflight_cli_diagnostics",
             "Preflight CLI",

@@ -1019,23 +1019,21 @@ class PersonaStateEngine:
             params.append(session_id)
         params.append(safe_limit)
 
+        # session_clause is one of the fixed fragments above; profile/session
+        # values and the limit remain bound parameters.
+        query = (
+            "SELECT id, session_id, message_hash, event_type, perceived_intent, "
+            "surface_trigger, inner_thought, user_excerpt, assistant_excerpt, "
+            "affect_delta, relationship_event, relationship_delta, "
+            "personality_signal, personality_delta, mood_label, "
+            "reply_guidance, residue, recalled_memory_ids, tool_summary, "
+            "confidence, error, created_at FROM persona_events "
+            "WHERE profile_id = ? "
+            f"{session_clause} "  # nosec B608
+            "ORDER BY id DESC LIMIT ?"
+        )
         conn = self._connect()
-        rows = conn.execute(
-            f"""
-            SELECT id, session_id, message_hash, event_type, perceived_intent,
-                   surface_trigger, inner_thought, user_excerpt, assistant_excerpt,
-                   affect_delta, relationship_event, relationship_delta,
-                   personality_signal, personality_delta, mood_label,
-                   reply_guidance, residue, recalled_memory_ids, tool_summary,
-                   confidence, error, created_at
-            FROM persona_events
-            WHERE profile_id = ?
-            {session_clause}
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            params,
-        ).fetchall()
+        rows = conn.execute(query, params).fetchall()
         conn.close()
         return [
             {
@@ -1352,16 +1350,14 @@ class PersonaStateEngine:
             else:
                 since_clause = "AND created_at > ?"
                 params.append(last_event["created_at"])
+        # since_clause is selected from the two fixed predicates above.
+        query = (
+            "SELECT COUNT(*) FROM persona_exchange_log "
+            "WHERE profile_id = ? AND session_id = ? "
+            f"{since_clause}"  # nosec B608
+        )
         conn = self._connect()
-        count = conn.execute(
-            f"""
-            SELECT COUNT(*)
-            FROM persona_exchange_log
-            WHERE profile_id = ? AND session_id = ?
-            {since_clause}
-            """,
-            params,
-        ).fetchone()[0]
+        count = conn.execute(query, params).fetchone()[0]
         conn.close()
         return int(count or 0)
 

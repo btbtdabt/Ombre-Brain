@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -52,6 +53,25 @@ from ledger_replay import LedgerReplayValidator
 from projection_mirror import TraceCatalogProjection
 from projection_sqlite import TraceSQLiteProjection
 from projection_vector import TraceVectorProjectionManifest
+
+
+def _repository_asset_root(
+    *relative_paths: str,
+    runtime_root: Path | None = None,
+) -> Path:
+    """Locate immutable repository assets beside either runtime or image code."""
+
+    active_root = runtime_root or Path(__file__).resolve().parents[3]
+    candidates = [active_root]
+    image_root = str(os.environ.get("OMBRE_IMAGE_ROOT") or "").strip()
+    if image_root:
+        candidate = Path(image_root).resolve()
+        if candidate != active_root:
+            candidates.append(candidate)
+    for candidate in candidates:
+        if all((candidate / relative).exists() for relative in relative_paths):
+            return candidate
+    return active_root
 
 
 @dataclass(frozen=True)
@@ -268,7 +288,10 @@ def _ledger_property_check() -> dict[str, Any]:
 
 
 def _rust_kernel_scaffold_check() -> dict[str, Any]:
-    repo_root = Path(__file__).resolve().parents[3]
+    repo_root = _repository_asset_root(
+        "kernel/rust/ombre-kernel/Cargo.toml",
+        "kernel/rust/ombre-kernel/src/lib.rs",
+    )
     crate = repo_root / "kernel" / "rust" / "ombre-kernel"
     manifest = crate / "Cargo.toml"
     lib_rs = crate / "src" / "lib.rs"
@@ -793,7 +816,10 @@ def _red_lines_check(
 
 
 def _preflight_cli_diagnostics_check() -> dict[str, Any]:
-    repo_root = Path(__file__).resolve().parents[3]
+    repo_root = _repository_asset_root(
+        "tools/vnext_preflight.py",
+        "src/web/system.py",
+    )
     cli_path = repo_root / "tools" / "vnext_preflight.py"
     diagnostics_path = repo_root / "src" / "web" / "system.py"
     required_files = (cli_path, diagnostics_path)

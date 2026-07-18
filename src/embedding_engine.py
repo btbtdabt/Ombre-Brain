@@ -1016,13 +1016,13 @@ class EmbeddingEngine:
         if not unique_ids:
             return {}
         placeholders = ",".join("?" for _item in unique_ids)
+        query = (
+            "SELECT bucket_id, embedding, model, dimension "
+            f"FROM embeddings WHERE bucket_id IN ({placeholders})"  # nosec B608
+        )
         conn = sqlite3.connect(self.db_path)
         try:
-            rows = conn.execute(
-                f"""SELECT bucket_id, embedding, model, dimension
-                    FROM embeddings WHERE bucket_id IN ({placeholders})""",
-                unique_ids,
-            ).fetchall()
+            rows = conn.execute(query, unique_ids).fetchall()
         finally:
             conn.close()
         output: dict[str, list[float]] = {}

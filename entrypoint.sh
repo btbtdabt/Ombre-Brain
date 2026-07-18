@@ -21,6 +21,7 @@
 #   5. 最终校验：路径必须是普通文件，否则打印清晰指引并 FATAL 退出（不带病启动）。
 
 IMAGE_ROOT="${OMBRE_IMAGE_ROOT:-/app}"
+export OMBRE_IMAGE_ROOT="$IMAGE_ROOT"
 CONFIG="${OMBRE_CONFIG_PATH:-$IMAGE_ROOT/config.yaml}"
 DEFAULT="$IMAGE_ROOT/config.default.yaml"
 

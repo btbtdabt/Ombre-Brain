@@ -9853,7 +9853,7 @@ class GatewayService:
 
     @staticmethod
     def _moment_graph_signature(buckets: list[dict], bucket_edges: list[dict] | None = None) -> str:
-        digest = hashlib.sha1()
+        digest = hashlib.sha1(usedforsecurity=False)
         for bucket in sorted(buckets or [], key=lambda item: str(item.get("id") or "")):
             meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
             structural_meta = {
@@ -10174,7 +10174,10 @@ class GatewayService:
 
     @staticmethod
     def _source_record_synthetic_moment_id(bucket_id: str, reason: str, text: str) -> str:
-        digest = hashlib.sha1(f"{bucket_id}\n{reason}\n{text}".encode("utf-8")).hexdigest()[:12]
+        digest = hashlib.sha1(
+            f"{bucket_id}\n{reason}\n{text}".encode("utf-8"),
+            usedforsecurity=False,
+        ).hexdigest()[:12]
         return f"{bucket_id}:source-record:{digest}"
 
     def _source_record_capsule_seed_text(self, bucket: dict) -> str:
@@ -22320,7 +22323,9 @@ def main() -> None:
     setup_logging(config.get("log_level", "INFO"))
     gateway_cfg = config.get("gateway", {})
     app = create_gateway_app(config=config)
-    host = gateway_cfg.get("host", "0.0.0.0")
+    # The gateway must be reachable by sibling containers; host port exposure is
+    # still constrained by the deployment's Docker/ingress configuration.
+    host = gateway_cfg.get("host", "0.0.0.0")  # nosec B104
     port = int(gateway_cfg.get("port", 8010))
     logger.info("Ombre Brain gateway starting | host=%s port=%s", host, port)
     uvicorn.run(app, host=host, port=port)

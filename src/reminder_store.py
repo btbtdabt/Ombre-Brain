@@ -317,11 +317,14 @@ class ReminderStore:
             updates["max_injections"] = max(0, self._safe_int(max_injections, 0))
 
         assignments = ", ".join(f"{key} = ?" for key in updates)
+        query = f"UPDATE reminders SET {assignments} WHERE id = ?"  # nosec B608
         params = list(updates.values()) + [str(reminder_id or "")]
         conn = self._connect()
         try:
             with conn:
-                conn.execute(f"UPDATE reminders SET {assignments} WHERE id = ?", params)
+                # Assignment names come only from the fixed update branches above;
+                # every caller-provided value remains parameterized.
+                conn.execute(query, params)
             return self.get(reminder_id)
         finally:
             conn.close()

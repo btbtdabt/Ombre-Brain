@@ -1,7 +1,8 @@
 name: Build & Push Docker Image
 
 # 何时构建并推送镜像到 Docker Hub：
-#   - 每次 push 到 main（忽略纯文档改动）→ 自动重建并推 :latest + :<VERSION>
+#   - 每次 push 到 main（忽略纯文档改动）→ 自动构建
+#   - 配置 Docker Hub 凭据时推送 :latest + :<VERSION>；未配置时只做构建验证
 #   - 也可在 Actions 页手动触发（Run workflow）
 #
 # 凭证只存在 GitHub 仓库 Secrets（绝不写进代码）：
@@ -31,20 +32,48 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Detect Docker Hub credentials
+        id: registry
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -n "$DOCKERHUB_USERNAME" ] && [ -n "$DOCKERHUB_TOKEN" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Login to Docker Hub
+        if: steps.registry.outputs.configured == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push
+        if: steps.registry.outputs.configured == 'true'
         uses: docker/build-push-action@v6
+        env:
+          DOCKER_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/ombre-brain
         with:
           context: .
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
-            p0luz/ombre-brain:latest
-            p0luz/ombre-brain:${{ steps.ver.outputs.version }}
+            ${{ env.DOCKER_IMAGE }}:latest
+            ${{ env.DOCKER_IMAGE }}:${{ steps.ver.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build without publishing
+        if: steps.registry.outputs.configured != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          platforms: linux/amd64
+          tags: ombre-brain:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
