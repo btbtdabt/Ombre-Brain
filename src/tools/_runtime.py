@@ -29,6 +29,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Optional, Protocol, TypeGuard
 
 from ombrebrain.app.execution import ExecutionEnvelope
+from operation_runtime import run_optional_operation
 
 # --- 共享对象引用，由 server.py 在启动时通过 init(...) 注入 ---
 config: Any = None
@@ -172,24 +173,21 @@ def run_v3_operation(
     protected_paths: tuple[str, ...] = (),
     feature_flags: tuple[str, ...] = (),
 ) -> Any:
-    runtime = globals().get("v3_runtime")
-    runner = getattr(runtime, "run_operation", None)
-    if not callable(runner):
-        return handler()
-    envelope = ExecutionEnvelope(
+    return run_optional_operation(
+        globals().get("v3_runtime"),
+        operation,
+        payload,
+        handler,
         module=module,
-        operation=operation,
-        payload=payload or {},
-        actor_name=actor_name,
-        source=source,
         permissions=permissions,
         required_permissions=required_permissions,
+        actor_name=actor_name,
+        source=source,
         capability=capability,
         writes_memory=writes_memory,
         protected_paths=protected_paths,
         feature_flags=feature_flags,
     )
-    return runner(envelope, handler)
 
 
 async def run_v3_async_operation(

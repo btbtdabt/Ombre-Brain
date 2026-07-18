@@ -303,23 +303,7 @@ def _import_llm_ready() -> bool:
     return bool(getattr(getattr(sh, "dehydrator", None), "api_available", False))
 
 
-async def _await_history_worker(func, *args, **kwargs):
-    """Run preview parsing off-loop and reap it before releasing admission."""
-
-    worker = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
-    try:
-        return await asyncio.shield(worker)
-    except asyncio.CancelledError:
-        while not worker.done():
-            try:
-                await asyncio.shield(worker)
-            except asyncio.CancelledError:
-                continue
-        try:
-            worker.result()
-        except BaseException:
-            pass
-        raise
+_await_history_worker = sh.await_thread_worker
 
 
 async def _await_export_worker(worker: asyncio.Task):

@@ -5,16 +5,19 @@ from __future__ import annotations
 import asyncio
 import re
 import uuid
-from datetime import datetime, timezone
 from typing import Any
 
 from entity_edges import extract_entity_edges_from_bucket
+from profile_facts import profile_key
+from runtime_values import age_hours_since
 from self_anchor import is_self_anchor_bucket
 from utils import parse_human_date_reference, strip_human_date_references, strip_wikilinks
 
 from .. import _runtime as rt
 from .._common import (
     _quota_turn,
+    apply_memory_detail_updates,
+    apply_plan_change_log,
     check_content_size,
     check_grow_input_size,
     check_grow_items_payload,
@@ -882,15 +885,6 @@ async def grow(
     return f"{gate_prefix}{len(items)}条|新{created}合0\n" + "\n".join(results)
 
 
-def _profile_key(value: Any, default: str) -> str:
-    text = str(value or "").strip().lower()
-    if not text:
-        return default
-    text = re.sub(r"\s+", "_", text)
-    text = re.sub(r"[^0-9a-zA-Z_\-\u4e00-\u9fff]+", "", text)
-    return text or default
-
-
 def _profile_fact_body(*, fact: str, evidence_context: str, reflection: str) -> str:
     sections = [("fact", fact)]
     if str(evidence_context or "").strip():
@@ -943,9 +937,9 @@ async def profile_fact(
     if str(reflection or "").strip() and not uses_first_person_voice(reflection):
         return "写入被拒绝：reflection 必须用模型第一人称写，用“我记得 / 我明白 / 我以后 / 我会”等表达。"
 
-    kind = _profile_key(profile_kind, "preference")
-    subject_key = _profile_key(subject, "user")
-    predicate_key = _profile_key(predicate, "")
+    kind = profile_key(profile_kind, "preference")
+    subject_key = profile_key(subject, "user")
+    predicate_key = profile_key(predicate, "")
     evidence = {"bucket_id": evidence_bucket_id}
     if evidence_moment_id:
         evidence["moment_id"] = evidence_moment_id
@@ -1022,20 +1016,7 @@ async def _delete_bucket_and_indexes(bucket_id: str) -> dict:
 
 
 def _bucket_age_hours(bucket: dict) -> float | None:
-    created = bucket.get("metadata", {}).get("created", "")
-    if not created:
-        return None
-    try:
-        parsed = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return max(
-        0.0,
-        (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()
-        / 3600,
-    )
+    return age_hours_since(bucket.get("metadata", {}).get("created", ""))
 
 
 def _anchor_settings() -> tuple[int, float]:
@@ -1210,37 +1191,17 @@ async def trace(
         updates["weight"] = float(weight)
     if dont_surface in (0, 1):
         updates["dont_surface"] = bool(dont_surface)
-    why_remembered = str(why_remembered or "").strip()
-    if why_remembered == "\\clear":
-        updates["why_remembered"] = ""
-    elif why_remembered:
-        updates["why_remembered"] = why_remembered[:500]
-    if str(meaning_append or "").strip():
-        updates["meaning_append"] = str(meaning_append).strip()
-    if meaning_replace is not None:
-        updates["meaning"] = meaning_replace
-    if media_append:
-        updates["media_append"] = media_append
-    if media_replace is not None:
-        updates["media"] = media_replace
+    apply_memory_detail_updates(
+        updates,
+        why_remembered=why_remembered,
+        meaning_append=meaning_append,
+        meaning_replace=meaning_replace,
+        media_append=media_append,
+        media_replace=media_replace,
+    )
     if not updates and not anchor_requested:
         return "没有任何字段需要修改。"
-    if bucket.get("metadata", {}).get("type") == "plan" and (
-        "status" in updates or "content" in updates
-    ):
-        from .._common import append_plan_change_log
-
-        old_meta = bucket.get("metadata", {})
-        history = list(old_meta.get("change_log") or [])
-        if "status" in updates and updates["status"] != old_meta.get("status"):
-            history = append_plan_change_log(
-                history,
-                "status",
-                **{"from": old_meta.get("status"), "to": updates["status"]},
-            )
-        if "content" in updates:
-            history = append_plan_change_log(history, "edit")
-        updates["change_log"] = history
+    apply_plan_change_log(bucket, updates)
     if anchor_requested and anchor == 0:
         anchor_result = await manager.set_anchor(bucket_id, False)
         if not anchor_result.get("ok"):
@@ -1318,8 +1279,11 @@ async def trace(
 
 
 async def pulse(include_archive: bool = False) -> str:
-    """只读查看系统状态和记忆桶摘要；用于盘点和找 read_bucket/trace 候选。"""
+    """只读查看系统状态、索引健康和记忆桶摘要。"""
+
+    await ensure_decay_started()
     manager = require_runtime("bucket_mgr")
+    engine = require_runtime("decay_engine")
     try:
         stats = await manager.get_stats()
     except Exception as exc:
@@ -1332,19 +1296,62 @@ async def pulse(include_archive: bool = False) -> str:
     )
     total_count = active_count + stats.get("archive_count", 0)
     visible_count = total_count if bool_value(include_archive) else active_count
-    engine = require_runtime("decay_engine")
     status = (
         "=== Ombre Brain 记忆系统 ===\n"
         f"固化记忆桶: {stats.get('permanent_count', 0)} 个\n"
         f"动态记忆桶: {stats.get('dynamic_count', 0)} 个\n"
-        f"情绪/印象桶: {stats.get('feel_count', 0)} 个\n"
-        f"独立信件: {stats.get('letter_count', 0)} 封\n"
         f"归档记忆桶: {stats.get('archive_count', 0)} 个\n"
+        f"feel 桶: {stats.get('feel_count', 0)} 条\n"
+        f"plan 桶: {stats.get('plan_count', 0)} 条\n"
+        f"letter 桶: {stats.get('letter_count', 0)} 封\n"
+        f"独立信件: {stats.get('letter_count', 0)} 封\n"
         f"当前显示桶: {visible_count} 个\n"
         f"全量记忆桶: {total_count} 个\n"
         f"总存储大小: {float(stats.get('total_size_kb', 0.0)):.1f} KB\n"
         f"衰减引擎: {'运行中' if getattr(engine, 'is_running', False) else '已停止'}\n"
     )
+
+    try:
+        embedding = getattr(rt, "embedding_engine", None)
+        outbox = getattr(manager, "embedding_outbox", None)
+        pending_ids = outbox.pending_ids() if outbox is not None else set()
+        if outbox is not None:
+            queue_state = outbox.status()
+            circuit = queue_state.get("circuit") or {}
+            status += (
+                f"向量索引队列: 待处理 {queue_state['pending']} 个"
+                f"（重试中 {queue_state['retrying']} 个）"
+                + (
+                    f"，供应商熔断中（连续失败 "
+                    f"{circuit.get('consecutive_failures', 0)} 次）"
+                    if circuit.get("state") == "open"
+                    else ""
+                )
+                + "\n"
+            )
+        if embedding and getattr(embedding, "enabled", False):
+            disk_buckets = await manager.list_all(include_archive=True)
+            disk_ids = {
+                str(bucket.get("id") or "")
+                for bucket in disk_buckets
+                if not (bucket.get("metadata") or {}).get("deleted_at")
+                and str(bucket.get("content") or "").strip()
+            }
+            index_ids = set(embedding.list_all_ids())
+            missing = disk_ids - index_ids - pending_ids
+            orphan = index_ids - disk_ids
+            if missing or orphan:
+                status += (
+                    f"⚠️ 索引漂移：缺失 embedding {len(missing)} 个 / "
+                    f"孤儿 embedding {len(orphan)} 个 "
+                    f"（缺失项可在 Dashboard 触发补齐；孤儿项可运行 "
+                    f"tools/clean_orphan_embeddings.py 清理）\n"
+                )
+    except Exception as exc:
+        warning = getattr(getattr(rt, "logger", None), "warning", None)
+        if callable(warning):
+            warning("pulse index/storage drift check failed: %s", exc)
+
     try:
         buckets = await manager.list_all(include_archive=bool_value(include_archive))
         buckets.extend(await manager.list_letters())
@@ -1353,34 +1360,64 @@ async def pulse(include_archive: bool = False) -> str:
     if not buckets:
         return status + "\n记忆库为空。"
 
-    lines = []
+    sections: dict[str, list[str]] = {
+        "memory": [],
+        "plan": [],
+        "feel": [],
+        "letter": [],
+    }
     for bucket in buckets:
         meta = bucket.get("metadata", {})
-        icon = "💭"
+        bucket_type = str(meta.get("type") or "")
         if meta.get("pinned") or meta.get("protected"):
             icon = "📌"
         elif meta.get("anchor"):
             icon = "⚓"
-        elif meta.get("type") == "permanent":
+        elif bucket_type == "permanent":
             icon = "📦"
-        elif meta.get("type") == "feel":
+        elif bucket_type == "feel":
             icon = "🫧"
-        elif meta.get("type") == "letter":
+        elif bucket_type == "plan":
+            icon = "📋"
+        elif bucket_type == "letter":
             icon = "✉️"
-        elif meta.get("type") == "archived":
+        elif bucket_type == "archived":
             icon = "🗄️"
         elif meta.get("resolved"):
             icon = "✅"
+        else:
+            icon = "💭"
+        bucket_id = str(bucket.get("id") or "")
+        name = str(meta.get("name") or bucket_id)
         domains = ",".join(str(item) for item in meta.get("domain", []) or [])
         resolved_tag = " [已解决]" if meta.get("resolved") else ""
-        lines.append(
-            f"{icon} [{meta.get('name', bucket.get('id', ''))}]{resolved_tag} "
-            f"bucket_id:{bucket.get('id', '')} 主题:{domains} "
+        line = (
+            f"{icon} [{name}]{resolved_tag} bucket_id:{bucket_id} "
+            f"主题:{domains or '未分类'} "
             f"情感:V{float(meta.get('valence', 0.5)):.1f}/A{float(meta.get('arousal', 0.3)):.1f} "
             f"重要:{meta.get('importance', '?')} 权重:{score_bucket(bucket):.2f} "
             f"标签:{','.join(str(item) for item in meta.get('tags', []) or [])}"
         )
-    return status + "\n=== 记忆列表 ===\n" + "\n".join(lines)
+        if bucket_type == "plan":
+            sections["plan"].append(line + f" [{meta.get('status', 'active')}]")
+        elif bucket_type == "feel":
+            sections["feel"].append(line)
+        elif bucket_type == "letter":
+            sections["letter"].append(line + f" [{meta.get('author', '?')}]")
+        else:
+            sections["memory"].append(line)
+
+    rendered = [status.rstrip()]
+    for key, title, unit in (
+        ("memory", "记忆列表", "条"),
+        ("plan", "计划", "条"),
+        ("feel", "feel", "条"),
+        ("letter", "信件", "封"),
+    ):
+        lines = sections[key]
+        if lines:
+            rendered.append(f"=== {title}（{len(lines)} {unit}）===\n" + "\n".join(lines))
+    return "\n\n".join(rendered)
 
 
 def _filter_introspection_dates(

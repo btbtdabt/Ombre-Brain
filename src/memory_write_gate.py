@@ -11,6 +11,8 @@ from typing import Any
 
 from rapidfuzz import fuzz
 
+from runtime_values import unit_float
+
 
 logger = logging.getLogger("ombre_brain.memory_write_gate")
 
@@ -407,10 +409,4 @@ class MemoryWriteGate:
         body = f"{source}\n{MemoryWriteGate._normalize(text)}".encode("utf-8")
         return hashlib.sha256(body).hexdigest()[:16]
 
-    @staticmethod
-    def _clamp(value: Any, default: float) -> float:
-        try:
-            number = float(value)
-        except (TypeError, ValueError):
-            number = default
-        return max(0.0, min(1.0, number))
+    _clamp = staticmethod(unit_float)

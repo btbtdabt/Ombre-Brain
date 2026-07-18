@@ -6,6 +6,12 @@ from typing import Any
 
 import httpx
 
+from runtime_values import (
+    enabled_value as _bool_value,
+    float_between as _float_between,
+    int_between as _int_between,
+)
+
 logger = logging.getLogger("ombre_brain.reranker")
 
 
@@ -84,29 +90,3 @@ class RerankerEngine:
                 results.append(RerankResult(index=index, score=max(0.0, min(1.0, score))))
         results.sort(key=lambda item: item.score, reverse=True)
         return results
-
-
-def _bool_value(value: Any, default: bool = True) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
-
-
-def _int_between(value: Any, default: int, min_value: int, max_value: int) -> int:
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        number = default
-    return max(min_value, min(max_value, number))
-
-
-def _float_between(value: Any, default: float, min_value: float, max_value: float) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        number = default
-    return max(min_value, min(max_value, number))

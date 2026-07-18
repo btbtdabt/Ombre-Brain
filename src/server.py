@@ -5,25 +5,22 @@ server.py — MCP 服务入口 + 启动装配
 
 启动整个 Ombre Brain 进程：加载配置、创建 BucketManager / Dehydrator /
 DecayEngine / EmbeddingEngine / ImportEngine，把它们注入 tools._runtime 与
-web._shared，然后以 @mcp.tool() 注册薄封装（真正的实现在 src/tools/<工具>/ 下面）。
+web._shared，再从 tools.current.manifest 注册唯一的公共工具清单。
 
 关键行为：
-- 启动后暴露 14 个 MCP 工具：breath/breath_search/breath_advanced/hold/grow/
-  trace/anchor/release/pulse/plan/letter_write/letter_read/dream/I；每个入口
-  ≤ 10 行，只负责转发。breath 拆成 breath()(0 参数)+breath_search(3 参数)+
-  breath_advanced(9 参数) 三级，是因为 claude.ai 按需加载工具时会跳过参数
-  复杂的工具，全塞一个 breath() 会导致它常年加载不上（见 issue #17）。
+- 启动后暴露 tools.current.manifest 定义的 current + P0 工具并集。breath
+  保留分级 schema，让简单检索与高级兼容模式都能被客户端稳定发现。
 - Dashboard / HTTP 路由全部已拆分到 src/web/<域>.py（每个模块 register(mcp)），
   本文件仅在启动时调用 web.register_all(mcp) 装配；共享依赖见 web/_shared.py
 - 仍保留在本文件：进程启动、引擎初始化、GitHub 后台同步循环、Webhook 推送、
-  MCP Bearer 鉴权中间件、单连接器 /mcp 装配（启动入口处把 mcp_extra 工具回灌进 mcp）、uvicorn 拉起
+  MCP Bearer 鉴权中间件、单连接器 /mcp 装配、uvicorn 拉起
 
 不做什么（边界）：
 - 不在这里写 hold/breath/dream 等业务逻辑（全在 tools/* 下）
 - 不写 HTTP 路由处理（全在 web/* 下）；不写 LLM prompt（dehydrator 负责）
 - 不直接读写桶文件（bucket_manager 负责）
 
-对外暴露：mcp/mcp_extra 两个实例 + 14 个 @mcp*.tool() 函数；HTTP 路由在 src/web/*
+对外暴露：单个 mcp 实例及 manifest 注册的公共工具；HTTP 路由在 src/web/*
 ========================================
 """
 
@@ -33,7 +30,7 @@ import logging
 import asyncio
 import inspect
 import time
-from typing import Any, Optional, Awaitable
+from typing import Any, Awaitable
 import httpx
 
 
@@ -54,21 +51,12 @@ from current_runtime import RuntimeCollaborators
 from utils import get_version, load_config, setup_logging
 from server_app import build_remote_transport_app as _build_remote_transport_app  # noqa: F401
 
-# --- iter 2.1：MCP 工具实现已按代码路径拆分到 tools/ 子包 ---
-# 本文件只保留 MCP 注册 + 路由（HTTP custom_route）+ 共享辅助。
-# 真正的工具逻辑在 tools/breath, tools/hold, tools/grow, tools/trace,
-# tools/anchor, tools/plan, tools/dream 里，便于单独阅读和修改。
+# MCP 工具由 declarative manifest 统一注册；本文件只负责进程装配与调用 envelope。
 from tools import _runtime as _tools_runtime
-from tools import breath as _t_breath
-from tools import hold as _t_hold
-from tools import grow as _t_grow
-from tools import trace as _t_trace
-from tools import anchor as _t_anchor
-from tools import plan as _t_plan
-from tools import dream as _t_dream
-from tools import i as _t_i
 from tools.current.manifest import (
+    P0_TOOL_NAMES,
     REGISTERED_TOOL_NAMES,
+    TOOL_BY_NAME,
     ToolSpec,
     register_current_tools,
 )
@@ -320,19 +308,9 @@ _gh_auto_interval: int = int(_gh_cfg.get("auto_interval_minutes") or 0)
 # host="0.0.0.0" so Docker container's SSE is externally reachable
 # stdio mode ignores host (no network)
 #
-# iter 2.2：合并回单连接器 /mcp（claude.ai 5 工具上限已解除）。
-# 历史上（iter 2.1）曾拆成主 mcp(/mcp) + 副 mcp_extra(/mcp-extra) 两个实例。
-# 现在只对外暴露主实例 mcp 的一条 /mcp 路由；mcp_extra 仅作工具分组容器保留
-# （7 个 @mcp_extra.tool() 注册不动），启动入口处把它的工具回灌进 mcp 统一暴露。
-# 两个实例共享同一进程、同一 runtime、同一 bucket_mgr；HTTP custom_route（dashboard、API）
-# 全部挂在 mcp 主实例上。
+# 历史上的 /mcp-extra 已退休；所有工具与 HTTP custom_route 都挂在唯一实例上。
 mcp = FastMCP(
     "Ombre Brain",
-    host=_BIND_HOST,
-    port=OMBRE_PORT,
-)
-mcp_extra = FastMCP(
-    "Ombre Brain Extra",
     host=_BIND_HOST,
     port=OMBRE_PORT,
 )
@@ -607,329 +585,22 @@ _tool_runtime_kwargs.update(
 _tools_runtime.init(**_tool_runtime_kwargs)
 
 
-# =============================================================
-# MCP tools — thin registration wrappers
-# MCP 工具 —— 仅注册，实现见 tools/<tool>/
-# 每个入口都不超过 10 行，便于一眼看清参数与归属
-# =============================================================
-@mcp.tool()
-async def breath(
-    query: Optional[str] = "",
-    max_tokens: Optional[int] = 0,
-    domain: Optional[str] = "",
-    valence: Optional[float] = -1,
-    arousal: Optional[float] = -1,
-    max_results: Optional[int] = 0,
-    importance_min: Optional[int] = -1,
-    tags: Optional[str] = "",
-    catalog: Optional[bool] = False,
-) -> str:
-    """无参数,睁眼看看自己记得什么:返回权重最高的未解决记忆 + 置顶核心准则。0 参数是刻意设计——claude.ai 按需加载工具时会跳过参数复杂的工具,拆成 0 参数才能保证每次对话自动浮现,不用手动触发。要按关键词找记忆用 breath_search(query=...);要用 catalog/tags/importance_min/valence/arousal/max_tokens 等高级模式用 breath_advanced(...)。"""
-    return await _with_notice(
-        _t_breath.dispatch(
-            query=query, max_tokens=max_tokens, domain=domain,
-            valence=valence, arousal=arousal, max_results=max_results,
-            importance_min=importance_min, tags=tags, catalog=catalog,
-        ),
-        op="breath",
-        args={
-            "query": query, "max_tokens": max_tokens, "domain": domain,
-            "valence": valence, "arousal": arousal, "max_results": max_results,
-            "importance_min": importance_min, "tags": tags, "catalog": catalog,
-        },
-    )
-
-
-@mcp.tool()
-async def breath_search(
-    query: str,
-    domain: Optional[str] = "",
-    max_results: Optional[int] = 0,
-) -> str:
-    """按关键词/语义检索记忆桶,融合关键词/BM25+语义检索,向量不可用时明确提示并退回关键词检索。命中后逐字返回桶内当前 content，不调用 LLM 摘要/改写。domain 逗号分隔,按主题域预筛。max_results=返回条数上限(默认 config.surfacing.breath_max_results,fallback 20,最大 50)。需要 tags/importance_min/valence/arousal/max_tokens/catalog 等更多过滤维度用 breath_advanced(...)。"""
-    return await _with_notice(
-        _t_breath.dispatch(query=query, domain=domain, max_results=max_results),
-        op="breath_search",
-        args={"query": query, "domain": domain, "max_results": max_results},
-    )
-
-
-@mcp.tool()
-async def breath_advanced(
-    query: Optional[str] = "",
-    max_tokens: Optional[int] = 0,
-    domain: Optional[str] = "",
-    valence: Optional[float] = -1,
-    arousal: Optional[float] = -1,
-    max_results: Optional[int] = 0,
-    importance_min: Optional[int] = -1,
-    tags: Optional[str] = "",
-    catalog: Optional[bool] = False,
-) -> str:
-    """breath 的完整参数版,给需要精细控制的场景用(日常用 breath()/breath_search() 就够了)。不传 query=返回权重最高的未解决记忆;传 query=融合关键词/BM25+语义检索，向量不可用时明确提示并退回关键词检索。命中后逐字返回桶内当前 content，不调用 LLM 摘要/改写；max_tokens 不足时整桶省略，绝不截断正文。catalog=True=目录模式:只返回每桶一行元数据(名称|域|重要度,0 LLM 调用,最省 token),适合开新对话先看目录再 breath_search(query=...) 精准拉取,可配 domain 过滤。max_tokens=单次返回总 token 上限(默认 config.surfacing.breath_max_tokens,fallback 10000)。domain 逗号分隔,valence/arousal 0~1(-1 忽略)。max_results=返回条数上限(默认 config.surfacing.breath_max_results,fallback 20,最大 50)。importance_min>=1=跳过语义检索,按重要度降序返回最多 20 条高重要度记忆。tags 逗号分隔,AND 过滤;tags=\"feel\" 或 \"__feel__\" 等价于 domain=\"feel\",返回所有 feel 类记忆。"""
-    return await _with_notice(
-        _t_breath.dispatch(
-            query=query, max_tokens=max_tokens, domain=domain,
-            valence=valence, arousal=arousal, max_results=max_results,
-            importance_min=importance_min, tags=tags, catalog=catalog,
-        ),
-        op="breath_advanced",
-        args={
-            "query": query, "max_tokens": max_tokens, "domain": domain,
-            "valence": valence, "arousal": arousal, "max_results": max_results,
-            "importance_min": importance_min, "tags": tags, "catalog": catalog,
-        },
-    )
-
-
-@mcp.tool()
-async def hold(
-    content: str,
-    tags: Optional[str] = "",
-    importance: Optional[int] = 5,
-    pinned: Optional[bool] = False,
-    feel: Optional[bool] = False,
-    source_bucket: Optional[str] = "",
-    valence: Optional[float] = -1,
-    arousal: Optional[float] = -1,
-    why_remembered: Optional[str] = "",
-    meaning: Optional[str] = "",
-    media: Optional[list | str] = None,
-    test_data: Optional[bool] = False,
-) -> str:
-    """仅在对话中已明确决定“这段内容值得成为长期记忆”时调用；不要因普通聊天、猜测或工具名称联想而自行调用。存入一条一句话级记忆，content 必须保留原意和事实，不得先改写成摘要；OB 的 hold 路径也绝不会压缩正文。系统优先自动打标，API 不可用时使用本地中性元数据继续逐字保存。tags 逗号分隔,importance 1-10。pinned=True=标记为永久核心,不衰减不合并。feel=True=存为感受类记忆(不参与普通浮现,仅通过 feel 检索读取)。source_bucket=正在消化的原始记忆桶 ID,会被标为已消化以加速淡化。why_remembered=记录原因(可选,自由文本,仅用于展示不计分)。meaning=可选,这条记忆为什么值得被想起——不是摘要,是我自己的话,只在真正觉得有重量时才写,不必每次都写。每次传入的是新增的一条,系统自动追加到该桶的 meaning 列表,不会覆盖已有的。media=可选,可传服务器可读的单个临时路径，或列表；列表项使用 path，或使用 data_base64+filename，如 [{"data_base64":"...","filename":"photo.png","type":"image/png"}]。媒体会先复制到 OB 持久媒体目录，Markdown 只记录稳定路径；无法读取的临时路径会明确报错，绝不保存失效引用。"""
-    return await _with_notice(
-        _t_hold.dispatch(
-            content=content, tags=tags, importance=importance,
-            pinned=pinned, feel=feel, source_bucket=source_bucket,
-            valence=valence, arousal=arousal, why_remembered=why_remembered,
-            meaning=meaning, media=media, test_data=test_data,
-        ),
-        op="hold",
-        args={
-            "content_len": len(content or ""), "tags": tags,
-            "importance": importance, "pinned": pinned, "feel": feel,
-            "source_bucket": source_bucket, "valence": valence, "arousal": arousal,
-            "why_len": len(why_remembered or ""), "meaning_len": len(meaning or ""),
-            "media_count": len(media or []),
-            "test_data": bool(test_data),
-        },
-    )
-
-
-@mcp.tool()
-async def grow(content: str = "", items: Optional[list] = None) -> str:
-    """仅在对话中已明确要求整理并写入长期记忆时调用，不要根据普通聊天自行推断写入意图。整理一段长文本(如一天的记录/一段日记/一篇总结)存入记忆,系统拆分为 2~6 条独立事件桶并各自尝试合并。短内容(<30 字)走 hold 单条快速路径,不强行拆分。
-
-    进阶(可选):若你(上层 AI)已经把长文拆成了 N 条最终正文,传 items=[条1, 条2, ...](字符串列表)即可**逐字入库**——跳过系统的二次拆分与改写,每条正文一字不动,只自动补元数据(领域/情感/标签/命名);合并到老桶也用原文追加、不再压缩。你有完整对话上下文,拆分和表述质量比只看二手长文的内部模型更高,能避免反复压缩带来的失真。传了 items 就忽略 content;不传则按上面的默认行为整段整理。"""
-    return await _with_notice(
-        _t_grow.dispatch(content, items=items),
-        op="grow",
-        args={"content_len": len(content or ""), "items": len(items or [])},
-    )
-
-
-@mcp.tool()
-async def trace(
-    bucket_id: str,
-    name: Optional[str] = "",
-    domain: Optional[str] = "",
-    valence: Optional[float] = -1,
-    arousal: Optional[float] = -1,
-    importance: Optional[int] = -1,
-    tags: Optional[str] = "",
-    resolved: Optional[int] = -1,
-    pinned: Optional[int] = -1,
-    digested: Optional[int] = -1,
-    content: Optional[str] = "",
-    delete: Optional[bool] = False,
-    status: Optional[str] = "",
-    weight: Optional[float] = -1,
-    dont_surface: Optional[int] = -1,
-    why_remembered: Optional[str] = "",
-    meaning_append: Optional[str] = "",
-    meaning_replace: Optional[list] = None,
-    media_append: Optional[list | str] = None,
-    media_replace: Optional[list | str] = None,
-    hard_delete: Optional[bool] = False,
-    delete_reason: Optional[str] = "",
-) -> str:
-    """仅在明确需要修改某条已存在记忆时调用，不要猜测 bucket_id 或自行改写记忆。
-
-    resolved=1 标记已放下；resolved=0 重新激活。pinned=1 标记永久核心并锁定
-    importance=10；pinned=0 取消。digested=1 标记已消化。content 会替换正文并
-    重建 embedding。status/weight 用于 plan；dont_surface 控制日常浮现；
-    why_remembered、meaning_append/replace、media_append/replace 更新相应元数据。
-
-    删除边界：delete=True 只会把 Markdown 移入 archive 并标记 deleted_at，不会
-    物理抹除。hard_delete=True 仅用于清理创建时明确标记 test_data=True 的测试桶，
-    必须单独提供非空 delete_reason；普通记忆和 plan 一律拒绝且不会顺带归档。
-    delete 与 hard_delete 不能同时使用。只传需要修改的字段，-1 或空串表示不改。
-    """
-    return await _with_notice(
-        _t_trace.dispatch(
-            bucket_id=bucket_id, name=name, domain=domain,
-            valence=valence, arousal=arousal, importance=importance,
-            tags=tags, resolved=resolved, pinned=pinned, digested=digested,
-            content=content, delete=delete, status=status, weight=weight,
-            dont_surface=dont_surface, why_remembered=why_remembered,
-            meaning_append=meaning_append, meaning_replace=meaning_replace,
-            media_append=media_append, media_replace=media_replace,
-            hard_delete=hard_delete, delete_reason=delete_reason,
-        ),
-        op="trace",
-        args={
-            "bucket_id": bucket_id, "name": name, "domain": domain,
-            "valence": valence, "arousal": arousal, "importance": importance,
-            "tags": tags, "resolved": resolved, "pinned": pinned, "digested": digested,
-            "content_len": len(content or ""), "delete": delete, "status": status,
-            "hard_delete": hard_delete,
-            "delete_reason_len": len(str(delete_reason or "")),
-            "weight": weight, "dont_surface": dont_surface,
-            "why_len": len(why_remembered or ""),
-            "meaning_append_len": len(meaning_append or ""),
-            "meaning_replace_count": len(meaning_replace or []),
-            "media_append_count": len(media_append or []),
-            "media_replace_count": len(media_replace or []),
-        },
-    )
-
-
-@mcp_extra.tool()
-async def anchor(bucket_id: str) -> str:
-    """把指定桶标记为 anchor(坐标系)。anchor 不主动出现在默认 breath，但 query/domain/emotion 命中时仍返回。硬上限 24，已满时拒绝并提示先 release。"""
-    return await _with_notice(
-        _t_anchor.anchor_set(bucket_id),
-        op="anchor",
-        args={"bucket_id": bucket_id},
-    )
-
-
-@mcp_extra.tool()
-async def release(bucket_id: str) -> str:
-    """解除指定桶的 anchor 标记。桶恢复为普通状态，重新参与默认 breath；pinned 状态保留。"""
-    return await _with_notice(
-        _t_anchor.anchor_release(bucket_id),
-        op="release",
-        args={"bucket_id": bucket_id},
-    )
-
-
-@mcp_extra.tool()
-async def pulse(include_archive: Optional[bool] = False) -> str:
-    """返回记忆系统状态摘要:固化/动态/归档/feel/plan/letter 数量、总占用、衰减引擎运行状态,以及所有桶的摘要列表。include_archive=True 同时返回归档区。"""
-    _tools_runtime.init(bucket_mgr=bucket_mgr, decay_engine=decay_engine)
-    return await _with_notice(
-        _t_anchor.pulse(include_archive=include_archive),
-        op="pulse",
-        args={"include_archive": include_archive},
-    )
-
-
-@mcp_extra.tool()
-async def plan(
-    content: str,
-    status: Optional[str] = "active",
-    related_bucket: Optional[str] = "",
-    weight: Optional[float] = 0.5,
-    why_remembered: Optional[str] = "",
-) -> str:
-    """登记一个待办/承诺/未闭环事项。status=active(默认)/resolved/abandoned。related_bucket 可选,关联到某个普通记忆桶。weight=承诺重量 0.0-1.0(默认 0.5),与 importance 区分——importance 表示「多重要」、weight 表示「多重」。why_remembered=登记原因(可选、仅展示)。plan 不衰减、不出现在普通 breath,仅在 dream 末尾的 active 段返回;后续 hold/grow 写入新事件时系统自动判断已登记的 plan 是否完成。"""
-    return await _with_notice(
-        _t_plan.plan_create(
-            content=content, status=status, related_bucket=related_bucket,
-            weight=weight, why_remembered=why_remembered,
-        ),
-        op="plan",
-        args={
-            "content_len": len(content or ""), "status": status,
-            "related_bucket": related_bucket, "weight": weight,
-            "why_len": len(why_remembered or ""),
-        },
-    )
-
-
-@mcp_extra.tool()
-async def letter_write(
-    author: str,
-    content: str,
-    user_name: Optional[str] = "",
-    title: Optional[str] = "",
-    date: Optional[str] = "",
-    ai_name: Optional[str] = "",
-) -> str:
-    """写入一封信。author 必填:\"user\"=用户一方写的,\"ai\"(或等于 ai_name)=AI 一方写的,也可直接传任意署名字符串;user_name 可选;ai_name 可选(默认取环境变量 AI_NAME,回退 \"AI\");title/date 可选。信件原文永久保存,不压缩/不合并/不衰减,仅建向量索引;普通 breath 不返回,SessionStart 钩子会带上双方各最新一封。"""
-    return await _with_notice(
-        _t_plan.letter_write(
-            author=author, content=content, user_name=user_name,
-            title=title, date=date, ai_name=ai_name,
-        ),
-        op="letter_write",
-        args={
-            "author": author, "content_len": len(content or ""),
-            "user_name": user_name, "title": title, "date": date,
-            "ai_name": ai_name,
-        },
-    )
-
-
-@mcp_extra.tool()
-async def letter_read(
-    query: Optional[str] = "",
-    limit: Optional[int] = 10,
-    author: Optional[str] = "",
-    date_from: Optional[str] = "",
-    date_to: Optional[str] = "",
-) -> str:
-    """检索历史信件。query=语义检索(可选);author 按署名过滤(\"user\"=用户侧,\"ai\"=AI 侧,也可传具体署名字符串);date_from/date_to=ISO 日期范围(可选)。无 query 时按时间倒序返回最近 limit 封。返回完整原文,不压缩。"""
-    return await _with_notice(
-        _t_plan.letter_read(
-            query=query, limit=limit, author=author,
-            date_from=date_from, date_to=date_to,
-        ),
-        op="letter_read",
-        args={
-            "query": query, "limit": limit, "author": author,
-            "date_from": date_from, "date_to": date_to,
-        },
-    )
-
-
-@mcp_extra.tool()
-async def I(
-    content: Optional[str] = "",
-    aspect: Optional[str] = "",
-    read: Optional[bool] = False,
-    limit: Optional[int] = 20,
-) -> str:
-    """记录或读取自我认知条目。content=要记录的自我认知内容(空=进入读取模式)。aspect=维度:nature(本质)/values(看重的)/patterns(规律)/limits(局限)/becoming(变化方向)/uncertainty(不确定的)/stance(立场)(可选)。read=True=读取所有已积累条目。limit=返回条数上限(默认 20)。条目不参与普通 breath/dream，SessionStart 时自动附最近 3 条。"""
-    return await _with_notice(
-        _t_i.dispatch(content=content, aspect=aspect, read=read, limit=limit),
-        op="I",
-        args={"content_len": len(content or ""), "aspect": aspect, "read": read, "limit": limit},
-    )
-
-
-@mcp.tool()
-async def dream(window_hours: Optional[int] = 48) -> str:
-    """读取最近 window_hours（默认 48h）内有变动的所有记忆桶,用于回顾与消化。
-    每个桶返回其在窗口内的最新内容（按 last_active 取）,完整正文不截断。
-    可据此操作：放下的 → trace(resolved=1) 沉底；有沉淀的 → hold(feel=True, source_bucket=...) 记录；无沉淀则不操作。
-    候选桶超过 40 时按 decay_engine.calculate_score() 排序取前 40，避免一次返回过多。"""
-    return await _with_notice(
-        _t_dream.dispatch(window_hours=window_hours),
-        op="dream",
-        args={"window_hours": window_hours},
-    )
-
+# Historical imports such as server.pulse remain aliases to the canonical
+# handlers. They are not registered separately and therefore cannot drift.
+globals().update(
+    {name: TOOL_BY_NAME[name].handler for name in P0_TOOL_NAMES}
+)
 
 def _install_current_tool_surface() -> dict[str, Any]:
     manager = getattr(mcp, "_tool_manager", None)
     tools = getattr(manager, "_tools", None)
     if not isinstance(tools, dict):
         raise RuntimeError("FastMCP tool registry is unavailable")
-    for name in REGISTERED_TOOL_NAMES:
-        tools.pop(name, None)
+    conflicts = set(REGISTERED_TOOL_NAMES) & set(tools)
+    if conflicts:
+        raise RuntimeError(
+            f"MCP tools registered outside the canonical manifest: {sorted(conflicts)}"
+        )
     registered = register_current_tools(mcp, invoker=_invoke_current_tool)
     missing = set(REGISTERED_TOOL_NAMES) - set(tools)
     if missing:
@@ -955,8 +626,6 @@ _current_registered_tools = _install_current_tool_surface()
 # /dashboard、/api/env-vars、/api/config、/api/test/*、/api/models、/api/env-config
 # —— 已拆分到 web/config_api.py
 # =============================================================
-
-
 
 
 # =============================================================
@@ -991,8 +660,6 @@ if __name__ == "__main__":
     transport = config.get("transport", "stdio")
     logger.info(f"Ombre Brain starting | transport: {transport}")
 
-    # mcp_extra remains import-compatible for P0 extensions, but the public
-    # /mcp registry was already replaced by the current+P0 union surface.
     from server_app import (
         HTTPRuntimeSettings,
         RuntimeLifecycle,
@@ -1039,7 +706,10 @@ if __name__ == "__main__":
             lifecycle=_runtime_lifecycle,
         )
         if transport == "streamable-http":
-            logger.info("MCP 单连接器 /mcp：14 个工具统一对外暴露")
+            logger.info(
+                "MCP 单连接器 /mcp：%s 个工具统一对外暴露",
+                len(REGISTERED_TOOL_NAMES),
+            )
         logger.info("CORS middleware enabled for remote transport / 已启用 CORS 中间件")
         logger.info(
             "MCP request body limit: %s",
@@ -1110,5 +780,5 @@ if __name__ == "__main__":
             proxy_headers=False,
         )
     else:
-        # stdio：工具已在启动入口处统一回灌进 mcp（14 个全暴露），这里直接跑。
+        # stdio: canonical manifest tools are already registered on mcp.
         mcp.run(transport=transport)

@@ -1,8 +1,10 @@
 import json
+from types import SimpleNamespace
 
 import pytest
 
 import web.system as system
+from tools.current.manifest import REGISTERED_TOOL_NAMES
 
 
 class FakeMCP:
@@ -16,6 +18,9 @@ class FakeMCP:
             return fn
 
         return decorator
+
+    async def list_tools(self):
+        return [SimpleNamespace(name=name) for name in REGISTERED_TOOL_NAMES]
 
 
 class FakeBucketManager:
@@ -273,7 +278,8 @@ Diagnostics regression tests.
     assert by_id["public_tool_manifest"]["status"] == "ok"
     tool_details = by_id["public_tool_manifest"]["details"]
     assert tool_details["report"]["ok"] is True
-    assert set(tool_details["tool_names"]) >= {"breath", "hold", "grow", "trace", "dream", "pulse"}
+    assert set(tool_details["tool_names"]) == set(REGISTERED_TOOL_NAMES)
+    assert tool_details["report"]["tool_count"] == len(REGISTERED_TOOL_NAMES)
     assert "release" in tool_details["compatibility_tool_names"]
     assert by_id["adr_requirements"]["status"] == "ok"
     adr_details = by_id["adr_requirements"]["details"]
@@ -356,6 +362,15 @@ Diagnostics regression tests.
     assert vnext_coverage_details["preflight_coverage_percent"] == 100.0
 
 
+def test_public_tool_diagnostics_detect_live_registry_drift():
+    snapshot = system._read_public_tool_specs(["breath", "unexpected_tool"])
+
+    assert snapshot["source"] == "live_registry"
+    assert snapshot["matches_manifest"] is False
+    assert "hold" in snapshot["missing_tool_names"]
+    assert snapshot["unexpected_tool_names"] == ["unexpected_tool"]
+
+
 @pytest.mark.asyncio
 async def test_system_diagnostics_route_requires_auth_and_returns_payload(monkeypatch):
     expected = {
@@ -364,7 +379,8 @@ async def test_system_diagnostics_route_requires_auth_and_returns_payload(monkey
         "checks": [{"id": "runtime", "label": "运行时", "status": "ok", "message": "ready", "details": {}}],
     }
 
-    async def fake_build():
+    async def fake_build(public_tool_names=None):
+        assert set(public_tool_names or []) == set(REGISTERED_TOOL_NAMES)
         return expected
 
     monkeypatch.setattr(system.sh, "_require_auth", lambda request: None)

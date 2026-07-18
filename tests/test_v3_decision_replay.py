@@ -1,4 +1,4 @@
-from ombrebrain.decision.records import DecisionRecord
+from ombrebrain.decision.records import DecisionRecord, projection_surfaces
 from ombrebrain.decision.replay import ReplayDebugger
 
 
@@ -59,3 +59,9 @@ def test_replay_debugger_detects_decision_id_drift() -> None:
 
     assert result.ok is False
     assert any("decision id" in issue for issue in result.issues)
+
+
+def test_projection_surfaces_ignores_unnamed_and_non_mapping_entries() -> None:
+    assert projection_surfaces(
+        [{"surface": "dashboard"}, {"surface": ""}, None, "buckets", {"surface": "dashboard"}]
+    ) == {"dashboard"}

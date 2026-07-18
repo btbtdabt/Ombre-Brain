@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable
 
 from projection_mirror import TraceCatalogProjection
+from runtime_values import int_value as _coerce_int
 
 
 _BODY_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -78,13 +79,6 @@ class LedgerReplayValidator:
             "unknown_event_count": projection_report.get("unknown_event_count", 0),
             "violations": violations,
         }
-
-
-def _coerce_int(value: object, *, default: int) -> int:
-    try:
-        return int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return default
 
 
 def _violation(code: str, **details: Any) -> dict[str, Any]:

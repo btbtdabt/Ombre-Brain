@@ -18,7 +18,6 @@ from server_app import (
     RuntimeLifecycle,
     build_http_app,
     install_runtime_lifespan,
-    merge_mcp_tool_registries,
 )
 
 
@@ -145,20 +144,6 @@ def test_management_request_limit_is_normalized(raw, expected):
     settings = HTTPRuntimeSettings.from_config({"limits": limits})
 
     assert settings.max_management_request_bytes == expected
-
-
-def test_merge_mcp_tool_registries_keeps_one_public_manifest():
-    primary = SimpleNamespace(
-        _tool_manager=SimpleNamespace(_tools={"breath": object()})
-    )
-    extra = SimpleNamespace(
-        _tool_manager=SimpleNamespace(_tools={"dream": object(), "pulse": object()})
-    )
-
-    count = merge_mcp_tool_registries(primary, extra)
-
-    assert count == 2
-    assert set(primary._tool_manager._tools) == {"breath", "dream", "pulse"}
 
 
 @pytest.mark.asyncio

@@ -18,6 +18,7 @@ import re
 import sys
 import asyncio as _asyncio
 import threading
+from typing import TYPE_CHECKING, cast
 import httpx
 
 from starlette.requests import Request
@@ -25,34 +26,17 @@ from starlette.responses import Response, StreamingResponse
 
 from . import _shared as sh
 
+if TYPE_CHECKING:
+    from bucket_manager import BucketManager
+    from decay_engine import DecayEngine
+
 try:
     from utils import parse_bool  # type: ignore
 except ImportError:  # pragma: no cover
     from ..utils import parse_bool  # type: ignore
 
 
-def _restart_self() -> None:
-    """热更新后跨平台自重启：用刚下载覆盖的新代码原地替换当前进程。
-
-    为什么不只是 os._exit(0)：
-      之前热更新写完文件后直接 _exit(0)，**指望外部守护进程把服务拉起来**。
-      这在有守护的环境成立（Docker 的 restart 策略 / Render / Zeabur 会重启
-      退出的进程），但**裸机 Mac/Linux/Windows 直接 `python src/server.py`
-      没有任何守护进程**——_exit 之后服务就彻底死了，必须手动重启。
-
-    os.execv 用新的解释器映像替换当前进程，立刻加载刚覆盖下来的 src/：
-      - 裸机 Mac/Linux/Windows：无需 systemd/pm2/nssm 也能自己起来。
-      - Docker/Render/Zeabur：同样有效（进程原地替换，容器/服务保持存活；
-        config.yaml 此时已存在，跳过 entrypoint 的初始化也无副作用）。
-
-    sys.argv 原样传回，配合保持不变的 cwd，精确复现最初的启动方式
-    （`python src/server.py`）。execv 在极少数受限环境可能抛错 → 退回
-    os._exit(0)，让外部守护进程兜底，行为不差于改动前。
-    """
-    try:
-        os.execv(sys.executable, [sys.executable] + sys.argv)
-    except Exception:
-        os._exit(0)
+_restart_self = sh.restart_current_process
 
 _AUTHOR_NOTE = {
     "title": "关于我们",
@@ -1177,9 +1161,11 @@ def register(mcp) -> None:
         if err:
             return err
         try:
-            stats = await sh.bucket_mgr.get_stats()
+            bucket_mgr = cast("BucketManager", sh.bucket_mgr)
+            decay_engine = cast("DecayEngine", sh.decay_engine)
+            stats = await bucket_mgr.get_stats()
             return JSONResponse({
-                "decay_engine": "running" if sh.decay_engine.is_running else "stopped",
+                "decay_engine": "running" if decay_engine.is_running else "stopped",
                 "embedding_enabled": sh.embedding_engine.enabled,
                 "buckets": {
                     "permanent": stats.get("permanent_count", 0),

@@ -21,10 +21,12 @@ import os
 import uuid
 from collections.abc import Iterator, Mapping
 from datetime import datetime, timezone
-from typing import Any
+from pathlib import Path
+from typing import Any, Protocol
 
 import httpx
 
+from runtime_values import utc_now_iso as _now_iso
 from utils import _win_long_path
 
 logger = logging.getLogger("ombre_brain.github_sync")
@@ -40,6 +42,14 @@ _MAX_MANIFEST_PAYLOAD_BYTES = 4 * 1024 * 1024
 _MAX_MANIFEST_BASE64_BYTES = ((_MAX_MANIFEST_PAYLOAD_BYTES + 2) // 3) * 4 + 64 * 1024
 _MAX_RESTORE_TOTAL_BYTES = 512 * 1024 * 1024
 _MANIFEST_FILENAME = "_ombre_backup_manifest.json"
+
+
+class _ScandirIterator(Protocol):
+    def __iter__(self) -> Iterator[os.DirEntry[str]]: ...
+
+    def __next__(self) -> os.DirEntry[str]: ...
+
+    def close(self) -> None: ...
 
 
 class _LazyMarkdownFiles(Mapping[str, bytes]):
@@ -87,7 +97,7 @@ class _LazyMarkdownFiles(Mapping[str, bytes]):
 
 def _iter_markdown_paths(root_dir: str) -> Iterator[str]:
     """Depth-first scandir traversal without materializing directory listings."""
-    iterators: list[os.ScandirIterator] = []
+    iterators: list[_ScandirIterator] = []
     try:
         try:
             iterators.append(os.scandir(root_dir))
@@ -351,11 +361,13 @@ class GitHubSync:
                         # 备份是这个前缀存在的头号场景——sanitize 后的深层 domain
                         # 路径叠上一个本来就很长的安装目录，真的会超限（同款问题
                         # utils.atomic_write_text 已经踩过并修过）。
-                        dest_long = _win_long_path(dest)
-                        os.makedirs(_win_long_path(os.path.dirname(dest)), exist_ok=True)
+                        dest_long = _win_long_path(Path(dest))
+                        os.makedirs(
+                            _win_long_path(Path(dest).parent), exist_ok=True
+                        )
                         # 原子写：导入是覆盖本地记忆的操作，写到一半被中断绝不能留半截文件。
                         _tmp = f"{dest}.{uuid.uuid4().hex}.tmp"
-                        _tmp_long = _win_long_path(_tmp)
+                        _tmp_long = _win_long_path(Path(_tmp))
                         try:
                             with open(_tmp_long, "wb") as f:
                                 f.write(data)
@@ -509,8 +521,11 @@ class GitHubSync:
                 raise RuntimeError("backup manifest entry must be an object")
             path = item.get("path")
             digest = item.get("sha256")
+            raw_size = item.get("bytes")
             try:
-                size = int(item.get("bytes"))
+                if not isinstance(raw_size, (str, int, float)):
+                    raise TypeError
+                size = int(raw_size)
             except (TypeError, ValueError, OverflowError) as exc:
                 raise RuntimeError("backup manifest contains an invalid size") from exc
             if (
@@ -826,10 +841,6 @@ class GitHubSync:
             logger.warning(f"[github_sync] secondary rate limit, retry in {wait}s (attempt {attempt + 1})")
             await asyncio.sleep(wait)
         return resp
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _is_empty_repo_response(resp: httpx.Response) -> bool:

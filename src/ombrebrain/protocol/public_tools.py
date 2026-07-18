@@ -1,12 +1,30 @@
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Mapping
+from typing import Mapping, TypedDict, cast
 
 
 class ToolExposure(Enum):
     NORMAL = "normal"
     RESTRICTED = "restricted"
     INTERNAL = "internal"
+
+
+class PublicToolDecisionPayload(TypedDict):
+    tool_name: str
+    allowed: bool
+    reason: str
+    tool_class: str
+    exposure: str
+    replacement: str
+    requires_admin: bool
+
+
+class PublicToolReportPayload(TypedDict):
+    ok: bool
+    tool_count: int
+    allowed_count: int
+    rejected_count: int
+    decisions: list[PublicToolDecisionPayload]
 
 
 @dataclass(frozen=True)
@@ -42,7 +60,7 @@ class PublicToolDecision:
         object.__setattr__(self, "replacement", str(self.replacement))
         object.__setattr__(self, "requires_admin", bool(self.requires_admin))
 
-    def to_dict(self) -> dict[str, object]:
+    def to_dict(self) -> PublicToolDecisionPayload:
         return {
             "tool_name": self.tool_name,
             "allowed": self.allowed,
@@ -77,7 +95,7 @@ class PublicToolReport:
     def rejected_count(self) -> int:
         return sum(1 for decision in self.decisions if not decision.allowed)
 
-    def to_dict(self) -> dict[str, object]:
+    def to_dict(self) -> PublicToolReportPayload:
         return {
             "ok": self.ok,
             "tool_count": self.tool_count,
@@ -103,6 +121,25 @@ class PublicToolDesignContract:
                 "release": "anchor",
                 "letter_write": "letter",
                 "letter_read": "letter",
+                # Retained Yinglianchun/current names. They remain public for
+                # stored-client compatibility while mapping to P0's organ
+                # vocabulary for diagnostics and future consolidation.
+                "reminder_create": "plan",
+                "reminder_list": "plan",
+                "reminder_update": "plan",
+                "read_bucket": "breath",
+                "list_buckets_light": "breath",
+                "comment_bucket": "trace",
+                "delete_bucket_comment": "trace",
+                "darkroom_enter": "i",
+                "darkroom_rooms": "i",
+                "darkroom_delete": "i",
+                "darkroom_view": "i",
+                "darkroom_status": "i",
+                "darkroom_release": "i",
+                "profile_fact": "i",
+                "introspection": "dream",
+                "entity_edge_backfill": "trace",
             },
             engineering_public_aliases={
                 "remember": "hold/grow",
@@ -225,7 +262,23 @@ def _coerce_spec(spec: PublicToolSpec | Mapping[str, object] | str) -> PublicToo
     if isinstance(spec, PublicToolSpec):
         return spec
     if isinstance(spec, Mapping):
-        return PublicToolSpec(**dict(spec))
+        allowed_keys = {"name", "exposure", "requires_admin", "metadata"}
+        unexpected = set(spec) - allowed_keys
+        if unexpected:
+            names = ", ".join(sorted(str(key) for key in unexpected))
+            raise TypeError(f"unexpected PublicToolSpec fields: {names}")
+        if "name" not in spec:
+            raise TypeError("PublicToolSpec requires a name")
+        metadata_value = spec.get("metadata", {})
+        if not isinstance(metadata_value, Mapping):
+            raise TypeError("PublicToolSpec metadata must be a mapping")
+        metadata = cast(dict[str, object], dict(metadata_value))
+        return PublicToolSpec(
+            name=str(spec["name"]),
+            exposure=_coerce_exposure(spec.get("exposure", ToolExposure.NORMAL)),
+            requires_admin=bool(spec.get("requires_admin", False)),
+            metadata=metadata,
+        )
     return PublicToolSpec(name=str(spec))
 
 

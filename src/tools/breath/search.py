@@ -29,7 +29,9 @@ import asyncio
 import random
 
 from ombrebrain.policy.surfacing import SurfacePolicyVM
+from semantic_search import semantic_score_map
 from .. import _runtime as rt
+from ._filters import bucket_has_tags
 from ._verbatim import render_stored_bucket
 
 _SURFACE_POLICY = SurfacePolicyVM.default()
@@ -38,13 +40,6 @@ _VECTOR_QUERY_TOPK = 50
 
 _SEMANTIC_DISABLED_NOTE = "[检索降级：语义索引暂不可用，本次仅使用关键词/BM25。]"
 _BUDGET_NOTICE = "[token 预算不足：命中的下一条记忆未被截断或摘要，请提高 max_tokens 后重试。]"
-
-
-def _bucket_has_tags(meta: dict, tag_filter: list) -> bool:
-    if not tag_filter:
-        return True
-    bucket_tags = set(meta.get("tags", []) or [])
-    return all(t in bucket_tags for t in tag_filter)
 
 
 def _can_surface_search(bucket: dict) -> bool:
@@ -59,12 +54,7 @@ async def _semantic_scores(query: str, top_k: int) -> tuple[dict[str, float], st
         return {}, _SEMANTIC_DISABLED_NOTE
 
     try:
-        strict_search = getattr(engine, "search_similar_strict", None)
-        if callable(strict_search):
-            pairs = await strict_search(query, top_k=top_k)
-        else:
-            pairs = await engine.search_similar(query, top_k=top_k)
-        return {bucket_id: float(score) for bucket_id, score in pairs}, ""
+        return await semantic_score_map(engine, query, top_k), ""
     except Exception as exc:
         rt.logger.warning(
             f"breath semantic search failed; using keyword/BM25 only: "
@@ -107,7 +97,7 @@ async def surface_search(
             not is_archived
             and meta.get("type") not in ("feel", "plan", "letter")
             and _can_surface_search(exact_bucket)
-            and _bucket_has_tags(meta, tag_filter)
+            and bucket_has_tags(meta, tag_filter)
         ):
             rendered, entry_tokens = render_stored_bucket(
                 exact_bucket,
@@ -147,7 +137,7 @@ async def surface_search(
         if _can_surface_search(b)
         and b["metadata"].get("type") not in ("feel", "plan", "letter")
     ]
-    matches = [b for b in matches if _bucket_has_tags(b["metadata"], tag_filter)]
+    matches = [b for b in matches if bucket_has_tags(b["metadata"], tag_filter)]
     matches = matches[:max_results]
 
     results = []

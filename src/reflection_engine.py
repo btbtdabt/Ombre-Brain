@@ -10,10 +10,13 @@ from zoneinfo import ZoneInfo
 import httpx
 from openai import AsyncOpenAI
 
+from config_modes import normalize_thinking_mode
+from favorite_tags import has_favorite_reason
 from identity import generic_identity_names, identity_names, render_identity_template
 from memory_edges import RELATION_TYPES, MemoryEdgeStore
 from memory_metadata import domain_prompt_options_text, normalize_domain_key
 from persona_event_selection import select_persona_events
+from runtime_values import rounded_unit_float
 from self_anchor import is_self_anchor_bucket
 from utils import bucket_text_for_embedding, parse_first_json_value, strip_wikilinks
 
@@ -393,7 +396,7 @@ class ReflectionEngine:
             or os.environ.get("OMBRE_PERSONA_API_KEY", "")
             or dehy_cfg.get("api_key", "")
         )
-        self.thinking_mode = self._normalize_thinking_mode(
+        self.thinking_mode = normalize_thinking_mode(
             cfg.get("thinking_mode")
             or persona_cfg.get("thinking_mode")
             or ""
@@ -665,7 +668,7 @@ class ReflectionEngine:
         tags = self._string_list(result.get("tags"), limit=8)
         confidence = self._clamp(result.get("confidence", 0.55))
         importance = self._int_between(result.get("importance"), meta.get("importance", 5))
-        if self._has_favorite_tag(tags) and not self._has_favorite_reason(bucket.get("content", "")):
+        if self._has_favorite_tag(tags) and not has_favorite_reason(bucket.get("content", "")):
             tags = [tag for tag in tags if tag != "haven_favorite" and not str(tag).startswith("flavor_")]
             logger.warning(
                 "Rejected favorite tags without reason during enrich / enrich 拒绝缺少喜欢原因的 favorite 标签: %s",
@@ -4201,19 +4204,6 @@ class ReflectionEngine:
             for tag in tags
         )
 
-    @staticmethod
-    def _has_favorite_reason(content: str) -> bool:
-        text = strip_wikilinks(str(content or "")).lower()
-        return any(
-            marker in text
-            for marker in (
-                "喜欢它的原因",
-                "喜欢的原因",
-                "favorite_reason",
-                "favorite reason",
-            )
-        )
-
     def _append_affect_anchor(self, content: str, anchor: dict) -> str:
         if self._has_affect_anchor(content):
             return content
@@ -4451,13 +4441,7 @@ class ReflectionEngine:
                 result.append(text[:40])
         return result[:limit]
 
-    @staticmethod
-    def _clamp(value: Any) -> float:
-        try:
-            number = float(value)
-        except (TypeError, ValueError):
-            number = 0.5
-        return max(0.0, min(1.0, round(number, 3)))
+    _clamp = staticmethod(rounded_unit_float)
 
     @staticmethod
     def _int_between(value: Any, default: int) -> int:
@@ -4476,12 +4460,3 @@ class ReflectionEngine:
     def _normalize_period(period: str) -> str:
         normalized = str(period or "").strip().lower()
         return "weekly" if normalized == "weekly" else "daily"
-
-    @staticmethod
-    def _normalize_thinking_mode(value: Any) -> str:
-        normalized = str(value or "").strip().lower()
-        if normalized in {"enabled", "enable", "on", "true"}:
-            return "enabled"
-        if normalized in {"disabled", "disable", "off", "false", "non-thinking", "non_thinking"}:
-            return "disabled"
-        return ""

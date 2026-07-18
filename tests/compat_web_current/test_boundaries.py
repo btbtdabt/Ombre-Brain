@@ -540,6 +540,47 @@ async def test_profile_deprecate_refreshes_derived_indexes():
 
 
 @pytest.mark.asyncio
+async def test_profile_edit_preserves_dashboard_key_and_section_contracts():
+    bucket = {
+        "id": "profile-1",
+        "content": "### fact\nOld fact\n\n### evidence-context\nOriginal evidence",
+        "metadata": {
+            "tags": ["profile_fact", "profile_preference"],
+            "profile_kind": "preference",
+            "created": "2026-01-01T00:00:00+00:00",
+        },
+    }
+
+    class Manager:
+        async def get(self, _bucket_id):
+            return bucket
+
+        async def update(self, _bucket_id, **updates):
+            bucket["content"] = updates.pop("content", bucket["content"])
+            bucket["metadata"].update(updates)
+            return True
+
+    response = await _profile_update_direct(
+        CurrentWebDependencies(config={}, bucket_mgr=Manager()),
+        "profile-1",
+        {
+            "action": "edit",
+            "fact": "Updated fact",
+            "profile_kind": "Favorite-Food",
+            "subject": " Amy Person ",
+            "predicate": "Likes Food!",
+        },
+    )
+
+    assert response.status_code == 200
+    assert bucket["metadata"]["profile_kind"] == "favorite_food"
+    assert bucket["metadata"]["subject"] == "amy_person"
+    assert bucket["metadata"]["predicate"] == "likes_food"
+    assert "profile_favorite_food" in bucket["metadata"]["tags"]
+    assert "### evidence_context\nOriginal evidence" in bucket["content"]
+
+
+@pytest.mark.asyncio
 async def test_restore_reindex_reports_missing_bucket_as_error():
     class Manager:
         async def get(self, _bucket_id):

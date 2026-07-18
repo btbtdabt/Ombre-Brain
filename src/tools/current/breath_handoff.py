@@ -7,24 +7,20 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from persona_event_selection import select_persona_events
+from recall_pipeline import is_unpinned_anchor_candidate, trim_to_token_budget
 from self_anchor import SELF_ANCHOR_TAG, is_self_anchor_bucket
 from utils import LOCAL_TZ, bucket_content_for_recall, count_tokens_approx, strip_wikilinks
 
 from .. import _runtime as rt
-from ._helpers import dict_items, identity, mapping_or_empty, require_runtime, runtime_config
-
-
-def _log_warning(message: str, *args: Any) -> None:
-    warning = getattr(getattr(rt, "logger", None), "warning", None)
-    if callable(warning):
-        warning(message, *args)
-
-
-def _clip(value: Any, max_chars: int) -> str:
-    text = " ".join(str(value or "").split()).strip()
-    if len(text) <= max_chars:
-        return text
-    return text[: max(0, max_chars - 1)].rstrip() + "…"
+from ._helpers import (
+    clip_text as _clip,
+    dict_items,
+    identity,
+    log_warning as _log_warning,
+    mapping_or_empty,
+    require_runtime,
+    runtime_config,
+)
 
 
 def _parse_datetime(value: Any) -> datetime | None:
@@ -89,10 +85,7 @@ def _self_anchor(all_buckets: list[dict]) -> str:
 def _select_anchors(all_buckets: list[dict], limit: int = 2) -> list[dict]:
     anchors = []
     for bucket in all_buckets:
-        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
-        if is_self_anchor_bucket(bucket) or not meta.get("anchor"):
-            continue
-        if meta.get("pinned") or meta.get("protected") or meta.get("type") in {"permanent", "feel"}:
+        if not is_unpinned_anchor_candidate(bucket):
             continue
         anchors.append(bucket)
     anchors.sort(
@@ -294,21 +287,7 @@ def _care_memos(session_id: str, limit: int = 3) -> str:
     return "\n".join(rows)
 
 
-def _trim_to_tokens(value: str, budget: int) -> str:
-    text = str(value or "").strip()
-    if budget <= 0 or not text:
-        return ""
-    if count_tokens_approx(text) <= budget:
-        return text
-    low, high = 0, len(text)
-    while low < high:
-        middle = (low + high + 1) // 2
-        candidate = text[:middle].rstrip() + "…"
-        if count_tokens_approx(candidate) <= budget:
-            low = middle
-        else:
-            high = middle - 1
-    return text[:low].rstrip() + ("…" if low else "")
+_trim_to_tokens = trim_to_token_budget
 
 
 def _format_sections(

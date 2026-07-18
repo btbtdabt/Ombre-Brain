@@ -128,6 +128,18 @@ def test_public_tool_manifest_report_is_json_safe():
     assert data["decisions"][1]["replacement"] == "hold/grow"
 
 
+def test_public_tool_contract_accepts_the_complete_production_manifest():
+    from ombrebrain.protocol import PublicToolDesignContract, PublicToolSpec
+    from tools.current.manifest import REGISTERED_TOOL_NAMES
+
+    report = PublicToolDesignContract.default().evaluate_manifest(
+        [PublicToolSpec(name=name) for name in REGISTERED_TOOL_NAMES]
+    )
+
+    assert report.ok is True
+    assert report.tool_count == len(REGISTERED_TOOL_NAMES)
+
+
 def test_protocol_package_exports_public_tool_design_contract():
     from ombrebrain.protocol import (
         PublicToolDecision,

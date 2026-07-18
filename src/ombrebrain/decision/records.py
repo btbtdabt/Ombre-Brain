@@ -159,7 +159,7 @@ def _summary(command_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         "consistency_ok": bool(consistency_report.get("ok", True)),
         "projection_count": len(journal_entries),
         "observation_count": len(observations),
-        "projection_surfaces": sorted(_surfaces(journal_entries)),
+        "projection_surfaces": sorted(projection_surfaces(journal_entries)),
         "outcome_ok": bool(outcome.get("ok", True)),
     }
 
@@ -194,7 +194,9 @@ def _stable_id(command_id: str, payload: dict[str, Any]) -> str:
     return f"dec_{hashlib.sha256(serialized.encode('utf-8')).hexdigest()[:32]}"
 
 
-def _surfaces(entries: list[Any]) -> set[str]:
+def projection_surfaces(entries: list[Any]) -> set[str]:
+    """Return the named projection surfaces from decision payload entries."""
+
     surfaces: set[str] = set()
     for entry in entries:
         if isinstance(entry, dict) and entry.get("surface"):

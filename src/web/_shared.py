@@ -26,7 +26,9 @@ web/_shared.py — Dashboard/HTTP 层的共享依赖与鉴权工具
 ========================================
 """
 
+import asyncio
 import os
+import sys
 import time
 import json as _json_lib
 import hashlib
@@ -43,8 +45,8 @@ from typing import Iterator
 from starlette.requests import Request
 from starlette.responses import Response
 
-from ombrebrain.app.execution import ExecutionEnvelope
 from ombrebrain.policy.update_policy import evaluate_update_manifest as _evaluate_update_manifest
+from operation_runtime import run_optional_operation
 
 logger = logging.getLogger("ombre_brain")
 
@@ -190,6 +192,38 @@ def init_runtime(**kwargs) -> None:
     globals().update(kwargs)
 
 
+async def await_thread_worker(func, *args, **kwargs):
+    """Run thread work without releasing its caller's guard during cancellation."""
+
+    worker = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                continue
+        try:
+            worker.result()
+        except BaseException:
+            pass
+        raise
+
+
+def oauth_not_found_response() -> Response:
+    return Response(status_code=404, headers={"Cache-Control": "no-store"})
+
+
+def restart_current_process() -> None:
+    """Reload current code in place, falling back to the external process supervisor."""
+
+    try:
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    except Exception:
+        os._exit(0)
+
+
 async def _read_json_object(request: Request) -> dict:
     """Parse a JSON request body and reject non-object top-level values.
 
@@ -271,24 +305,21 @@ def run_v3_web_operation(
     feature_flags: tuple[str, ...] = (),
 ):
     """Run a web operation through the optional v3 execution side channel."""
-    runtime = globals().get("v3_runtime")
-    runner = getattr(runtime, "run_operation", None)
-    if not callable(runner):
-        return handler()
-    envelope = ExecutionEnvelope(
+    return run_optional_operation(
+        globals().get("v3_runtime"),
+        operation,
+        payload,
+        handler,
         module=module,
-        operation=operation,
-        payload=payload or {},
-        actor_name=actor_name,
-        source=source,
         permissions=permissions,
         required_permissions=required_permissions,
+        actor_name=actor_name,
+        source=source,
         capability=capability,
         writes_memory=writes_memory,
         protected_paths=protected_paths,
         feature_flags=feature_flags,
     )
-    return runner(envelope, handler)
 
 
 # --- 心跳 / 活跃时间戳（原 server.py；移到这里让 heartbeat 路由与工具共用同一来源）---
@@ -1061,7 +1092,7 @@ def _create_session() -> str:
             tok: exp for tok, exp in _sessions.items() if exp > now
         }
         while len(candidate) >= _MAX_ACTIVE_SESSIONS:
-            oldest = min(candidate, key=candidate.get)
+            oldest = min(candidate, key=lambda token: candidate[token])
             candidate.pop(oldest, None)
         token = secrets.token_urlsafe(_SESSION_TOKEN_BYTES)
         candidate[token] = now + _session_ttl_seconds()

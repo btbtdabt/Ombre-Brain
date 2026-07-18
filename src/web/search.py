@@ -12,10 +12,14 @@ web/search.py — 检索 / 重复 / 概念网络 / breath 调试
 ========================================
 """
 
+from collections.abc import Awaitable
+from typing import Any, Protocol, cast
+
 from starlette.requests import Request
 from starlette.responses import Response
 
 from ombrebrain.policy.surfacing import SurfacePolicyVM
+from semantic_search import SemanticSearchEngine, semantic_score_map
 from tools._common import check_query_size
 from . import _shared as sh
 
@@ -31,6 +35,51 @@ except ImportError:  # pragma: no cover
 _SEMANTIC_DISABLED_NOTE = "语义索引暂不可用，本次仅使用关键词/BM25"
 
 
+class _BucketManager(Protocol):
+    w_topic: float
+    w_emotion: float
+    w_time: float
+    w_importance: float
+    fuzzy_threshold: float
+
+    def search(
+        self,
+        query: str,
+        *,
+        limit: int,
+        vector_scores: dict[str, float],
+    ) -> Awaitable[list[dict[str, Any]]]: ...
+
+    def list_all(
+        self,
+        *,
+        include_archive: bool,
+    ) -> Awaitable[list[dict[str, Any]]]: ...
+
+    def _calc_topic_score(self, query: str, bucket: dict[str, Any]) -> float: ...
+
+    def _calc_emotion_score(
+        self,
+        valence: float,
+        arousal: float,
+        metadata: dict[str, Any],
+    ) -> float: ...
+
+    def _calc_time_score(self, metadata: dict[str, Any]) -> float: ...
+
+
+class _DecayEngine(Protocol):
+    def calculate_score(self, metadata: dict[str, Any]) -> float: ...
+
+
+class _EmbeddingEngine(SemanticSearchEngine, Protocol):
+    enabled: bool
+
+    def get_embedding(self, bucket_id: str) -> Awaitable[Any]: ...
+
+    def _cosine_similarity(self, left: Any, right: Any) -> float: ...
+
+
 async def _semantic_scores_for_dashboard(query: str, top_k: int) -> tuple[dict[str, float], str]:
     """显式跑一次向量查询，失败时给出可读原因。
 
@@ -39,16 +88,11 @@ async def _semantic_scores_for_dashboard(query: str, top_k: int) -> tuple[dict[s
     embedding_engine.search_similar()，失败只打一行 warning 日志就吞掉异常，
     调用方（这里是 Dashboard）完全看不出这次检索到底有没有真的用上语义通道。
     """
-    engine = sh.embedding_engine
+    engine = cast(_EmbeddingEngine | None, sh.embedding_engine)
     if not engine or not getattr(engine, "enabled", False):
         return {}, _SEMANTIC_DISABLED_NOTE
     try:
-        strict_search = getattr(engine, "search_similar_strict", None)
-        if callable(strict_search):
-            pairs = await strict_search(query, top_k=top_k)
-        else:
-            pairs = await engine.search_similar(query, top_k=top_k)
-        return {bucket_id: float(score) for bucket_id, score in pairs}, ""
+        return await semantic_score_map(engine, query, top_k), ""
     except Exception as exc:
         logger.warning(
             f"/api/search semantic search failed; using keyword/BM25 only: "
@@ -87,10 +131,11 @@ def register(mcp) -> None:
         if query_error:
             return JSONResponse({"error": query_error}, status_code=400)
         try:
+            bucket_mgr = cast(_BucketManager, sh.bucket_mgr)
             vector_scores, semantic_notice = await _semantic_scores_for_dashboard(
                 query, top_k=50
             )
-            matches = await sh.bucket_mgr.search(
+            matches = await bucket_mgr.search(
                 query, limit=10, vector_scores=vector_scores
             )
             result = []
@@ -132,7 +177,8 @@ def register(mcp) -> None:
         if err:
             return err
         try:
-            all_b = await sh.bucket_mgr.list_all(include_archive=False)
+            bucket_mgr = cast(_BucketManager, sh.bucket_mgr)
+            all_b = await bucket_mgr.list_all(include_archive=False)
             seen: set[frozenset] = set()
             pairs: list[dict] = []
             index = {b["id"]: b for b in all_b}
@@ -182,7 +228,10 @@ def register(mcp) -> None:
         if mode == "wikilinks":
             mode = "concept"
         try:
-            all_buckets = await sh.bucket_mgr.list_all(include_archive=False)
+            bucket_mgr = cast(_BucketManager, sh.bucket_mgr)
+            decay_engine = cast(_DecayEngine, sh.decay_engine)
+            embedding_engine = cast(_EmbeddingEngine | None, sh.embedding_engine)
+            all_buckets = await bucket_mgr.list_all(include_archive=False)
 
             if mode == "embedding":
                 # 旧的桶→桶相似度图（保留）
@@ -195,24 +244,24 @@ def register(mcp) -> None:
                         "name": meta.get("name", bid),
                         "kind": "bucket",
                         "type": meta.get("type", "dynamic"),
-                        "score": sh.decay_engine.calculate_score(meta),
+                        "score": decay_engine.calculate_score(meta),
                         "resolved": meta.get("resolved", False),
                         "pinned": meta.get("pinned", False),
                         "anchor": bool(meta.get("anchor")),  # #10
                     })
                 edges = []
                 embeddings = {}
-                if sh.embedding_engine and sh.embedding_engine.enabled:
+                if embedding_engine and embedding_engine.enabled:
                     for b in all_buckets:
-                        emb = await sh.embedding_engine.get_embedding(b["id"])
+                        emb = await embedding_engine.get_embedding(b["id"])
                         if emb is not None:
                             embeddings[b["id"]] = emb
-                ids = list(embeddings.keys())
-                for i, id_a in enumerate(ids):
-                    for id_b in ids[i + 1:]:
-                        sim = sh.embedding_engine._cosine_similarity(embeddings[id_a], embeddings[id_b])
-                        if sim > 0.5:
-                            edges.append({"source": id_a, "target": id_b, "weight": round(sim, 3), "kind": "similarity"})
+                    ids = list(embeddings.keys())
+                    for i, id_a in enumerate(ids):
+                        for id_b in ids[i + 1:]:
+                            sim = embedding_engine._cosine_similarity(embeddings[id_a], embeddings[id_b])
+                            if sim > 0.5:
+                                edges.append({"source": id_a, "target": id_b, "weight": round(sim, 3), "kind": "similarity"})
                 return JSONResponse({"nodes": nodes, "edges": edges, "mode": mode})
 
             # ---- concept mode ----
@@ -308,13 +357,15 @@ def register(mcp) -> None:
         except (TypeError, ValueError, OverflowError):
             return JSONResponse({"error": "n must be an integer in [1,50]"}, status_code=400)
         try:
-            all_buckets = await sh.bucket_mgr.list_all(include_archive=False)
+            bucket_mgr = cast(_BucketManager, sh.bucket_mgr)
+            decay_engine = cast(_DecayEngine, sh.decay_engine)
+            all_buckets = await bucket_mgr.list_all(include_archive=False)
             results = []
             for bucket in all_buckets:
                 if not _SURFACE_POLICY.evaluate_bucket(bucket, mode="spontaneous").allowed:
                     continue
                 meta = bucket.get("metadata", {})
-                score = sh.decay_engine.calculate_score(meta)
+                score = decay_engine.calculate_score(meta)
                 if meta.get("resolved"):
                     score *= 0.3
                 results.append({
@@ -350,13 +401,14 @@ def register(mcp) -> None:
             return JSONResponse({"error": str(exc)}, status_code=400)
 
         try:
-            all_buckets = await sh.bucket_mgr.list_all(include_archive=False)
+            bucket_mgr = cast(_BucketManager, sh.bucket_mgr)
+            all_buckets = await bucket_mgr.list_all(include_archive=False)
             results = []
             w = {
-                "topic": sh.bucket_mgr.w_topic,
-                "emotion": sh.bucket_mgr.w_emotion,
-                "time": sh.bucket_mgr.w_time,
-                "importance": sh.bucket_mgr.w_importance,
+                "topic": bucket_mgr.w_topic,
+                "emotion": bucket_mgr.w_emotion,
+                "time": bucket_mgr.w_time,
+                "importance": bucket_mgr.w_importance,
             }
             w_sum = sum(w.values())
 
@@ -364,9 +416,9 @@ def register(mcp) -> None:
                 meta = bucket.get("metadata", {})
                 bid = bucket["id"]
                 try:
-                    topic = sh.bucket_mgr._calc_topic_score(query, bucket) if query else 0.0
-                    emotion = sh.bucket_mgr._calc_emotion_score(q_valence if q_valence is not None else 0.5, q_arousal if q_arousal is not None else 0.5, meta)
-                    time_s = sh.bucket_mgr._calc_time_score(meta)
+                    topic = bucket_mgr._calc_topic_score(query, bucket) if query else 0.0
+                    emotion = bucket_mgr._calc_emotion_score(q_valence if q_valence is not None else 0.5, q_arousal if q_arousal is not None else 0.5, meta)
+                    time_s = bucket_mgr._calc_time_score(meta)
                     imp = max(1, min(10, int(meta.get("importance") or 5))) / 10.0
 
                     raw_total = (
@@ -396,7 +448,7 @@ def register(mcp) -> None:
                         "weights": w,
                         "raw_total": round(raw_total, 4),
                         "normalized": round(normalized, 2),
-                        "passed_threshold": normalized >= sh.bucket_mgr.fuzzy_threshold,
+                        "passed_threshold": normalized >= bucket_mgr.fuzzy_threshold,
                     })
                 except Exception as _score_exc:
                     logger.error(
@@ -412,7 +464,7 @@ def register(mcp) -> None:
                 "valence": q_valence,
                 "arousal": q_arousal,
                 "weights": w,
-                "threshold": sh.bucket_mgr.fuzzy_threshold,
+                "threshold": bucket_mgr.fuzzy_threshold,
                 "total_candidates": len(results),
                 "passed_count": len(passed),
                 "results": results[:50],  # top 50 for debug

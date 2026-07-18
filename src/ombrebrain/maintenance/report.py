@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -8,6 +9,7 @@ import tempfile
 from typing import Any
 
 from ombrebrain.app.execution import ExecutionEnvelope
+from ombrebrain.app.command_boundary_health import build_runtime_command_boundary_health
 from ombrebrain.app.profiles import build_default_legacy_profiles
 from ombrebrain.app.legacy_runtime import LegacyRuntime
 from ombrebrain.architecture import (
@@ -32,7 +34,8 @@ from ombrebrain.maintenance.migration_contract import (
 )
 from ombrebrain.maintenance.vnext_coverage import VNextCoverageMatrix
 from ombrebrain.plugins import PluginManifest, PluginRuntime, PluginSandbox
-from ombrebrain.policy import RedLineContract, RedLineFeatureSpec, SurfaceDecision
+from ombrebrain.policy.red_lines import RedLineContract, RedLineFeatureSpec
+from ombrebrain.policy.surfacing import SurfaceDecision
 from ombrebrain.policy.engine import PolicyEngine
 from ombrebrain.policy.formal_invariants import FormalInvariantChecker
 from ombrebrain.protocol import PublicToolDesignContract, PublicToolSpec, ToolExposure
@@ -179,7 +182,7 @@ def _public_tool_check() -> dict[str, Any]:
             PublicToolSpec("verify_ledger", exposure=ToolExposure.RESTRICTED, requires_admin=True),
         ]
     )
-    return report.to_dict()
+    return dict(report.to_dict())
 
 
 def _ledger_mirror_check() -> dict[str, Any]:
@@ -319,6 +322,9 @@ def _policy_verdicts_check() -> dict[str, Any]:
         ExecutionEnvelope(module="tools.breath", operation="breath", permissions=("mcp:call",)),
         breath_plan,
     )
+    read_metadata = read_verdict.get("metadata")
+    read_program = read_metadata.get("program") if isinstance(read_metadata, dict) else None
+    read_instructions = read_program.get("instructions") if isinstance(read_program, dict) else None
 
     return {
         "ok": (
@@ -326,7 +332,7 @@ def _policy_verdicts_check() -> dict[str, Any]:
             and audit_verdict.get("effective_allowed") is True
             and enforce_verdict.get("allowed") is False
             and enforce_verdict.get("effective_allowed") is False
-            and isinstance(read_verdict.get("metadata", {}).get("program", {}).get("instructions"), list)
+            and isinstance(read_instructions, list)
         ),
         "audit_missing_permission": audit_verdict,
         "enforce_missing_permission": enforce_verdict,
@@ -569,7 +575,10 @@ def _runtime_command_boundary_check(runtime: LegacyRuntime, *, limit: int = 50) 
     health = getattr(runtime, "debug_command_boundary_health", None)
     if callable(health):
         try:
-            return dict(health(limit=limit))
+            raw_health = health(limit=limit)
+            if not isinstance(raw_health, Mapping):
+                raise TypeError("command boundary health must be a mapping")
+            return dict(raw_health)
         except Exception as exc:  # pragma: no cover - defensive side channel
             return {
                 "ok": False,
@@ -579,7 +588,7 @@ def _runtime_command_boundary_check(runtime: LegacyRuntime, *, limit: int = 50) 
             }
 
     try:
-        events = runtime.fabric.replay_events()
+        events: list[object] = list(runtime.fabric.replay_events())
     except Exception as exc:  # pragma: no cover - defensive side channel
         return {
             "ok": False,
@@ -588,67 +597,7 @@ def _runtime_command_boundary_check(runtime: LegacyRuntime, *, limit: int = 50) 
             "error_message": str(exc)[:240],
         }
 
-    recent_events = events[-limit:] if limit > 0 else events
-    candidates = [event for event in recent_events if _is_boundary_candidate(event)]
-    contract = AdvancedCommandBoundaryContract.default()
-    reports: list[dict[str, Any]] = []
-    issues: list[dict[str, Any]] = []
-    missing_receipts: list[dict[str, Any]] = []
-
-    for event in candidates:
-        metadata = dict(getattr(event, "metadata", {}) or {})
-        boundary_error = metadata.get("command_boundary_error")
-        if isinstance(boundary_error, dict):
-            issues.append(
-                {
-                    "code": "command_boundary_metadata_error",
-                    "message": str(boundary_error.get("error_message") or "command boundary metadata failed"),
-                    "event": _event_summary(event),
-                    "metadata": boundary_error,
-                }
-            )
-            continue
-
-        boundary = metadata.get("command_boundary")
-        if not isinstance(boundary, dict):
-            missing_receipts.append(_event_summary(event))
-            continue
-
-        receipt = boundary.get("receipt")
-        if not isinstance(receipt, dict):
-            issues.append(
-                {
-                    "code": "command_boundary_receipt_missing",
-                    "message": "runtime command boundary metadata does not include a receipt",
-                    "event": _event_summary(event),
-                    "metadata": {},
-                }
-            )
-            continue
-
-        report = contract.evaluate_receipt(receipt).to_dict()
-        reports.append(report)
-        if not report.get("ok"):
-            for issue in report.get("issues", []):
-                issue_data = dict(issue)
-                issue_data["event"] = _event_summary(event)
-                issues.append(issue_data)
-
-    ok = not issues
-    status = "error" if issues else "warning" if missing_receipts else "ok"
-    return {
-        "ok": ok,
-        "status": status,
-        "event_count": len(events),
-        "scanned_event_count": len(recent_events),
-        "candidate_event_count": len(candidates),
-        "receipt_count": len(reports),
-        "missing_receipt_count": len(missing_receipts),
-        "invalid_receipt_count": len({str(issue.get("event", {}).get("id", "")) for issue in issues if issue.get("event")}),
-        "reports": reports,
-        "missing_receipts": missing_receipts,
-        "issues": issues,
-    }
+    return build_runtime_command_boundary_health(events, limit=limit)
 
 
 def _observability_boundary_check() -> dict[str, Any]:
@@ -717,10 +666,10 @@ def _replication_contract_check() -> dict[str, Any]:
         contract.evaluate_segment(
             ReplicationSegment(
                 replica_id="replica-a",
-                events=[
+                events=(
                     {"event_type": "TraceCreated", "trace_id": "t1", "trace_kind": "dynamic"},
                     {"event_type": "TraceDeletedToArchive", "trace_id": "t1", "payload": {"tombstone": True}},
-                ],
+                ),
             )
         ),
     ]
@@ -934,28 +883,6 @@ def _summarize_checks(checks: dict[str, dict[str, Any]]) -> dict[str, int]:
         else:
             summary["ok"] += 1
     return summary
-
-
-def _is_boundary_candidate(event: object) -> bool:
-    metadata = dict(getattr(event, "metadata", {}) or {})
-    source_chain = tuple(str(part) for part in getattr(event, "source_chain", ()) or ())
-    return (
-        "command_boundary" in metadata
-        or "command_boundary_error" in metadata
-        or "command_plan" in metadata
-        or source_chain[:1] in {("legacy_execution",), ("legacy_tool",)}
-    )
-
-
-def _event_summary(event: object) -> dict[str, Any]:
-    metadata = dict(getattr(event, "metadata", {}) or {})
-    command_plan = metadata.get("command_plan") if isinstance(metadata.get("command_plan"), dict) else {}
-    return {
-        "id": str(getattr(event, "id", "")),
-        "source_chain": list(getattr(event, "source_chain", ()) or ()),
-        "command_id": str(command_plan.get("command_id", "")),
-        "command_kind": str(command_plan.get("command_kind", "")),
-    }
 
 
 def _json_safe(value: Any) -> Any:

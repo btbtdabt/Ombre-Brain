@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from favorite_tags import GENERIC_FAVORITE_TAG, has_favorite_memory_tag
+from runtime_values import lower_text as _lower
+from runtime_values import metadata_view as _metadata
 
 LAYER_CORE = "core_memory"
 LAYER_ANCHOR = "long_term_anchor"
@@ -274,6 +276,10 @@ def infer_bucket_layer(bucket: dict[str, Any] | None) -> str:
     if writer_layer:
         return writer_layer
     return LAYER_DYNAMIC
+
+
+def is_source_record_bucket(bucket: dict[str, Any] | None) -> bool:
+    return isinstance(bucket, dict) and infer_bucket_layer(bucket) == LAYER_SOURCE_RECORD
 
 
 def policy_for_bucket(bucket: dict[str, Any] | None) -> MemoryLayerPolicy:
@@ -601,11 +607,6 @@ def normalize_write_classification(
     }
 
 
-def _metadata(item: dict[str, Any]) -> dict[str, Any]:
-    metadata = item.get("metadata")
-    return metadata if isinstance(metadata, dict) else {}
-
-
 def _moment_metadata(moment: dict[str, Any]) -> dict[str, Any]:
     meta = _metadata(moment)
     mapped = dict(meta)
@@ -641,10 +642,6 @@ def _truthy(value: object) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "y", "on"}
     return bool(value)
-
-
-def _lower(value: object) -> str:
-    return str(value or "").strip().lower()
 
 
 def _write_key(value: object) -> str:

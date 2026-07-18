@@ -15,6 +15,8 @@ import hmac
 import ipaddress
 import os
 import threading
+from collections.abc import Callable
+from typing import cast
 
 from starlette.requests import Request
 from starlette.responses import Response
@@ -53,24 +55,7 @@ _setup_lock = _CrossLoopSemaphore(1)
 _password_work_semaphore = _CrossLoopSemaphore(_PASSWORD_WORK_MAX_CONCURRENCY)
 
 
-async def _await_password_worker(func, *args, **kwargs):
-    worker = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
-    try:
-        return await asyncio.shield(worker)
-    except asyncio.CancelledError:
-        # A task may receive more than one cancellation while the executor
-        # thread is still running. Keep shielding until it truly finishes;
-        # otherwise each repeated disconnect could release another slot.
-        while not worker.done():
-            try:
-                await asyncio.shield(worker)
-            except asyncio.CancelledError:
-                continue
-        try:
-            worker.result()
-        except BaseException:
-            pass
-        raise
+_await_password_worker = sh.await_thread_worker
 
 
 async def _run_password_work(func, *args, **kwargs):
@@ -154,7 +139,8 @@ def _request_has_one_loopback_host(request: Request) -> bool:
     headers = request.headers
     getlist = getattr(headers, "getlist", None)
     if callable(getlist):
-        values = list(getlist("host"))
+        get_header_list = cast(Callable[[str], list[str]], getlist)
+        values = list(get_header_list("host"))
     else:
         value = headers.get("Host")
         if value is None:

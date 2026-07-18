@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import pytest
 from starlette.responses import Response
 
+from web.current_contract import CurrentWebDependencies
+from web.current_profile import _profile_payload as route_profile_payload
 from web.current_services import (
     CurrentServiceAdapters,
     CurrentServiceDependencies,
@@ -37,6 +39,58 @@ class BucketManager:
     async def list_all(self, *, include_archive: bool) -> list[dict]:
         assert include_archive is True
         return list(self.buckets.values())
+
+
+@pytest.mark.asyncio
+async def test_profile_payload_is_identical_across_route_and_service_paths() -> None:
+    evidence = {
+        "id": "evidence-1",
+        "content": "Source",
+        "metadata": {"name": "Source"},
+    }
+    profile = {
+        "id": "profile-1",
+        "content": "### fact\nAmy prefers quiet mornings\n\n### reflection\nKeep plans gentle.",
+        "metadata": {
+            "name": "Quiet mornings",
+            "tags": ["profile_fact", "profile_preference"],
+            "profile_kind": "preference",
+            "subject": "amy",
+            "predicate": "prefers",
+            "object": "quiet mornings",
+            "evidence": [
+                {"bucket_id": "evidence-1", "moment_id": "moment-1"}
+            ],
+        },
+    }
+    manager = BucketManager([evidence, profile])
+    edge_store = SimpleNamespace(
+        list_edges=lambda: [
+            {
+                "source": "profile-1",
+                "target": "evidence-1",
+                "relation_type": "evidenced_by",
+            }
+        ]
+    )
+    adapters = CurrentServiceAdapters(
+        CurrentServiceDependencies(
+            bucket_mgr=manager,
+            memory_edge_store=edge_store,
+        )
+    )
+
+    route_payload = await route_profile_payload(
+        CurrentWebDependencies(
+            config={},
+            bucket_mgr=manager,
+            memory_edge_store=edge_store,
+        ),
+        profile,
+    )
+    service_payload = await adapters._profile_payload(profile)
+
+    assert service_payload == route_payload
 
 
 @pytest.mark.asyncio

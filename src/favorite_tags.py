@@ -3,14 +3,13 @@ from __future__ import annotations
 import re
 from typing import Iterable
 
+from runtime_values import lower_text as normalize_tag
+from utils import strip_wikilinks
+
 
 GENERIC_FAVORITE_TAG = "ai_favorite"
 LEGACY_FAVORITE_TAG = "haven_favorite"
 FAVORITE_PREFIX = "flavor_"
-
-
-def normalize_tag(value: object) -> str:
-    return str(value or "").strip().lower()
 
 
 def ai_favorite_tag(ai_name: str | None = None) -> str:
@@ -56,3 +55,16 @@ def favorite_policy_tags(tags: Iterable[object] | None, ai_name: str | None = No
         for tag in tags or []
         if str(tag or "").strip() and is_favorite_policy_tag(tag, ai_name)
     ]
+
+
+def has_favorite_reason(content: object) -> bool:
+    text = strip_wikilinks(str(content or "")).lower()
+    return any(
+        marker in text
+        for marker in (
+            "喜欢它的原因",
+            "喜欢的原因",
+            "favorite_reason",
+            "favorite reason",
+        )
+    )

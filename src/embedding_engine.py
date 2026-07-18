@@ -69,6 +69,17 @@ except ImportError:  # pragma: no cover
 logger = logging.getLogger("ombre_brain.embedding")
 
 
+def _record_embedding_error(detail: str) -> None:
+    try:
+        from errors import record_error  # type: ignore
+    except ImportError:
+        from .errors import record_error  # type: ignore
+    try:
+        record_error("OB-E001", detail)
+    except Exception:
+        logger.warning("[embedding] OB-E001 (record failed): %s", detail)
+
+
 # ============================================================
 # 常量
 # ============================================================
@@ -260,7 +271,7 @@ class APIEmbeddingEngine(BaseEmbeddingEngine):
                     return list(vec)
             # 拿到了 2xx 响应但没有可用向量 —— 不能静默返回 []，否则向量化「成功
             # 调用却没结果」会无声无息（#3）。记 OB-E001 让错误面板可见。
-            self._record_e001(
+            _record_embedding_error(
                 f"backend={self.backend_name} model={self.model} 返回空向量"
                 f"（base_url={self.base_url}，检查 model 名 / base_url / key 是否匹配该 provider）"
             )
@@ -271,7 +282,7 @@ class APIEmbeddingEngine(BaseEmbeddingEngine):
                 api_format=self.api_format,
                 base_url=self.base_url,
             )
-            self._record_e001(
+            _record_embedding_error(
                 f"backend={self.backend_name} model={self.model} base_url={self.base_url} "
                 f"err={type(e).__name__}: {e}" + (f" {_hint}" if _hint else "")
             )
@@ -279,18 +290,6 @@ class APIEmbeddingEngine(BaseEmbeddingEngine):
 
     async def aclose(self) -> None:
         await self._client.close()
-
-    @staticmethod
-    def _record_e001(detail: str) -> None:
-        try:
-            from errors import record_error  # type: ignore
-        except ImportError:
-            from .errors import record_error  # type: ignore
-        try:
-            record_error("OB-E001", detail)
-        except Exception:
-            logger.warning(f"[embedding] OB-E001 (record failed): {detail}")
-
 
 # ============================================================
 # API 后端：Gemini 原生 REST
@@ -347,27 +346,15 @@ class GeminiNativeEmbeddingEngine(BaseEmbeddingEngine):
                 self._dim = len(values)
             if values:
                 return list(values)
-            self._record_e001(
+            _record_embedding_error(
                 f"backend=gemini_native model={self.model} 返回空向量（检查模型名是否支持 embedContent）"
             )
             return []
         except Exception as e:
-            self._record_e001(
+            _record_embedding_error(
                 f"backend=gemini_native model={self.model} err={type(e).__name__}: {e}"
             )
             return []
-
-    @staticmethod
-    def _record_e001(detail: str) -> None:
-        try:
-            from errors import record_error  # type: ignore
-        except ImportError:
-            from .errors import record_error  # type: ignore
-        try:
-            record_error("OB-E001", detail)
-        except Exception:
-            logger.warning(f"[embedding] OB-E001 (record failed): {detail}")
-
 
 # ============================================================
 # 门面：EmbeddingEngine — 对外保持原接口

@@ -4,30 +4,38 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 from starlette.responses import JSONResponse, Response
 
+from config_modes import normalize_direct_render_mode
 from memory_metadata import normalize_memory_metadata
-from self_anchor import is_self_anchor_bucket
+from runtime_values import (
+    age_hours_since,
+    float_between as _float_between,
+    metadata_view as _metadata,
+    numeric_int_between as _int_between,
+    utc_now as _utc_now,
+    valid_memory_id as _valid_id,
+)
 from utils import strip_wikilinks
 
 from .current_contract import CurrentWebServices, dependency_error, maybe_await
+from .profile_support import (
+    build_profile_payload,
+    is_profile_fact_bucket as _is_profile_fact_bucket,
+    profile_key as _profile_key,
+)
 
 
 ServiceOperation = Callable[..., Any]
 Clock = Callable[[], datetime]
 
-MEMORY_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 PROFILE_FACT_PREFIX = "profile_fact→"
 ANCHOR_SUCCESS_PREFIX = "已修改记忆桶"
-
-
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 @dataclass(slots=True)
@@ -53,42 +61,6 @@ def _error(message: str, status_code: int) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status_code)
 
 
-def _valid_id(value: Any) -> bool:
-    return bool(MEMORY_ID_RE.fullmatch(str(value or "").strip()))
-
-
-def _metadata(bucket: Any) -> dict[str, Any]:
-    if not isinstance(bucket, dict):
-        return {}
-    value = bucket.get("metadata", {})
-    return value if isinstance(value, dict) else {}
-
-
-def _int_between(value: Any, default: int, low: int, high: int) -> int:
-    try:
-        number = int(float(value))
-    except (TypeError, ValueError, OverflowError):
-        number = default
-    return max(low, min(high, number))
-
-
-def _float_between(value: Any, default: float, low: float, high: float) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError, OverflowError):
-        number = default
-    return max(low, min(high, number))
-
-
-def _profile_key(value: Any, default: str) -> str:
-    text = str(value or "").strip().lower()
-    if not text:
-        return default
-    text = re.sub(r"\s+", "_", text)
-    text = re.sub(r"[^0-9a-zA-Z_\-\u4e00-\u9fff]+", "", text)
-    return text or default
-
-
 def _clip_text(value: Any, max_chars: int) -> str:
     compact = " ".join(strip_wikilinks(str(value or "")).split())
     if len(compact) <= max_chars:
@@ -102,14 +74,6 @@ def _normalize_profile_fact_key(value: Any) -> str:
         "",
         str(value or "").lower(),
     )
-
-
-def _is_profile_fact_bucket(bucket: dict[str, Any]) -> bool:
-    if is_self_anchor_bucket(bucket):
-        return False
-    metadata = _metadata(bucket)
-    tags = {str(tag).strip() for tag in metadata.get("tags", []) or [] if str(tag).strip()}
-    return "profile_fact" in tags or bool(metadata.get("profile_kind"))
 
 
 def _existing_profile_fact_keys(buckets: list[dict[str, Any]]) -> set[str]:
@@ -306,124 +270,7 @@ def _anchor_limits(config: Mapping[str, Any]) -> tuple[int, float]:
 
 
 def _bucket_age_hours(bucket: dict[str, Any], now: datetime) -> float | None:
-    created = _metadata(bucket).get("created", "")
-    if not created:
-        return None
-    try:
-        parsed = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=timezone.utc)
-    delta = now.astimezone(timezone.utc) - parsed.astimezone(timezone.utc)
-    return max(0.0, delta.total_seconds() / 3600)
-
-
-def _profile_sections(content: Any) -> dict[str, str]:
-    text = strip_wikilinks(str(content or "")).strip()
-    if not text:
-        return {}
-    matches = list(re.finditer(r"(?m)^###\s+([^\n]+)\n?", text))
-    if not matches:
-        return {"fact": text}
-    sections: dict[str, str] = {}
-    for index, match in enumerate(matches):
-        heading = _profile_key(match.group(1), "")
-        if not heading:
-            continue
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        sections[heading] = text[match.end() : end].strip()
-    prefix = text[: matches[0].start()].strip()
-    if "fact" not in sections and prefix:
-        sections["fact"] = prefix
-    return sections
-
-
-def _profile_kind_from_tags(tags: Any) -> str:
-    for tag in tags or []:
-        text = str(tag or "").strip()
-        if not text.startswith("profile_"):
-            continue
-        if text in {"profile_fact", "profile_predicate"}:
-            continue
-        if text.startswith("profile_predicate_"):
-            continue
-        return text.removeprefix("profile_")
-    return ""
-
-
-def _profile_state(metadata: dict[str, Any]) -> str:
-    if metadata.get("deprecated") or metadata.get("active") is False:
-        return "deprecated"
-    if metadata.get("resolved") or metadata.get("digested"):
-        return "inactive"
-    return "active"
-
-
-def _profile_evidence(bucket: dict[str, Any], edge_store: Any) -> list[dict[str, str]]:
-    metadata = _metadata(bucket)
-    raw = metadata.get("evidence", [])
-    raw = [raw] if isinstance(raw, dict) else raw
-    rows: list[dict[str, str]] = []
-    if isinstance(raw, list):
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
-            bucket_id = str(item.get("bucket_id") or item.get("id") or "").strip()
-            if bucket_id:
-                rows.append(
-                    {
-                        "bucket_id": bucket_id,
-                        "moment_id": str(item.get("moment_id") or "").strip(),
-                    }
-                )
-    for bucket_key, moment_key in (
-        ("evidence_bucket_id", "evidence_moment_id"),
-        ("source_bucket_id", "source_moment_id"),
-    ):
-        bucket_id = str(metadata.get(bucket_key) or "").strip()
-        if bucket_id:
-            rows.append(
-                {
-                    "bucket_id": bucket_id,
-                    "moment_id": str(metadata.get(moment_key) or "").strip(),
-                }
-            )
-    list_edges = getattr(edge_store, "list_edges", None)
-    if callable(list_edges):
-        try:
-            edge_values = list_edges()
-            if not isinstance(edge_values, Iterable):
-                edge_values = ()
-            for edge in edge_values:
-                if not isinstance(edge, dict):
-                    continue
-                if str(edge.get("source") or "") != str(bucket.get("id") or ""):
-                    continue
-                if str(edge.get("relation_type") or "") != "evidenced_by":
-                    continue
-                rows.append(
-                    {
-                        "bucket_id": str(edge.get("target") or ""),
-                        "moment_id": "",
-                    }
-                )
-        except Exception:
-            pass
-
-    bucket_ids_with_moment = {row["bucket_id"] for row in rows if row["bucket_id"] and row["moment_id"]}
-    seen: set[tuple[str, str]] = set()
-    result: list[dict[str, str]] = []
-    for row in rows:
-        if not row["moment_id"] and row["bucket_id"] in bucket_ids_with_moment:
-            continue
-        key = (row["bucket_id"], row["moment_id"])
-        if row["bucket_id"] and key not in seen:
-            seen.add(key)
-            result.append(row)
-    return result
+    return age_hours_since(_metadata(bucket).get("created", ""), now)
 
 
 def _bucket_summary(bucket: dict[str, Any]) -> dict[str, Any]:
@@ -520,43 +367,11 @@ class CurrentServiceAdapters:
         get_bucket = self._manager_method("get")
         if isinstance(get_bucket, Response):
             return get_bucket
-        metadata = _metadata(bucket)
-        evidence_rows: list[dict[str, Any]] = []
-        for row in _profile_evidence(bucket, self.dependencies.memory_edge_store):
-            evidence_bucket = await maybe_await(get_bucket(row["bucket_id"])) if _valid_id(row["bucket_id"]) else None
-            evidence_metadata = _metadata(evidence_bucket)
-            evidence_rows.append(
-                {
-                    **row,
-                    "name": evidence_metadata.get("name", row["bucket_id"]),
-                    "exists": bool(evidence_bucket),
-                }
-            )
-        sections = _profile_sections(bucket.get("content", ""))
-        state = _profile_state(metadata)
-        kind = str(metadata.get("profile_kind") or _profile_kind_from_tags(metadata.get("tags", [])) or "").strip()
-        content = strip_wikilinks(str(bucket.get("content") or ""))
-        return {
-            "id": bucket.get("id", ""),
-            "name": metadata.get("name", bucket.get("id", "")),
-            "fact": sections.get("fact", content.strip()),
-            "sections": sections,
-            "kind": kind,
-            "subject": metadata.get("subject", ""),
-            "predicate": metadata.get("predicate", ""),
-            "object": metadata.get("object", ""),
-            "evidence": evidence_rows,
-            "confidence": metadata.get("confidence"),
-            "source": metadata.get("source", "profile_fact"),
-            "active": state == "active",
-            "deprecated": state == "deprecated",
-            "state": state,
-            "tags": metadata.get("tags", []),
-            "created": metadata.get("created", ""),
-            "updated_at": metadata.get("updated_at", ""),
-            "last_active": metadata.get("last_active", ""),
-            "content_preview": content[:200],
-        }
+        return await build_profile_payload(
+            bucket,
+            get_bucket=get_bucket,
+            edge_store=self.dependencies.memory_edge_store,
+        )
 
     async def inspect_diffusion(
         self,
@@ -604,9 +419,7 @@ class CurrentServiceAdapters:
         operation = self.dependencies.inspect_recall_operation
         if not callable(operation):
             return dependency_error("inspect_recall_operation")
-        mode = str(direct_render_mode or "auto").strip().lower()
-        if mode not in {"auto", "compact", "full"}:
-            mode = "auto"
+        mode = normalize_direct_render_mode(direct_render_mode)
         q_valence = valence if isinstance(valence, (int, float)) and 0 <= valence <= 1 else None
         q_arousal = arousal if isinstance(arousal, (int, float)) and 0 <= arousal <= 1 else None
         return await maybe_await(

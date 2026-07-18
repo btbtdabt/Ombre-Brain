@@ -5,7 +5,6 @@ from __future__ import annotations
 import hmac
 import inspect
 import os
-import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,6 +16,12 @@ from starlette.responses import JSONResponse, Response
 
 from entity_edges import extract_entity_edges_from_bucket
 from identity import identity_names
+from runtime_values import (
+    bool_value as bool_value,
+    float_between as float_between,
+    int_between as int_between,
+    valid_memory_id as valid_memory_id,
+)
 from self_anchor import is_self_anchor_bucket
 
 from . import _shared as sh
@@ -26,9 +31,6 @@ RouteKey = tuple[str, str]
 RouteHandler = Callable[[Request], Awaitable[Response]]
 ServiceHandler = Callable[..., Any]
 AuthGuard = Callable[[Request], Response | None | Awaitable[Response | None]]
-
-MEMORY_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
-
 
 @dataclass(frozen=True, slots=True)
 class RouteSpec:
@@ -313,40 +315,6 @@ async def read_json_object(
 
 def json_body_error(exc: Exception) -> JSONResponse:
     return JSONResponse({"error": str(exc)}, status_code=400)
-
-
-def bool_value(value: Any, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "yes", "on"}:
-            return True
-        if normalized in {"0", "false", "no", "off", ""}:
-            return False
-    return bool(value)
-
-
-def int_between(value: Any, default: int, minimum: int, maximum: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError, OverflowError):
-        parsed = default
-    return max(minimum, min(maximum, parsed))
-
-
-def float_between(value: Any, default: float, minimum: float, maximum: float) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError, OverflowError):
-        parsed = default
-    return max(minimum, min(maximum, parsed))
-
-
-def valid_memory_id(value: Any) -> bool:
-    return bool(MEMORY_ID_RE.fullmatch(str(value or "").strip()))
 
 
 def memory_write_token(dependencies: CurrentWebDependencies) -> str:

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from projection_mirror import TraceCatalogProjection
+from runtime_values import int_value as _int_value
 
 
 class TraceVectorProjectionManifest:
@@ -146,10 +147,3 @@ def _valid_vector_json(value: str) -> bool:
         and bool(vector)
         and all(isinstance(item, (int, float)) for item in vector)
     )
-
-
-def _int_value(value: object) -> int:
-    try:
-        return int(value or 0)
-    except (TypeError, ValueError):
-        return 0

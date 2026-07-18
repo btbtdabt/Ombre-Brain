@@ -6,6 +6,9 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
+from runtime_values import int_value
+from sqlite_support import connect_rows
+
 from utils import LOCAL_TZ, now_iso
 
 
@@ -28,9 +31,8 @@ class ReminderStore:
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=5.0)
+        conn = connect_rows(self.db_path, timeout=5.0)
         conn.execute("PRAGMA busy_timeout=5000")
-        conn.row_factory = sqlite3.Row
         return conn
 
     def _init_db(self) -> None:
@@ -519,12 +521,7 @@ class ReminderStore:
         rule = str(value or "every_n_rounds").strip().lower()
         return rule if rule in REMINDER_REPEAT_RULES else "every_n_rounds"
 
-    @staticmethod
-    def _safe_int(value: Any, default: int) -> int:
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return default
+    _safe_int = staticmethod(int_value)
 
     @staticmethod
     def _validate_optional_time(value: Any) -> str:

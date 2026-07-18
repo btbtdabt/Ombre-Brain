@@ -4,6 +4,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from runtime_values import optional_int as _optional_int, parse_comparable_datetime
+from sqlite_support import connect_rows
+
 
 class GatewayStateStore:
     """Persist Gateway round, injection, conversation, and usage state."""
@@ -14,9 +17,7 @@ class GatewayStateStore:
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.db_path)
-        connection.row_factory = sqlite3.Row
-        return connection
+        return connect_rows(self.db_path)
 
     def _init_db(self) -> None:
         with self._connect() as connection:
@@ -408,17 +409,6 @@ class GatewayStateStore:
         safe_profile_id = str(profile_id or "default").strip() or "default"
         compare_tz = start_at.tzinfo or end_at.tzinfo
 
-        def parse_local(value: Any) -> datetime | None:
-            try:
-                parsed = datetime.fromisoformat(str(value or ""))
-            except ValueError:
-                return None
-            if compare_tz is None:
-                return parsed.replace(tzinfo=None) if parsed.tzinfo is not None else parsed
-            if parsed.tzinfo is None:
-                return parsed.replace(tzinfo=compare_tz)
-            return parsed.astimezone(compare_tz)
-
         start = start_at
         end = end_at
         if compare_tz is not None:
@@ -447,7 +437,7 @@ class GatewayStateStore:
 
         filtered = []
         for row in rows:
-            created = parse_local(row["created_at"])
+            created = parse_comparable_datetime(row["created_at"], compare_tz)
             if created is None or not (start <= created < end):
                 continue
             filtered.append(row)
@@ -665,12 +655,3 @@ class GatewayStateStore:
             return 1.0
         progress = elapsed_hours / cooldown_hours
         return round(cooldown_floor + (1.0 - cooldown_floor) * progress, 4)
-
-
-def _optional_int(value: Any) -> int | None:
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None

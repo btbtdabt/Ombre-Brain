@@ -17,6 +17,7 @@ from starlette.responses import (
 
 from utils import bucket_text_for_embedding
 
+from . import _shared as sh
 from .current_contract import CurrentWebDependencies, bool_value, maybe_await
 from .oauth import (
     authorization_server_metadata,
@@ -31,8 +32,7 @@ def _oauth_enabled(config: Mapping[str, Any]) -> bool:
     ).strip().lower() == "oauth"
 
 
-def _oauth_not_found() -> Response:
-    return Response(status_code=404, headers={"Cache-Control": "no-store"})
+_oauth_not_found = sh.oauth_not_found_response
 
 
 def _authorization_metadata(

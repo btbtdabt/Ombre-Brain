@@ -270,8 +270,9 @@ def test_letter_query_filters_lexically_when_embeddings_are_disabled(
     assert "trains and stations" not in apples
 
 
-def test_pulse_counts_and_lists_isolated_letters(tmp_path: Path, monkeypatch) -> None:
+def test_pulse_counts_and_lists_isolated_letters(tmp_path: Path) -> None:
     import server
+    from tools import _runtime as tool_runtime
 
     config = _config(tmp_path)
     manager = BucketManager(config)
@@ -285,9 +286,8 @@ def test_pulse_counts_and_lists_isolated_letters(tmp_path: Path, monkeypatch) ->
         def calculate_score(metadata):
             return 1.0
 
-    monkeypatch.setattr(server, "bucket_mgr", manager)
-    monkeypatch.setattr(server, "decay_engine", DecayStub())
-    result = asyncio.run(server.pulse())
+    tool_runtime.init(bucket_mgr=manager, decay_engine=DecayStub())
+    result = asyncio.run(getattr(server, "pulse")())
 
     assert "独立信件: 1 封" in result
     assert "当前显示桶: 1 个" in result

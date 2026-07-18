@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import hashlib
 import random
 from typing import Any
 
+from ledger_mirror import hash_body
 from ledger_replay import LedgerReplayValidator
 
 
@@ -55,7 +55,7 @@ class LedgerReplayPropertyRunner:
                     "event_type": event_type,
                     "trace_id": trace_id,
                     "trace_kind": _trace_kind_for(event_type),
-                    "body_hash": _hash_body(body),
+                    "body_hash": hash_body(body),
                     "payload": _payload_for(event_type, seq, rng),
                     "recorded_at": f"2026-07-02T00:{seq % 60:02d}:00+00:00",
                 }
@@ -105,10 +105,6 @@ class LedgerReplayPropertyRunner:
         if trace_id in terminal:
             return "TraceCreated"
         return rng.choices(_EVENT_TYPES[1:], weights=[5, 4, 1, 1], k=1)[0]
-
-
-def _hash_body(body: str) -> str:
-    return "sha256:" + hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
 def _trace_kind_for(event_type: str) -> str:

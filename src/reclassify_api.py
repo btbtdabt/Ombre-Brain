@@ -10,7 +10,6 @@ safe to embed in a future desktop maintenance process.
 from __future__ import annotations
 
 import asyncio
-import math
 import re
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
@@ -18,6 +17,7 @@ from typing import Any, Callable, Mapping, Protocol
 import frontmatter
 
 from dehydrator import Dehydrator
+from runtime_values import finite_unit_float as _unit_float
 from utils import atomic_write_text, load_config
 
 
@@ -36,16 +36,6 @@ def sanitize(name: object, *, fallback: str = "unnamed", limit: int = 80) -> str
 def _bucket_id(value: object, fallback: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_-]", "", str(value or ""))[:64]
     return cleaned or sanitize(fallback, fallback="bucket", limit=64)
-
-
-def _unit_float(value: object, default: float) -> float:
-    try:
-        numeric = float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError, OverflowError):
-        return default
-    if not math.isfinite(numeric):
-        return default
-    return max(0.0, min(1.0, numeric))
 
 
 def _string_list(value: object, *, limit: int, fallback: list[str]) -> list[str]:

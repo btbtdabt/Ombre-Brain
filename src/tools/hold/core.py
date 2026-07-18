@@ -29,6 +29,7 @@ import asyncio
 
 from .. import _runtime as rt
 from .._common import merge_or_create, check_duplicate_for, check_plan_resolution
+from .metadata import default_hold_analysis, normalize_hold_metadata
 
 
 async def store_core(
@@ -52,33 +53,18 @@ async def store_core(
             f"hold 打标失败，使用本地默认元数据并原样保存正文: {type(e).__name__}: {e}"
         )
         default_analysis = getattr(rt.dehydrator, "_default_analysis", None)
-        analysis = default_analysis() if callable(default_analysis) else {
-            "domain": ["未分类"],
-            "valence": 0.5,
-            "arousal": 0.3,
-            "tags": [],
-            "suggested_name": "",
-        }
+        analysis = default_analysis() if callable(default_analysis) else default_hold_analysis()
 
-    domain = analysis.get("domain") or ["未分类"]
-    if not isinstance(domain, list):
-        domain = ["未分类"]
-    _v = analysis.get("valence", 0.5)
-    _a = analysis.get("arousal", 0.3)
-    final_valence = valence if 0 <= valence <= 1 else (float(_v) if _v is not None else 0.5)
-    final_arousal = arousal if 0 <= arousal <= 1 else (float(_a) if _a is not None else 0.3)
-    _raw_tags = analysis.get("tags") or []
-    all_tags = list(dict.fromkeys((_raw_tags if isinstance(_raw_tags, list) else []) + extra_tags))
-    suggested_name = analysis.get("suggested_name", "")
+    metadata = normalize_hold_metadata(analysis, extra_tags, valence, arousal)
 
     result_name, is_merged, embed_warn = await merge_or_create(
         content=content,
-        tags=all_tags,
+        tags=metadata.tags,
         importance=importance,
-        domain=domain,
-        valence=final_valence,
-        arousal=final_arousal,
-        name=suggested_name,
+        domain=metadata.domains,
+        valence=metadata.valence,
+        arousal=metadata.arousal,
+        name=metadata.suggested_name,
         raw_merge=True,
         why_remembered=why_remembered,
         source_tool="hold",
@@ -91,7 +77,7 @@ async def store_core(
     asyncio.create_task(check_plan_resolution(content, source_bucket_id=result_name))
     if not is_merged:
         asyncio.create_task(check_duplicate_for(result_name, content))
-    result = f"{action}{result_name} {','.join(str(d) for d in domain if d is not None)}"
+    result = f"{action}{result_name} {','.join(str(d) for d in metadata.domains if d is not None)}"
     if embed_warn:
         result += f"\n⚠️ {embed_warn}"
     if metadata_fallback:

@@ -36,6 +36,8 @@ import time
 from dataclasses import dataclass
 from typing import Iterable
 
+from file_tail import iter_tail_lines
+
 logger = logging.getLogger(__name__)
 
 
@@ -267,33 +269,6 @@ def get_recent_logs(n: int = _LOG_TAIL_FOR_ERROR) -> list[str]:
 _errors_path: str | None = None
 _errors_path_lock = threading.Lock()
 _MAX_ERROR_TAIL_SCAN_BYTES = 8 * 1024 * 1024
-_TAIL_CHUNK_BYTES = 64 * 1024
-
-
-def _iter_tail_lines(path: str, *, max_bytes: int):
-    """Yield UTF-8 text lines newest-first from a bounded file tail."""
-
-    with open(path, "rb") as handle:
-        handle.seek(0, os.SEEK_END)
-        position = handle.tell()
-        remaining = max(0, int(max_bytes))
-        carry = b""
-        while position > 0 and remaining > 0:
-            chunk_size = min(_TAIL_CHUNK_BYTES, position, remaining)
-            position -= chunk_size
-            remaining -= chunk_size
-            handle.seek(position)
-            block = handle.read(chunk_size) + carry
-            parts = block.split(b"\n")
-            carry = parts.pop(0)
-            for raw_line in reversed(parts):
-                yield raw_line.decode("utf-8", errors="replace")
-        # Only yield carry when it starts at byte zero.  If the scan hit its
-        # byte cap, carry is an intentionally incomplete giant/old line.
-        if position == 0 and carry:
-            yield carry.decode("utf-8", errors="replace")
-
-
 def configure_errors_path(buckets_dir: str) -> None:
     """由 server 启动时调用：将 errors.jsonl 放在 buckets_dir/.logs/errors.jsonl。"""
     global _errors_path
@@ -328,7 +303,7 @@ def recent_errors(limit: int = 50, min_level: str = "W") -> list[dict]:
     out: list[dict] = []
     try:
         with _errors_path_lock:
-            for ln in _iter_tail_lines(
+            for ln in iter_tail_lines(
                 _errors_path,
                 max_bytes=_MAX_ERROR_TAIL_SCAN_BYTES,
             ):

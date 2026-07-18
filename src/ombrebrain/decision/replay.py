@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ombrebrain.decision.records import DecisionRecord
+from ombrebrain.decision.records import DecisionRecord, projection_surfaces
 
 
 @dataclass(frozen=True)
@@ -38,9 +38,9 @@ class ReplayDebugger:
         policy = _as_dict(record.policy_verdict)
         consistency = _as_dict(record.consistency_report)
         outcome = _as_dict(record.outcome)
-        projection_surfaces = sorted(
-            _surfaces(_as_list(_as_dict(record.command_plan).get("projections")))
-            | _surfaces(_as_list(_as_dict(record.projection_journal).get("entries")))
+        surfaces = sorted(
+            projection_surfaces(_as_list(_as_dict(record.command_plan).get("projections")))
+            | projection_surfaces(_as_list(_as_dict(record.projection_journal).get("entries")))
         )
         return {
             "decision_id": record.id,
@@ -51,7 +51,7 @@ class ReplayDebugger:
             "missing_permissions": list(_as_list(policy.get("missing_permissions"))),
             "protected_surfaces": list(_as_list(policy.get("protected_surfaces"))),
             "consistency_ok": bool(consistency.get("ok", True)),
-            "projection_surfaces": projection_surfaces,
+            "projection_surfaces": surfaces,
             "outcome_ok": bool(outcome.get("ok", True)),
             "replay_ok": not issues,
             "issue_count": len(issues or []),
@@ -80,9 +80,11 @@ class ReplayDebugger:
         return tuple(issues)
 
     def _surface_issues(self, record: DecisionRecord) -> tuple[str, ...]:
-        plan_surfaces = _surfaces(_as_list(_as_dict(record.command_plan).get("projections")))
-        journal_surfaces = _surfaces(_as_list(_as_dict(record.projection_journal).get("entries")))
-        observation_surfaces = _surfaces(_as_list(_as_dict(record.projection_observations).get("observations")))
+        plan_surfaces = projection_surfaces(_as_list(_as_dict(record.command_plan).get("projections")))
+        journal_surfaces = projection_surfaces(_as_list(_as_dict(record.projection_journal).get("entries")))
+        observation_surfaces = projection_surfaces(
+            _as_list(_as_dict(record.projection_observations).get("observations"))
+        )
         issues: list[str] = []
         if plan_surfaces and journal_surfaces and plan_surfaces != journal_surfaces:
             issues.append(
@@ -95,15 +97,6 @@ class ReplayDebugger:
                 f"expected subset of {sorted(plan_surfaces)}, observed {sorted(observation_surfaces)}"
             )
         return tuple(issues)
-
-
-def _surfaces(entries: list[Any]) -> set[str]:
-    surfaces: set[str] = set()
-    for entry in entries:
-        if isinstance(entry, dict) and entry.get("surface"):
-            surfaces.add(str(entry["surface"]))
-    return surfaces
-
 
 def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}

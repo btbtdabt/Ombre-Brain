@@ -11,7 +11,9 @@ import jieba.analyse
 
 from favorite_tags import favorite_memory_aliases
 from identity import identity_names
+from query_normalization import compact_symbol_key, unique_text_values
 from query_terms import GENERIC_LEXICAL_STOPWORDS
+from runtime_values import float_between as _float_between, int_between as _int_between
 from utils import now_iso, strip_affect_anchor, strip_wikilinks
 
 
@@ -637,7 +639,7 @@ class WordMapStore:
         if not self.enabled:
             return _empty_hint_payload()
 
-        cleaned_terms = _unique_terms(self._clean_term(term) for term in terms)
+        cleaned_terms = unique_text_values(self._clean_term(term) for term in terms)
         if not cleaned_terms:
             return _empty_hint_payload()
 
@@ -1414,8 +1416,7 @@ def _normalize_term(value: Any) -> str:
     return text.lower() if re.fullmatch(r"[A-Za-z0-9_.:/ -]+", text) else text
 
 
-def _compact_term(value: Any) -> str:
-    return re.sub(r"[^0-9a-z\u4e00-\u9fff_.:-]+", "", str(value or "").strip().lower())
+_compact_term = compact_symbol_key
 
 
 def _has_hidden_substring(value: Any) -> bool:
@@ -1450,18 +1451,6 @@ def _compact_title_recall_term(value: Any) -> str:
     if compact == text:
         return ""
     return compact if len(re.findall(r"[\u4e00-\u9fff]", compact)) >= 3 else ""
-
-
-def _unique_terms(terms: Any) -> list[str]:
-    output = []
-    seen = set()
-    for term in terms or []:
-        cleaned = str(term or "").strip()
-        if not cleaned or cleaned in seen:
-            continue
-        seen.add(cleaned)
-        output.append(cleaned)
-    return output
 
 
 def _empty_hint_payload(terms: list[str] | None = None) -> dict[str, Any]:
@@ -1521,22 +1510,6 @@ def _collect_config_terms(value: Any) -> list[str]:
         return terms
     text = str(value).strip()
     return [text] if text else []
-
-
-def _int_between(value: Any, default: int, lower: int, upper: int) -> int:
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        number = default
-    return max(lower, min(upper, number))
-
-
-def _float_between(value: Any, default: float, lower: float, upper: float) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        number = default
-    return max(lower, min(upper, number))
 
 
 def dumps_debug(payload: Any) -> str:

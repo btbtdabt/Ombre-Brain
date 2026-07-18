@@ -28,6 +28,35 @@ P0luz `src/`, `src/tools/`, and `src/web/` module structure.
 - `src/ombrebrain/` and `kernel/`: non-production v3/distributed work unless an
   explicit migration activates it
 
+### Canonical Shared Logic
+
+- `src/tools/current/manifest.py`: the only production MCP registration inventory
+- `src/recall_pipeline.py`: candidate thresholds, diagnostics, admission, recallability,
+  and shared rendering metadata used by MCP, Dashboard, and Gateway adapters
+- `src/profile_facts.py` plus `src/web/profile_support.py`: profile classification,
+  evidence, and HTTP payload construction
+- `src/config_modes.py`: Gateway/tool retrieval, direct-render, and provider thinking modes
+- `src/runtime_values.py`: active-runtime boundary coercion, clamping, metadata views,
+  identifiers, and comparable timestamp parsing
+- `src/query_normalization.py`: compact lookup, symbol, and phrase keys used across
+  Gateway and memory retrieval
+- `src/sqlite_support.py`: row-producing SQLite connections for the active stores
+- `src/operation_runtime.py`: optional v3 operation dispatch shared by MCP and HTTP
+  boundary adapters
+- `src/edge_records.py`: confidence-aware edge upsert and JSONL loading behavior
+- `src/semantic_search.py`: strict/fallback embedding search invocation
+- `src/file_tail.py`: bounded reverse log reads for errors and diagnostics
+- `src/tools/hold/metadata.py` and `src/tools/_common.py`: hold metadata normalization
+  and trace-compatible write policies
+
+The remaining exact function-body repetitions are intentional boundaries rather
+than duplicated production policy: stores keep one-line connection adapters over
+the shared SQLite constructor; MCP and HTTP keep thin transport wrappers over the
+shared operation dispatcher; dormant v3 protocol modules keep their public
+interfaces; and separate dataclasses normalize their own fields. Gateway and MCP
+direct-memory rendering share recall/admission primitives but retain
+protocol-specific final composition.
+
 ## Feature Parity Checklist
 
 The P0luz base remains intact while the following historical capabilities are
@@ -115,6 +144,29 @@ Production cutover verification:
   entries after cutover.
 - Rollback is retained as stopped containers based on `8e68a7d`, fork branch
   `codex/pre-p0luz-cutover-20260716`, and a verified pre-cutover data archive.
+
+### 2026-07-17 runtime consolidation
+
+| Source range | Disposition | Evidence |
+| --- | --- | --- |
+| P0luz `6da5158..p0luz/main` | No newer commits at integration time | `p0luz/main` still resolves to `6da5158` (`v2.7.6`). |
+| Yinglianchun `4e0a546..bbd6500` | Ported | The config bind-source deployment guard, mounted config/environment backup behavior, and author regression script are retained in the shared operations scripts. |
+| Fork `d3c66b8..HEAD` | Consolidated without contract changes | The active runtime now has one 30-tool manifest and shared recall, profile, configuration, SQLite, semantic-search, metadata, edge, operation, and diagnostics policies. Compatibility tests preserve both upstreams' externally observable behavior. |
+
+Local verification for this batch:
+
+- `pytest`: 2,213 passed, 79 skipped, 3 known warnings.
+- Ruff and Vulture: clean across the repository.
+- Pyright: zero errors across every changed Python file. The whole-tree audit
+  improved from 667 errors and 21 warnings at `d3c66b8` to 530 errors and 21
+  warnings without suppressing the dormant v3/distributed annotation debt.
+- Exact AST comparison found no repeated multi-statement function bodies in the
+  active `src/` runtime. The remaining small repetitions in dormant v3 modules
+  stay local to their public bounded-context interfaces.
+- `scripts/test_ops_bind_guard.sh`: passed under Git Bash.
+- The local container image and Cloudflare compose configuration build and
+  validate successfully; staging and production evidence is recorded after the
+  exact committed image is deployed.
 
 ## Intentional Architecture Exclusions
 

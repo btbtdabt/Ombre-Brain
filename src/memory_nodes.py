@@ -9,6 +9,8 @@ from typing import Any
 
 from favorite_tags import favorite_memory_aliases
 from identity import identity_names
+from runtime_values import clamp_float as _clamp_float, parse_utc_datetime as _parse_iso
+from sqlite_support import connect_rows
 
 FACET_KEYWORDS = {
     "affect.attachment": (
@@ -170,9 +172,7 @@ class MemoryNodeStore:
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
+        return connect_rows(self.db_path)
 
     def _init_db(self) -> None:
         conn = self._connect()
@@ -440,16 +440,6 @@ class MemoryNodeStore:
         return node
 
 
-def _parse_iso(value: Any) -> datetime | None:
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
 def _join_text(value: Any) -> str:
     if isinstance(value, (list, tuple, set)):
         return " ".join(str(item) for item in value)
@@ -497,11 +487,3 @@ def _flatten_facets(facets: dict[str, Any]) -> dict[str, float]:
         else:
             flattened[str(key)] = _clamp_float(value, 0.0, 1.0)
     return flattened
-
-
-def _clamp_float(value: Any, low: float, high: float) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        number = low
-    return max(low, min(high, number))

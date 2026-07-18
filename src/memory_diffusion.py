@@ -11,6 +11,11 @@ from memory_relevance import (
     relevance_multiplier,
     should_suppress_candidate,
 )
+from runtime_values import (
+    clamp_float as _clamp,
+    float_between as _float_between,
+    int_between as _int_between,
+)
 
 
 DEFAULT_HOP_DECAYS = (0.8, 0.6, 0.4, 0.25)
@@ -613,27 +618,3 @@ def _bool_value(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() not in {"0", "false", "no", "off"}
     return bool(value)
-
-
-def _int_between(value: Any, default: int, low: int, high: int) -> int:
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        number = default
-    return max(low, min(high, number))
-
-
-def _float_between(value: Any, default: float, low: float, high: float) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        number = default
-    return _clamp(number, low, high)
-
-
-def _clamp(value: Any, low: float, high: float) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        number = low
-    return max(low, min(high, number))

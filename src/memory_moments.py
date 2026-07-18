@@ -6,6 +6,7 @@ import os
 import re
 import sqlite3
 import unicodedata
+from collections.abc import Collection
 from datetime import datetime, timezone
 from typing import Any
 
@@ -15,9 +16,19 @@ from memory_relevance import (
     content_terms_for_query,
     expanded_terms_for_query,
     facets_for_node,
+    join_evidence_spans,
     memory_relevance_options_from_config,
 )
 from query_terms import GENERIC_LEXICAL_STOPWORDS
+from runtime_values import (
+    clamp_float as _clamp_float,
+    enabled_value as _bool_value,
+    int_between as _int_between,
+    int_value as _safe_int,
+    metadata_view as _item_metadata,
+    optional_float as _safe_float,
+)
+from sqlite_support import connect_rows
 from utils import strip_wikilinks
 
 
@@ -193,9 +204,7 @@ class MemoryMomentStore:
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
+        return connect_rows(self.db_path)
 
     def _init_db(self) -> None:
         conn = self._connect()
@@ -539,8 +548,8 @@ class MemoryMomentStore:
         *,
         limit: int = 20,
         bucket_boosts: dict[str, float] | None = None,
-        include_sections: set[str] | list[str] | tuple[str, ...] | None = None,
-        exclude_sections: set[str] | list[str] | tuple[str, ...] | None = None,
+        include_sections: Collection[str] | None = None,
+        exclude_sections: Collection[str] | None = None,
     ) -> list[dict]:
         return self.search_moment_items(
             query,
@@ -558,8 +567,8 @@ class MemoryMomentStore:
         *,
         limit: int = 20,
         bucket_boosts: dict[str, float] | None = None,
-        include_sections: set[str] | list[str] | tuple[str, ...] | None = None,
-        exclude_sections: set[str] | list[str] | tuple[str, ...] | None = None,
+        include_sections: Collection[str] | None = None,
+        exclude_sections: Collection[str] | None = None,
     ) -> list[dict]:
         query = str(query or "").strip()
         if not query:
@@ -778,11 +787,6 @@ def _build_retrieval_aliases(
             if added_for_moment >= MAX_RETRIEVAL_ALIASES_PER_MOMENT:
                 break
     return aliases
-
-
-def _item_metadata(item: dict) -> dict:
-    metadata = item.get("metadata")
-    return metadata if isinstance(metadata, dict) else {}
 
 
 def _bucket_title(bucket: dict) -> str:
@@ -1718,20 +1722,6 @@ def _best_evidence_span(text: str, aliases: tuple[str, ...], max_chars: int) -> 
     return ""
 
 
-def _join_evidence_spans(raw: Any) -> str:
-    if not isinstance(raw, list):
-        return ""
-    parts = []
-    for item in raw:
-        if isinstance(item, dict):
-            text = item.get("text") or item.get("span") or ""
-        else:
-            text = item
-        if str(text).strip():
-            parts.append(str(text))
-    return " ".join(parts)
-
-
 def _clean_metadata(metadata: dict) -> dict:
     cleaned = {}
     for key, value in (metadata or {}).items():
@@ -1795,7 +1785,7 @@ def _moment_query_score(
         [
             text,
             str(meta.get("annotation_summary") or ""),
-            _join_evidence_spans(meta.get("evidence_spans")),
+            join_evidence_spans(meta.get("evidence_spans")),
             " ".join(str(facet) for facet in (meta.get("annotation_facets") or {}).keys())
             if isinstance(meta.get("annotation_facets"), dict)
             else "",
@@ -1890,50 +1880,11 @@ def _metadata_float(meta: dict, key: str, default: float) -> float:
         return default
 
 
-def _safe_float(value) -> float | None:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _safe_int(value: Any, default: int) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _clamp_float(value: Any, low: float, high: float) -> float:
-    parsed = _safe_float(value)
-    if parsed is None:
-        parsed = low
-    return max(low, min(high, parsed))
-
-
 def _clip_text(text: str, max_chars: int) -> str:
     compact = " ".join(str(text or "").split())
     if len(compact) <= max_chars:
         return compact
     return compact[:max_chars].rstrip() + "..."
-
-
-def _bool_value(value: Any, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
-
-
-def _int_between(value: Any, default: int, min_value: int, max_value: int) -> int:
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        number = default
-    return max(min_value, min(max_value, number))
 
 
 def _clean_text(value: Any) -> str:

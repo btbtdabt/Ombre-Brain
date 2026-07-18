@@ -30,7 +30,7 @@ class LedgerMirror:
         payload: dict[str, Any] | None = None,
         body: str = "",
     ) -> dict[str, Any]:
-        body_hash = _hash_body(body)
+        body_hash = hash_body(body)
         event = {
             "seq": self.latest_seq() + 1,
             "schema_version": LEDGER_SCHEMA_VERSION,
@@ -131,7 +131,7 @@ class LedgerMirror:
                 f.write("\n")
 
 
-def _hash_body(body: str) -> str:
+def hash_body(body: str) -> str:
     digest = hashlib.sha256(str(body).encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
 

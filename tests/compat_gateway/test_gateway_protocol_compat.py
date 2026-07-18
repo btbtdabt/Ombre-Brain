@@ -2,7 +2,36 @@ import asyncio
 import json
 
 import httpx
+import pytest
 from starlette.responses import StreamingResponse
+
+
+@pytest.mark.asyncio
+async def test_stream_turn_finalizer_runs_exactly_once(gateway_module) -> None:
+    service = gateway_module.GatewayService.__new__(gateway_module.GatewayService)
+    calls = []
+
+    async def finalize(**kwargs):
+        calls.append(kwargs)
+
+    service._finalize_stream_turn = finalize
+    finalize_once = service._stream_turn_finalizer(
+        session_id="session-1",
+        model="model-1",
+        route="/v1/messages",
+        stream_state={"text": "hello"},
+        recalled_ids=["memory-1"],
+        user_message="hi",
+        client="test",
+        injection_debug={"round": 1},
+    )
+
+    await finalize_once()
+    await finalize_once()
+
+    assert len(calls) == 1
+    assert finalize_once.finalized is True
+    assert calls[0]["route"] == "/v1/messages"
 
 
 def test_gateway_tokens_select_claude_openai_and_gemini_defaults(

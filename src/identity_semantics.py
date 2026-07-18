@@ -8,6 +8,7 @@ import yaml
 
 from favorite_tags import favorite_memory_aliases
 from identity import identity_names
+from runtime_values import float_between as _float_between
 from utils import now_iso, strip_affect_anchor, strip_wikilinks
 
 
@@ -307,11 +308,3 @@ def _list_text(value: Any) -> list[str]:
     if isinstance(value, (list, tuple, set)):
         return [str(item).strip() for item in value if str(item).strip()]
     return [str(value).strip()] if str(value).strip() else []
-
-
-def _float_between(value: Any, default: float, lower: float, upper: float) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        number = default
-    return max(lower, min(upper, number))

@@ -36,8 +36,10 @@ from typing import Any, Optional
 
 from openai import AsyncOpenAI
 
+from config_modes import normalize_thinking_mode
 from identity import generic_identity_names, identity_names, render_identity_template
 from memory_layers import normalize_write_classification
+from runtime_values import clamp_valence_arousal
 from memory_metadata import domain_prompt_options_text, normalize_domain_key
 from utils import (
     clean_llm_json,
@@ -442,9 +444,7 @@ class Dehydrator:
         self.max_tokens = dehy_cfg.get("max_tokens", _DEFAULT_MAX_TOKENS)
         self.temperature = dehy_cfg.get("temperature", _DEFAULT_TEMPERATURE)
         self.timeout_seconds = positive_float(dehy_cfg.get("timeout_seconds"), _API_TIMEOUT_SECONDS)
-        self.thinking_mode = self._normalize_thinking_mode(
-            dehy_cfg.get("thinking_mode", "")
-        )
+        self.thinking_mode = normalize_thinking_mode(dehy_cfg.get("thinking_mode", ""))
         # api_format: "openai_compat" (default) | "gemini" | "anthropic"
         self.api_format = dehy_cfg.get("api_format", "openai_compat")
         # Auto-detect new Google AI Studio key format (AQ.*): these keys are not accepted
@@ -779,28 +779,8 @@ class Dehydrator:
         first = content[0]
         return first.get("text", "") if isinstance(first, dict) else ""
 
-    @staticmethod
-    def _strip_md_fence(raw: str) -> str:
-        """Backwards-compatible wrapper for tolerant LLM JSON extraction."""
-        return clean_llm_json(raw)
-
-    @staticmethod
-    def _clamp_va(
-        meta: dict,
-        default_v: float = _DEFAULT_VALENCE,
-        default_a: float = _DEFAULT_AROUSAL,
-    ) -> tuple[float, float]:
-        """读取 meta 中的 valence / arousal 并钳制到 [0, 1]。
-
-        三处 LLM 返回校验逻辑相同（_format_output / _parse_analysis / _parse_digest），
-        集中后保证三处行为一致：解析失败一律回 (默认 V, 默认 A)。
-        """
-        try:
-            v = max(0.0, min(1.0, float(meta.get("valence", default_v))))
-            a = max(0.0, min(1.0, float(meta.get("arousal", default_a))))
-            return v, a
-        except (ValueError, TypeError):
-            return default_v, default_a
+    _strip_md_fence = staticmethod(clean_llm_json)
+    _clamp_va = staticmethod(clamp_valence_arousal)
 
     @staticmethod
     def _normalize_dehydration_result(raw: str) -> str:
@@ -1368,20 +1348,3 @@ class Dehydrator:
         if self.thinking_mode:
             options["extra_body"] = {"thinking": {"type": self.thinking_mode}}
         return options
-
-    @staticmethod
-    def _normalize_thinking_mode(value: Any) -> str:
-        normalized = str(value or "").strip().lower()
-        aliases = {
-            "enabled": "enabled",
-            "enable": "enabled",
-            "on": "enabled",
-            "true": "enabled",
-            "disabled": "disabled",
-            "disable": "disabled",
-            "off": "disabled",
-            "false": "disabled",
-            "non-thinking": "disabled",
-            "non_thinking": "disabled",
-        }
-        return aliases.get(normalized, "")

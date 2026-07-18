@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -35,10 +34,7 @@ from memory_layers import (
 from memory_moments import MemoryMomentStore
 from memory_nodes import MemoryNodeStore
 from memory_relevance import (
-    active_facets,
-    facets_for_text,
     memory_relevance_options_from_config,
-    query_has_explicit_entity_marker,
     recall_rank,
     recall_search_query,
     relevance_decision,
@@ -48,13 +44,31 @@ from persona_engine import PersonaStateEngine
 from portrait_engine import DailyPortraitMaintainer
 from raw_events import RawEventStore
 from recall_diagnostics import RecallDiagnosticsLogger
+from recall_pipeline import (
+    TASK_ONLY_MOMENT_SECTIONS,
+    TEMPERATURE_MOMENT_SECTIONS,
+    admit_moments,
+    apply_topic_evidence_gate,
+    append_lexical_matches,
+    append_word_map_matches,
+    moment_rerank_document,
+    recallable_bucket,
+    recall_thresholds,
+    safe_float as _safe_float,
+    seed_diagnostic,
+)
 from recall_policy import RecallPolicy
 from reflection_engine import ReflectionEngine
 from reminder_store import ReminderStore
 from reranker_engine import RerankerEngine
+from runtime_values import (
+    float_between as _float_between,
+    metadata_dict as _metadata,
+    numeric_int_between as _int_between,
+)
 from self_anchor import is_self_anchor_bucket
 from tools.current import memory as current_memory
-from utils import bucket_content_for_recall, bucket_text_for_embedding, strip_wikilinks
+from utils import bucket_text_for_embedding, strip_wikilinks
 from web.current_contract import CurrentWebDependencies, CurrentWebServices, maybe_await
 from web.current_services import CurrentServiceDependencies, build_current_services
 from word_map import WordMapStore
@@ -113,47 +127,6 @@ ANCHOR_PROPOSAL_PROMPT_TEMPLATE = """你是一个长期锚点候选生成器。�
 }}
 
 最多返回 1 条。"""
-
-
-TASK_ONLY_MOMENT_SECTIONS = {"followup", "followup_log"}
-TEMPERATURE_MOMENT_SECTIONS = {"affect_anchor", "favorite_reason", "comment"}
-
-
-def _float_between(value: Any, default: float, low: float, high: float) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError, OverflowError):
-        number = default
-    return max(low, min(high, number))
-
-
-def _int_between(value: Any, default: int, low: int, high: int) -> int:
-    try:
-        number = int(float(value))
-    except (TypeError, ValueError, OverflowError):
-        number = default
-    return max(low, min(high, number))
-
-
-def _safe_float(value: Any, default: float | None = None) -> float | None:
-    try:
-        return float(value)
-    except (TypeError, ValueError, OverflowError):
-        return default
-
-
-def _score_unit(value: Any) -> float:
-    score = _safe_float(value, 0.0) or 0.0
-    if score > 1.0:
-        score /= 100.0
-    return max(0.0, min(1.0, score))
-
-
-def _metadata(bucket: Mapping[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(bucket, Mapping):
-        return {}
-    metadata = bucket.get("metadata")
-    return dict(metadata) if isinstance(metadata, Mapping) else {}
 
 
 def _active_facet_values(facets: Mapping[str, Any] | None) -> bool:
@@ -723,7 +696,14 @@ class RuntimeCollaborators:
         query_arousal = arousal if isinstance(arousal, (int, float)) and 0 <= arousal <= 1 else None
         options = self.recall_policy.options
         search_query = recall_search_query(query, options)
-        thresholds = self._recall_thresholds(query, max_results)
+        raw_thresholds = self.config.get("recall_thresholds", {})
+        thresholds = recall_thresholds(
+            query,
+            max_results,
+            config=(raw_thresholds if isinstance(raw_thresholds, Mapping) else {}),
+            options=options,
+            specific_terms=self.recall_policy.specific_query_terms(query),
+        )
         warnings: list[str] = []
         search_kwargs: dict[str, Any] = {
             "limit": max(max_candidates, max_results, 20),
@@ -747,7 +727,7 @@ class RuntimeCollaborators:
         ]
         seed_diagnostics: dict[str, dict[str, Any]] = {}
         for bucket in matches:
-            self._seed_diagnostic(
+            seed_diagnostic(
                 seed_diagnostics,
                 bucket,
                 "keyword",
@@ -783,7 +763,7 @@ class RuntimeCollaborators:
                     candidate["vector_match"] = True
                     matches.append(candidate)
                     matched_ids.add(bucket_id)
-                    self._seed_diagnostic(
+                    seed_diagnostic(
                         seed_diagnostics,
                         candidate,
                         "vector",
@@ -801,17 +781,24 @@ class RuntimeCollaborators:
         except Exception as exc:
             warnings.append(f"list_buckets_failed: {exc}")
             all_buckets = list(matches)
-        lexical_terms = self._append_lexical_matches(
+        lexical_terms = append_lexical_matches(
             query,
             matches,
             all_buckets,
             seed_diagnostics,
+            specific_terms=self.recall_policy.specific_query_terms(query),
+            recallable=self._recallable_bucket,
         )
-        word_map_scores = self._append_word_map_matches(
-            query,
+        raw_gateway = self.config.get("gateway", {})
+        word_map_scores = append_word_map_matches(
             matches,
             all_buckets,
             seed_diagnostics,
+            terms=self.recall_policy.specific_query_terms(query),
+            store=self.word_map_store,
+            gateway_config=(raw_gateway if isinstance(raw_gateway, Mapping) else {}),
+            recallable=self._recallable_bucket,
+            warning=self._warning,
         )
         recallable = [bucket for bucket in all_buckets if self._recallable_bucket(bucket)]
         self.memory_moment_store.bulk_upsert(recallable)
@@ -856,34 +843,13 @@ class RuntimeCollaborators:
             gated.append(item)
         gated.sort(key=lambda item: recall_rank(query, item, options))
         reranked = await self._rerank_moments(query, gated)
-        admitted: list[dict[str, Any]] = []
-        suppressed: list[dict[str, Any]] = []
-        for moment in reranked:
-            bucket_id = str(moment.get("bucket_id") or "")
-            seed = seed_diagnostics.get(bucket_id, {})
-            sources = set(seed.get("sources") or [])
-            has_topic = self.recall_policy.moment_has_topic_evidence(query, moment)
-            word_map_only = bool(sources) and not (sources - {"word_map"})
-            if word_map_only and not has_topic:
-                item = dict(moment)
-                item["_admission_reason"] = "word_map_topic_evidence_missing"
-                suppressed.append(item)
-                continue
-            admission = self.recall_policy.assess(
-                query,
-                moment,
-                query_plan=query_plan,
-                has_topic_evidence=has_topic,
-                semantic_score=_safe_float(seed.get("embedding_score")),
-                rerank_score=_safe_float(moment.get("rerank_score")),
-                high_confidence_edge="lexical" in sources,
-                context_only=str(moment.get("section") or "")
-                in TEMPERATURE_MOMENT_SECTIONS,
-            )
-            item = dict(moment)
-            item["_admission_reason"] = admission.reason
-            item["_admission_debug"] = dict(admission.debug)
-            (admitted if admission.admit_direct else suppressed).append(item)
+        admitted, suppressed = admit_moments(
+            query,
+            reranked,
+            seed_diagnostics,
+            policy=self.recall_policy,
+            query_plan=query_plan,
+        )
         returned = admitted[:max_results]
         returned_ids = [
             str(moment.get("moment_id") or "")
@@ -1121,22 +1087,14 @@ class RuntimeCollaborators:
             if topic_required and isinstance(bucket, dict)
             else False
         )
-        related = gate.get("related_target", {})
-        related_allowed = bool(related.get("allowed"))
-        related_reason = str(related.get("reason") or "")
-        if related_allowed and topic_required and not topic_present:
-            related_allowed = False
-            related_reason = "query_topic_evidence_missing"
-        gate["topic_evidence"] = {
-            "required": topic_required,
-            "present": topic_present if topic_required else None,
-        }
-        gate["related_injection"] = {
-            "allowed": related_allowed,
-            "reason": related_reason,
-        }
-        gate["would_inject_related"] = related_allowed
-        return gate
+        return apply_topic_evidence_gate(
+            gate,
+            source_key="related_target",
+            injection_key="related_injection",
+            would_inject_key="would_inject_related",
+            topic_required=topic_required,
+            topic_present=topic_present,
+        )
 
     @staticmethod
     def _diffusion_path(path: Any, bucket_map: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -1167,202 +1125,6 @@ class RuntimeCollaborators:
         metadata = _metadata(bucket)
         return str(metadata.get("name") or bucket.get("name") or bucket_id or bucket.get("id") or "")
 
-    def _recall_thresholds(self, query: str, max_results: int) -> dict[str, Any]:
-        raw_config = self.config.get("recall_thresholds", {})
-        config = raw_config if isinstance(raw_config, Mapping) else {}
-        query_facets = active_facets(facets_for_text(query, self.recall_policy.options))
-        explicit = query_has_explicit_entity_marker(query)
-        vague = not self.recall_policy.specific_query_terms(query)
-        profile = "explicit" if explicit else "vague" if vague else "facet" if query_facets else "default"
-        if explicit:
-            vector_min = _float_between(
-                config.get("explicit_vector_min_score"),
-                0.55,
-                0.0,
-                1.0,
-            )
-        elif vague:
-            vector_min = _float_between(
-                config.get("vague_vector_min_score"),
-                0.40,
-                0.0,
-                1.0,
-            )
-        elif query_facets:
-            vector_min = _float_between(
-                config.get("facet_vector_min_score"),
-                0.45,
-                0.0,
-                1.0,
-            )
-        else:
-            vector_min = _float_between(
-                config.get("vector_min_score"),
-                0.50,
-                0.0,
-                1.0,
-            )
-        top_k = max(max_results, 20)
-        if vague:
-            top_k = max(
-                top_k,
-                _int_between(config.get("vague_top_k"), 50, 20, 100),
-            )
-        return {
-            "profile": profile,
-            "vector_min_score": vector_min,
-            "semantic_top_k": top_k,
-            "query_facets": sorted(query_facets),
-            "has_explicit_entity": explicit,
-            "is_vague": vague,
-        }
-
-    def _seed_diagnostic(
-        self,
-        diagnostics: dict[str, dict[str, Any]],
-        bucket: dict[str, Any],
-        source: str,
-        *,
-        bucket_score: Any = None,
-        embedding_score: Any = None,
-    ) -> None:
-        bucket_id = str(bucket.get("id") or "")
-        if not bucket_id:
-            return
-        metadata = _metadata(bucket)
-        item = diagnostics.setdefault(
-            bucket_id,
-            {
-                "bucket_id": bucket_id,
-                "bucket_name": metadata.get("name") or bucket_id,
-                "sources": [],
-            },
-        )
-        if source not in item["sources"]:
-            item["sources"].append(source)
-        if bucket_score is not None:
-            item["bucket_search_score"] = _safe_float(bucket_score, 0.0)
-            item["keyword_score"] = round(_score_unit(bucket_score), 4)
-        if embedding_score is not None:
-            item["embedding_score"] = round(
-                _safe_float(embedding_score, 0.0) or 0.0,
-                4,
-            )
-
-    def _append_lexical_matches(
-        self,
-        query: str,
-        matches: list[dict[str, Any]],
-        all_buckets: list[dict[str, Any]],
-        diagnostics: dict[str, dict[str, Any]],
-    ) -> list[str]:
-        terms = [
-            str(term).strip()
-            for term in self.recall_policy.specific_query_terms(query)
-            if str(term).strip()
-        ]
-        if not terms:
-            terms = re.findall(r"[A-Za-z][A-Za-z0-9_.:-]{1,}|[\u4e00-\u9fff]{2,}", query)
-        terms = list(dict.fromkeys(terms))[:5]
-        matched_ids = {str(bucket.get("id") or "") for bucket in matches}
-        for bucket in all_buckets:
-            bucket_id = str(bucket.get("id") or "")
-            if not bucket_id or bucket_id in matched_ids or not self._recallable_bucket(bucket):
-                continue
-            metadata = _metadata(bucket)
-            haystack = " ".join(
-                [
-                    str(metadata.get("name") or bucket_id),
-                    " ".join(str(tag) for tag in metadata.get("tags", []) or []),
-                    " ".join(str(item) for item in metadata.get("domain", []) or []),
-                    bucket_content_for_recall(bucket),
-                ]
-            ).lower()
-            hits = [term for term in terms if term.lower() in haystack]
-            if not hits:
-                continue
-            candidate = dict(bucket)
-            candidate["score"] = round(min(100.0, 70.0 + len(hits) * 8.0), 2)
-            matches.append(candidate)
-            matched_ids.add(bucket_id)
-            self._seed_diagnostic(
-                diagnostics,
-                candidate,
-                "lexical",
-                bucket_score=candidate["score"],
-            )
-        return terms
-
-    def _append_word_map_matches(
-        self,
-        query: str,
-        matches: list[dict[str, Any]],
-        all_buckets: list[dict[str, Any]],
-        diagnostics: dict[str, dict[str, Any]],
-    ) -> dict[str, float]:
-        raw_gateway = self.config.get("gateway", {})
-        gateway = raw_gateway if isinstance(raw_gateway, Mapping) else {}
-        if not bool(gateway.get("word_map_hint_enabled", False)) or not self.word_map_store.enabled:
-            return {}
-        try:
-            hints = self.word_map_store.hint_buckets_for_terms(
-                self.recall_policy.specific_query_terms(query),
-                neighbor_limit=_int_between(
-                    gateway.get("word_map_hint_neighbor_limit"),
-                    6,
-                    0,
-                    40,
-                ),
-                bucket_limit=_int_between(
-                    gateway.get("word_map_hint_bucket_limit"),
-                    12,
-                    1,
-                    100,
-                ),
-            )
-        except Exception as exc:
-            self._warning("Word-map hint lookup failed: %s", exc)
-            return {}
-        scores = {
-            str(bucket_id): float(score)
-            for bucket_id, score in (hints.get("bucket_scores") or {}).items()
-        }
-        bucket_map = {str(bucket.get("id") or ""): bucket for bucket in all_buckets}
-        matched_ids = {str(bucket.get("id") or "") for bucket in matches}
-        raw_evidence = hints.get("evidence")
-        evidence: Mapping[str, Any] = (
-            raw_evidence if isinstance(raw_evidence, Mapping) else {}
-        )
-        for bucket_id, score in scores.items():
-            bucket = bucket_map.get(bucket_id)
-            if not bucket or not self._recallable_bucket(bucket):
-                continue
-            if bucket_id not in matched_ids:
-                candidate = dict(bucket)
-                candidate["score"] = round(score * 100, 2)
-                matches.append(candidate)
-                matched_ids.add(bucket_id)
-            self._seed_diagnostic(
-                diagnostics,
-                bucket,
-                "word_map",
-                bucket_score=score,
-            )
-            diagnostics[bucket_id]["word_map_score"] = round(score, 4)
-            raw_bucket_evidence = evidence.get(bucket_id)
-            bucket_evidence: Mapping[str, Any] = (
-                raw_bucket_evidence
-                if isinstance(raw_bucket_evidence, Mapping)
-                else {}
-            )
-            diagnostics[bucket_id]["word_map_terms"] = list(
-                bucket_evidence.get("direct_terms") or []
-            )
-            diagnostics[bucket_id]["word_map_neighbor_terms"] = list(
-                bucket_evidence.get("neighbor_terms") or []
-            )
-        return scores
-
     async def _rerank_moments(
         self,
         query: str,
@@ -1375,21 +1137,7 @@ class RuntimeCollaborators:
             max(1, int(self.reranker_engine.candidate_limit or 20)),
         )
         head, tail = candidates[:limit], candidates[limit:]
-        documents = []
-        for moment in head:
-            metadata = _metadata(moment)
-            documents.append(
-                "\n".join(
-                    [
-                        f"title: {metadata.get('bucket_name') or moment.get('bucket_id') or ''}",
-                        f"section: {moment.get('section') or ''}",
-                        f"domain: {' '.join(str(item) for item in metadata.get('bucket_domain', []) or [])}",
-                        f"tags: {' '.join(str(item) for item in metadata.get('bucket_tags', []) or [])}",
-                        f"summary: {metadata.get('annotation_summary') or metadata.get('summary') or ''}",
-                        f"text: {moment.get('text') or ''}",
-                    ]
-                )[:4000]
-            )
+        documents = [moment_rerank_document(moment) for moment in head]
         try:
             results = await maybe_await(
                 self.reranker_engine.rerank(
@@ -1452,17 +1200,7 @@ class RuntimeCollaborators:
             if moment.get("moment_id")
         }
 
-    @staticmethod
-    def _recallable_bucket(bucket: dict[str, Any]) -> bool:
-        if not bucket.get("id") or is_self_anchor_bucket(bucket):
-            return False
-        metadata = _metadata(bucket)
-        tags = {str(tag).lower() for tag in metadata.get("tags", []) or []}
-        daily_impression = metadata.get("type") == "feel" and bool(
-            {"relationship_weather", "daily_impression", "weekly_impression"}
-            & tags
-        )
-        return not daily_impression
+    _recallable_bucket = staticmethod(recallable_bucket)
 
     def _warning(self, message: str, *args: Any) -> None:
         warning = getattr(self.logger, "warning", None)

@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import re
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
 from self_anchor import is_self_anchor_bucket
+from runtime_values import (
+    enabled_value as _bool_value,
+    iso_date_key as _date_key,
+    numeric_int_between as _int_between,
+)
 from word_map import reflection_identity_terms
 
 
@@ -41,29 +45,6 @@ class SchedulerInitialDelays:
     portrait: float = 25.0
     dream: float = 30.0
     word_map: float = 35.0
-
-
-def _int_between(value: Any, default: int, low: int, high: int) -> int:
-    try:
-        number = int(float(value))
-    except (TypeError, ValueError, OverflowError):
-        number = default
-    return max(low, min(high, number))
-
-
-def _bool_value(value: Any, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
-
-
-def _date_key(value: Any) -> str:
-    match = re.search(r"\d{4}-\d{2}-\d{2}", str(value or ""))
-    return match.group(0) if match else ""
 
 
 def _mapping_section(config: Mapping[str, Any], name: str) -> Mapping[str, Any]:

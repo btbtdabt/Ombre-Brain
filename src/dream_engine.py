@@ -10,12 +10,13 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, SupportsFloat, SupportsIndex
+from typing import SupportsFloat, SupportsIndex
 from zoneinfo import ZoneInfo
 
 import yaml
 from openai import AsyncOpenAI
 
+from config_modes import normalize_thinking_mode
 from identity import identity_names
 from raw_events import raw_event_text_looks_injected, strip_raw_client_context
 from utils import bucket_text_for_embedding, strip_wikilinks
@@ -126,7 +127,7 @@ class DreamEngine:
             or str(cfg.get("model") or "deepseek-v4-flash")
         )
         self.api_key = os.environ.get("OMBRE_DREAM_API_KEY", "") or str(cfg.get("api_key") or "")
-        self.thinking_mode = self._normalize_thinking_mode(cfg.get("thinking_mode", "disabled"))
+        self.thinking_mode = normalize_thinking_mode(cfg.get("thinking_mode", "disabled"))
         self.temperature = float(cfg.get("temperature", 0.85))
         self.max_tokens = int(cfg.get("max_tokens", 900))
         self.timezone_name = str(cfg.get("timezone") or "Asia/Shanghai")
@@ -631,15 +632,6 @@ class DreamEngine:
         if not cleaned:
             raise ValueError("dream model returned empty text")
         return cleaned
-
-    @staticmethod
-    def _normalize_thinking_mode(value: Any) -> str:
-        normalized = str(value or "").strip().lower().replace("_", "-")
-        if normalized in {"disabled", "disable", "off", "false", "non-thinking"}:
-            return "disabled"
-        if normalized in {"enabled", "enable", "on", "true", "thinking"}:
-            return "enabled"
-        return ""
 
     def _core_affect_from_materials(self, materials: list[dict]) -> dict:
         if not materials:

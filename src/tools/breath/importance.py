@@ -23,16 +23,10 @@ tools/breath/importance.py — importance_min 模式
 
 from .. import _runtime as rt
 from .._common import is_importance_audit_candidate
+from ._filters import bucket_has_tags
 from ._verbatim import render_stored_bucket
 
 _BUDGET_NOTICE = "token 预算不足：下一条重要记忆未被截断或摘要，请提高 max_tokens 后重试。"
-
-
-def _bucket_has_tags(meta: dict, tag_filter: list) -> bool:
-    if not tag_filter:
-        return True
-    bucket_tags = set(meta.get("tags", []) or [])
-    return all(t in bucket_tags for t in tag_filter)
 
 
 def _importance_of(bucket: dict) -> int:
@@ -121,7 +115,7 @@ async def surface_by_importance(importance_min: int, max_tokens: int, tag_filter
         if is_importance_audit_candidate(
             b.get("metadata", {}), importance_min
         )
-        and _bucket_has_tags(b.get("metadata", {}), tag_filter)
+        and bucket_has_tags(b.get("metadata", {}), tag_filter)
     ]
     filtered = _select_importance_buckets(filtered, importance_min, limit=20)
     if not filtered:

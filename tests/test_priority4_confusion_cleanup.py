@@ -52,6 +52,8 @@ async def test_pulse_shows_special_bucket_counts_separately(monkeypatch):
             return None
 
     class FakeBucketManager:
+        embedding_outbox = None
+
         async def get_stats(self):
             return {
                 "permanent_count": 1,
@@ -64,17 +66,41 @@ async def test_pulse_shows_special_bucket_counts_separately(monkeypatch):
             }
 
         async def list_all(self, include_archive=False):
+            if include_archive:
+                return [
+                    {
+                        "id": "missing-vector",
+                        "content": "memory",
+                        "metadata": {},
+                    }
+                ]
+            return []
+
+        async def list_letters(self):
+            return []
+
+    class FakeEmbedding:
+        enabled = True
+
+        def list_all_ids(self):
             return []
 
     monkeypatch.setattr(anchor_core.rt, "decay_engine", FakeDecay(), raising=False)
     monkeypatch.setattr(anchor_core.rt, "bucket_mgr", FakeBucketManager(), raising=False)
-    monkeypatch.setattr(anchor_core.rt, "embedding_engine", None, raising=False)
+    monkeypatch.setattr(
+        anchor_core.rt,
+        "embedding_engine",
+        FakeEmbedding(),
+        raising=False,
+    )
 
     result = await anchor_core.pulse()
 
     assert "feel 桶: 4 条" in result
     assert "plan 桶: 5 条" in result
     assert "letter 桶: 6 封" in result
+    assert "索引漂移：缺失 embedding 1 个" in result
+    assert "Ombre Brain 记忆系统" in result
 
 
 @pytest.mark.asyncio

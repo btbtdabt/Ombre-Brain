@@ -11,6 +11,7 @@ from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionMessageParam
 
 from identity import identity_names, render_identity_template
+from runtime_values import unit_float, utc_now_iso
 from self_anchor import is_self_anchor_bucket
 from utils import bucket_text_for_embedding, count_tokens_approx, strip_wikilinks
 
@@ -3792,8 +3793,7 @@ class DailyPortraitMaintainer:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(self.tz)
 
-    def _now_utc(self) -> str:
-        return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    _now_utc = staticmethod(utc_now_iso)
 
     def _safe_key(self, value: Any) -> str:
         text = re.sub(r"[^a-zA-Z0-9_\-\u4e00-\u9fff]+", "_", str(value or "").strip())
@@ -3808,12 +3808,7 @@ class DailyPortraitMaintainer:
             return text
         return text[:max_chars].rstrip() + "..."
 
-    def _clamp(self, value: Any, default: float) -> float:
-        try:
-            number = float(value)
-        except (TypeError, ValueError):
-            number = default
-        return max(0.0, min(1.0, number))
+    _clamp = staticmethod(unit_float)
 
     def _bool(self, value: Any, default: bool) -> bool:
         if value is None:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import inspect
-import math
 import re
 from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime
@@ -11,13 +10,19 @@ from typing import Any
 
 from identity import identity_names
 from memory_metadata import normalize_memory_metadata
+from runtime_values import (
+    bool_value as bool_value,
+    coerce_id as coerce_id,
+    finite_float_between as float_between,
+    int_between as int_between,
+    valid_memory_id as _valid_memory_id,
+)
 from self_anchor import is_self_anchor_bucket
 from utils import bucket_text_for_embedding, strip_wikilinks
 
 from .. import _runtime as rt
 
 
-MEMORY_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _HEADING_RE = re.compile(r"(?m)^\s{0,3}#{1,6}\s+(.+?)\s*$")
 _FIRST_PERSON_RE = re.compile(r"(?i)\b(?:i|me|my|mine|myself)\b")
 _FORBIDDEN_HEADINGS = {
@@ -37,6 +42,7 @@ _FORBIDDEN_HEADINGS = {
     "affectanchor",
 }
 _REFLECTION_HEADINGS = {"reflection", "assistantreflection", "havenreflection"}
+valid_id = _valid_memory_id
 
 
 def require_runtime(name: str) -> Any:
@@ -71,48 +77,21 @@ def identity() -> dict:
     return identity_names(runtime_config())
 
 
+def log_warning(message: str, *args: Any) -> None:
+    warning = getattr(getattr(rt, "logger", None), "warning", None)
+    if callable(warning):
+        warning(message, *args)
+
+
+def clip_text(value: Any, max_chars: int) -> str:
+    text = " ".join(str(value or "").split()).strip()
+    if len(text) <= max_chars:
+        return text
+    return text[: max(0, max_chars - 1)].rstrip() + "…"
+
+
 def ai_author_name() -> str:
     return identity()["ai_name"]
-
-
-def coerce_id(value: Any) -> str:
-    return "" if value is None else str(value).strip()
-
-
-def valid_id(value: Any) -> bool:
-    return bool(MEMORY_ID_RE.fullmatch(coerce_id(value)))
-
-
-def bool_value(value: Any, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "yes", "on"}:
-            return True
-        if normalized in {"0", "false", "no", "off", ""}:
-            return False
-    return bool(value)
-
-
-def int_between(value: Any, default: int, minimum: int, maximum: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError, OverflowError):
-        parsed = default
-    return max(minimum, min(maximum, parsed))
-
-
-def float_between(value: Any, default: float, minimum: float, maximum: float) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError, OverflowError):
-        parsed = default
-    if not math.isfinite(parsed):
-        parsed = default
-    return max(minimum, min(maximum, parsed))
 
 
 def split_csv(value: Any) -> list[str]:

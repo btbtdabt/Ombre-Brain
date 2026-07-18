@@ -5,6 +5,7 @@ import logging
 import os
 from typing import Any
 
+from runtime_values import enabled_value as _bool_value, int_between as _int_between
 from utils import now_iso
 
 logger = logging.getLogger("ombre_brain.recall_diagnostics")
@@ -43,21 +44,3 @@ class RecallDiagnosticsLogger:
             buckets_dir = str(config.get("buckets_dir") or "").strip()
             state_dir = os.path.join(os.path.dirname(buckets_dir), "state") if buckets_dir else "."
         return os.path.join(state_dir, "recall_diagnostics.jsonl")
-
-
-def _bool_value(value: Any, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
-
-
-def _int_between(value: Any, default: int, min_value: int, max_value: int) -> int:
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        number = default
-    return max(min_value, min(max_value, number))

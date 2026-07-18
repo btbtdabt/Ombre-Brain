@@ -51,6 +51,7 @@ def gateway_module(monkeypatch):
         "favorite_tags": _module(
             "favorite_tags",
             has_favorite_memory_tag=_false,
+            has_favorite_reason=_false,
             is_flavor_tag=_false,
         ),
         "identity": _module(
@@ -76,6 +77,7 @@ def gateway_module(monkeypatch):
         ),
         "memory_relevance": _module(
             "memory_relevance",
+            MemoryRelevanceOptions=_Dependency,
             active_facets=lambda *args, **kwargs: {},
             content_terms_for_query=_empty_terms,
             emotional_recall_plan=lambda *args, **kwargs: {},
@@ -84,6 +86,7 @@ def gateway_module(monkeypatch):
             facets_for_node=lambda *args, **kwargs: {},
             facets_for_text=lambda *args, **kwargs: {},
             memory_relevance_options_from_config=lambda config: {},
+            query_has_explicit_entity_marker=_false,
             query_has_facet=_false,
             recall_rank=lambda *args, **kwargs: (0, 0.0),
             recall_topic_query=lambda query: query,
@@ -111,6 +114,7 @@ def gateway_module(monkeypatch):
             can_moment_be_recall_context=lambda *args, **kwargs: True,
             can_moment_be_related_target=lambda *args, **kwargs: True,
             infer_bucket_layer=lambda *args, **kwargs: "",
+            is_source_record_bucket=_false,
             moment_layer_debug=lambda *args, **kwargs: {},
             moment_runtime_gate_debug=lambda *args, **kwargs: {},
         ),
@@ -144,6 +148,7 @@ def gateway_module(monkeypatch):
             QueryAnchorPlan=_Dependency,
             RecallPolicy=_Dependency,
             diffusion_seed_topic_term_has_specific_residue=_false,
+            query_has_explicit_recall_marker=_false,
         ),
         "memory_nodes": _module("memory_nodes", MemoryNodeStore=_Dependency),
         "persona_engine": _module("persona_engine", PersonaStateEngine=_Dependency),
@@ -194,4 +199,3 @@ def gateway_module(monkeypatch):
     module = importlib.import_module("gateway")
     yield module
     sys.modules.pop("gateway", None)
-

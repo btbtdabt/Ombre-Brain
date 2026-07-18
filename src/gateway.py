@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager, suppress
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from inspect import isawaitable
 from typing import Any, Awaitable, Callable, Literal, Protocol, overload
 from urllib.parse import unquote
 from zoneinfo import ZoneInfo
@@ -24,11 +25,16 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 from bucket_manager import BucketManager
+from config_modes import (
+    normalize_direct_render_mode,
+    normalize_retrieval_mode,
+    normalize_thinking_mode,
+)
 from debug_trace import DebugTraceLogger, headers_to_dict
 from dehydrator import Dehydrator
 from dream_engine import DreamEngine
 from embedding_engine import EmbeddingEngine
-from favorite_tags import has_favorite_memory_tag, is_flavor_tag
+from favorite_tags import has_favorite_memory_tag, has_favorite_reason, is_flavor_tag
 from identity import identity_names
 from gateway_state import GatewayStateStore
 from memory_diffusion import (
@@ -57,14 +63,20 @@ from memory_relevance import (
     relevance_multiplier,
 )
 from query_prompts import QUERY_PLANNER_SYSTEM_PROMPT
+from query_normalization import compact_lookup_key, compact_phrase_key, compact_symbol_key
 from query_understanding import (
     query_intent_rules,
     query_intent_term_set,
     query_intent_terms,
 )
+from recall_pipeline import (
+    apply_topic_evidence_gate,
+    dehydration_metadata,
+    group_moments_by_bucket,
+    source_record_fragment_window,
+)
 from memory_layers import (
     CONTEXT_ONLY_SECTIONS,
-    LAYER_SOURCE_RECORD,
     bucket_layer_debug,
     bucket_runtime_gate_debug,
     can_bucket_be_recent_context,
@@ -72,7 +84,7 @@ from memory_layers import (
     can_moment_be_direct_seed,
     can_moment_be_recall_context,
     can_moment_be_related_target,
-    infer_bucket_layer,
+    is_source_record_bucket,
     moment_layer_debug,
     moment_runtime_gate_debug,
 )
@@ -92,7 +104,12 @@ from query_terms import (
     identity_address_terms,
 )
 from recall_eval import RECALL_EVAL_BLOCKED_SECTIONS, RECALL_EVAL_DEFAULT_CASES
-from recall_policy import QueryAnchorPlan, RecallPolicy, diffusion_seed_topic_term_has_specific_residue
+from recall_policy import (
+    QueryAnchorPlan,
+    RecallPolicy,
+    diffusion_seed_topic_term_has_specific_residue,
+    query_has_explicit_recall_marker,
+)
 from memory_nodes import MemoryNodeStore
 from persona_engine import PersonaStateEngine
 from persona_event_selection import (
@@ -102,6 +119,7 @@ from persona_event_selection import (
 from raw_events import RawEventStore, raw_event_text_looks_injected, strip_raw_client_context
 from reminder_store import ReminderStore
 from reranker_engine import RerankerEngine, RerankResult
+from runtime_values import float_value
 from self_anchor import is_self_anchor_bucket, is_self_anchor_metadata
 from source_refs import source_ref_window
 from utils import (
@@ -459,6 +477,18 @@ class RerankingEngine(Protocol):
     ) -> list[RerankResult]: ...
 
 
+class _AsyncOnce:
+    def __init__(self, callback: Callable[[], Awaitable[None]]) -> None:
+        self._callback = callback
+        self.finalized = False
+
+    async def __call__(self) -> None:
+        if self.finalized:
+            return
+        self.finalized = True
+        await self._callback()
+
+
 class GatewayService:
     """
     OpenAI-compatible gateway that injects Ombre memory before forwarding
@@ -617,10 +647,10 @@ class GatewayService:
         self.core_budget = int(self.gateway_cfg.get("core_memory_budget", 500))
         self.recent_budget = int(self.gateway_cfg.get("recent_context_budget", 300))
         self.recalled_budget = int(self.gateway_cfg.get("recalled_memory_budget", 900))
-        self.direct_render_mode = self._normalize_direct_render_mode(
+        self.direct_render_mode = normalize_direct_render_mode(
             self.gateway_cfg.get("direct_render_mode", "auto")
         )
-        self.retrieval_mode = self._normalize_retrieval_mode(
+        self.retrieval_mode = normalize_retrieval_mode(
             self.gateway_cfg.get("retrieval_mode", "graph")
         )
         self.relationship_weather_budget = int(self.gateway_cfg.get("relationship_weather_budget", 220))
@@ -1481,11 +1511,11 @@ class GatewayService:
             self.gateway_cfg["current_inner_state_interval_rounds"] = self.current_inner_state_interval_rounds
             updated.append("gateway.current_inner_state_interval_rounds")
         if "direct_render_mode" in payload:
-            self.direct_render_mode = self._normalize_direct_render_mode(payload["direct_render_mode"])
+            self.direct_render_mode = normalize_direct_render_mode(payload["direct_render_mode"])
             self.gateway_cfg["direct_render_mode"] = self.direct_render_mode
             updated.append("gateway.direct_render_mode")
         if "retrieval_mode" in payload:
-            self.retrieval_mode = self._normalize_retrieval_mode(payload["retrieval_mode"])
+            self.retrieval_mode = normalize_retrieval_mode(payload["retrieval_mode"])
             self.gateway_cfg["retrieval_mode"] = self.retrieval_mode
             updated.append("gateway.retrieval_mode")
         if "bucket_list_cache_ttl_seconds" in payload:
@@ -1617,15 +1647,7 @@ class GatewayService:
         self.dehydrator.api_key = str(
             dehy_cfg.get("api_key") or getattr(self.dehydrator, "api_key", "") or ""
         ).strip()
-        normalize_thinking: Callable[[Any], str] | None = getattr(
-            self.dehydrator,
-            "_normalize_thinking_mode",
-            None,
-        )
-        if callable(normalize_thinking):
-            self.dehydrator.thinking_mode = normalize_thinking(dehy_cfg.get("thinking_mode", ""))
-        else:
-            self.dehydrator.thinking_mode = str(dehy_cfg.get("thinking_mode") or "").strip()
+        self.dehydrator.thinking_mode = normalize_thinking_mode(dehy_cfg.get("thinking_mode", ""))
         self.dehydrator.max_tokens = dehy_cfg.get("max_tokens", getattr(self.dehydrator, "max_tokens", 1024))
         self.dehydrator.temperature = dehy_cfg.get("temperature", getattr(self.dehydrator, "temperature", 0.1))
         self.dehydrator.api_available = bool(self.dehydrator.api_key)
@@ -4725,29 +4747,22 @@ class GatewayService:
             )
 
         async def stream_body():
-            finalized = False
             stream_state = self._new_stream_capture_state()
+            finalize_once = self._stream_turn_finalizer(
+                session_id=session_id,
+                model=model,
+                route="/v1/chat/completions",
+                stream_state=stream_state,
+                recalled_ids=recalled_ids,
+                user_message=user_message,
+                client=client,
+                injection_debug=injection_debug,
+            )
             body_started_at = time.perf_counter()
             first_chunk_ms: int | None = None
             header_to_first_chunk_ms: int | None = None
             chunk_count = 0
             byte_count = 0
-
-            async def finalize_once() -> None:
-                nonlocal finalized
-                if finalized:
-                    return
-                finalized = True
-                await self._finalize_stream_turn(
-                    session_id=session_id,
-                    model=model,
-                    route="/v1/chat/completions",
-                    stream_state=stream_state,
-                    recalled_ids=recalled_ids,
-                    user_message=user_message,
-                    client=client,
-                    injection_debug=injection_debug,
-                )
 
             try:
                 async for chunk in upstream_response.aiter_bytes():
@@ -4796,7 +4811,7 @@ class GatewayService:
                     max(0, int((time.perf_counter() - stream_started_at) * 1000)),
                     chunk_count,
                     byte_count,
-                    finalized,
+                    finalize_once.finalized,
                     bool(stream_state.get("seen_done")),
                 )
                 await upstream_response.aclose()
@@ -5984,6 +5999,32 @@ class GatewayService:
             recalled_ids or [],
         )
 
+    def _stream_turn_finalizer(
+        self,
+        *,
+        session_id: str,
+        model: str,
+        route: str,
+        stream_state: dict[str, Any],
+        recalled_ids: list[str] | None,
+        user_message: str,
+        client: str = "",
+        injection_debug: dict[str, Any] | None = None,
+    ) -> _AsyncOnce:
+        async def finalize() -> None:
+            await self._finalize_stream_turn(
+                session_id=session_id,
+                model=model,
+                route=route,
+                stream_state=stream_state,
+                recalled_ids=recalled_ids,
+                user_message=user_message,
+                client=client,
+                injection_debug=injection_debug,
+            )
+
+        return _AsyncOnce(finalize)
+
     def _schedule_persona_post_reply_update(
         self,
         session_id: str,
@@ -7113,8 +7154,17 @@ class GatewayService:
             )
 
         async def stream_body():
-            finalized = False
             stream_state = self._new_stream_capture_state()
+            finalize_once = self._stream_turn_finalizer(
+                session_id=session_id,
+                model=model,
+                route="/v1/messages",
+                stream_state=stream_state,
+                recalled_ids=recalled_ids,
+                user_message=user_message,
+                client=client,
+                injection_debug=injection_debug,
+            )
             body_started_at = time.perf_counter()
             first_chunk_ms: int | None = None
             header_to_first_chunk_ms: int | None = None
@@ -7142,22 +7192,6 @@ class GatewayService:
                         )
                     )
                 return chunks
-
-            async def finalize_once() -> None:
-                nonlocal finalized
-                if finalized:
-                    return
-                finalized = True
-                await self._finalize_stream_turn(
-                    session_id=session_id,
-                    model=model,
-                    route="/v1/messages",
-                    stream_state=stream_state,
-                    recalled_ids=recalled_ids,
-                    user_message=user_message,
-                    client=client,
-                    injection_debug=injection_debug,
-                )
 
             try:
                 yield self._anthropic_sse(
@@ -7403,7 +7437,7 @@ class GatewayService:
                     max(0, int((time.perf_counter() - stream_started_at) * 1000)),
                     chunk_count,
                     byte_count,
-                    finalized,
+                    finalize_once.finalized,
                     bool(stream_state.get("seen_done")),
                 )
                 await upstream_response.aclose()
@@ -7476,8 +7510,17 @@ class GatewayService:
             )
 
         async def stream_body():
-            finalized = False
             stream_state = self._new_stream_capture_state()
+            finalize_once = self._stream_turn_finalizer(
+                session_id=session_id,
+                model=model,
+                route="/v1/chat/completions",
+                stream_state=stream_state,
+                recalled_ids=recalled_ids,
+                user_message=user_message,
+                client=client,
+                injection_debug=injection_debug,
+            )
             parser_state = self._new_sse_parse_state()
             body_started_at = time.perf_counter()
             first_chunk_ms: int | None = None
@@ -7488,22 +7531,6 @@ class GatewayService:
             created = int(time.time())
             stop_reason = "stop"
             final_sent = False
-
-            async def finalize_once() -> None:
-                nonlocal finalized
-                if finalized:
-                    return
-                finalized = True
-                await self._finalize_stream_turn(
-                    session_id=session_id,
-                    model=model,
-                    route="/v1/chat/completions",
-                    stream_state=stream_state,
-                    recalled_ids=recalled_ids,
-                    user_message=user_message,
-                    client=client,
-                    injection_debug=injection_debug,
-                )
 
             def openai_chunk(delta: dict[str, Any], finish_reason: str | None = None) -> bytes:
                 return self._openai_sse(
@@ -7626,7 +7653,7 @@ class GatewayService:
                     max(0, int((time.perf_counter() - stream_started_at) * 1000)),
                     chunk_count,
                     byte_count,
-                    finalized,
+                    finalize_once.finalized,
                     bool(stream_state.get("seen_done")),
                 )
                 await upstream_response.aclose()
@@ -7690,29 +7717,22 @@ class GatewayService:
             )
 
         async def stream_body():
-            finalized = False
             stream_state = self._new_stream_capture_state()
+            finalize_once = self._stream_turn_finalizer(
+                session_id=session_id,
+                model=model,
+                route="/v1/messages",
+                stream_state=stream_state,
+                recalled_ids=recalled_ids,
+                user_message=user_message,
+                client=client,
+                injection_debug=injection_debug,
+            )
             body_started_at = time.perf_counter()
             first_chunk_ms: int | None = None
             header_to_first_chunk_ms: int | None = None
             chunk_count = 0
             byte_count = 0
-
-            async def finalize_once() -> None:
-                nonlocal finalized
-                if finalized:
-                    return
-                finalized = True
-                await self._finalize_stream_turn(
-                    session_id=session_id,
-                    model=model,
-                    route="/v1/messages",
-                    stream_state=stream_state,
-                    recalled_ids=recalled_ids,
-                    user_message=user_message,
-                    client=client,
-                    injection_debug=injection_debug,
-                )
 
             try:
                 async for chunk in upstream_response.aiter_bytes():
@@ -7761,7 +7781,7 @@ class GatewayService:
                     max(0, int((time.perf_counter() - stream_started_at) * 1000)),
                     chunk_count,
                     byte_count,
-                    finalized,
+                    finalize_once.finalized,
                     bool(stream_state.get("seen_done")),
                 )
                 await upstream_response.aclose()
@@ -8553,12 +8573,7 @@ class GatewayService:
         terms = self._identity_name_search_terms(query)
         return " ".join(terms[:8]).strip()
 
-    @staticmethod
-    def _safe_float(value: Any, default: float = 0.0) -> float:
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return default
+    _safe_float = staticmethod(float_value)
 
     @staticmethod
     def _dict_or_empty(value: object) -> dict[str, Any]:
@@ -9691,7 +9706,7 @@ class GatewayService:
             tags = [str(tag) for tag in meta.get("tags", [])]
             if not has_favorite_memory_tag(tags, ai_name=self.identity.get("ai_name")):
                 continue
-            if not self._has_favorite_reason(bucket.get("content", "")):
+            if not has_favorite_reason(bucket.get("content", "")):
                 continue
             if meta.get("resolved") or meta.get("digested"):
                 continue
@@ -9735,19 +9750,6 @@ class GatewayService:
             if remaining <= 0:
                 break
         return "\n".join(parts), selected_ids
-
-    @staticmethod
-    def _has_favorite_reason(content: str) -> bool:
-        text = strip_wikilinks(str(content or "")).lower()
-        return any(
-            marker in text
-            for marker in (
-                "喜欢它的原因",
-                "喜欢的原因",
-                "favorite_reason",
-                "favorite reason",
-            )
-        )
 
     def _is_self_anchor_recall_excluded_bucket(self, bucket: dict | None) -> bool:
         if not isinstance(bucket, dict):
@@ -9906,15 +9908,7 @@ class GatewayService:
             and not self._is_self_anchor_recall_excluded_moment(moment)
         ]
 
-    def _moments_by_bucket(self, moments: list[dict]) -> dict[str, list[dict]]:
-        grouped: dict[str, list[dict]] = {}
-        for moment in moments:
-            bucket_id = str(moment.get("bucket_id") or "")
-            if bucket_id:
-                grouped.setdefault(bucket_id, []).append(moment)
-        for items in grouped.values():
-            items.sort(key=lambda item: int(item.get("ordinal") or 0))
-        return grouped
+    _moments_by_bucket = staticmethod(group_moments_by_bucket)
 
     def _representative_moment(self, moments: list[dict]) -> dict | None:
         for section in (
@@ -9957,8 +9951,7 @@ class GatewayService:
             and can_moment_be_direct_seed(moment, explicit_lookup=explicit_lookup)
         ]
 
-    def _is_source_record_bucket(self, bucket: dict | None) -> bool:
-        return isinstance(bucket, dict) and infer_bucket_layer(bucket) == LAYER_SOURCE_RECORD
+    _is_source_record_bucket = staticmethod(is_source_record_bucket)
 
     def _with_explicit_source_record_buckets(
         self,
@@ -10041,25 +10034,14 @@ class GatewayService:
         original = self._rendered_bucket_content(bucket)
         if not original:
             return ""
-        lowered = original.lower()
-        matches = []
-        for term in terms:
-            needle = str(term or "").strip().lower()
-            if len(needle) < 2:
-                continue
-            index = lowered.find(needle)
-            if index >= 0:
-                matches.append((index, needle))
-        if not matches:
-            return ""
-        index, needle = sorted(matches, key=lambda item: (item[0], -len(item[1])))[0]
-        half = max_chars // 2
-        start = max(0, index - half)
-        end = min(len(original), index + len(needle) + half)
-        fragment = original[start:end].strip()
-        if start > 0:
+        fragment, clipped_start, clipped_end = source_record_fragment_window(
+            original,
+            terms,
+            max_chars,
+        )
+        if clipped_start:
             fragment = "..." + fragment
-        if end < len(original):
+        if clipped_end:
             fragment += "..."
         return fragment
 
@@ -10188,9 +10170,7 @@ class GatewayService:
                 return "explicit_bucket_title"
         return ""
 
-    @staticmethod
-    def _compact_lookup_key(value: object) -> str:
-        return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(value or "").strip().lower())
+    _compact_lookup_key = staticmethod(compact_lookup_key)
 
     @staticmethod
     def _source_record_synthetic_moment_id(bucket_id: str, reason: str, text: str) -> str:
@@ -11630,7 +11610,7 @@ class GatewayService:
             try:
                 capsule = await self.dehydrator.dehydrate_direct_capsule(
                     original,
-                    self._bucket_metadata_for_dehydration(bucket),
+                    dehydration_metadata(bucket),
                 )
                 block = f"{header} bucket_capsule\n{capsule}\nmatched_moment: {self._moment_text(moment, 220)}"
                 block = self._append_attached_year_rings(
@@ -11762,7 +11742,7 @@ class GatewayService:
         try:
             capsule = await self.dehydrator.dehydrate_direct_capsule(
                 original or matched,
-                self._bucket_metadata_for_dehydration(bucket),
+                dehydration_metadata(bucket),
             )
         except Exception as exc:
             logger.warning("Gateway source record capsule failed for %s: %s", bucket.get("id"), exc)
@@ -12041,16 +12021,6 @@ class GatewayService:
             return 0
 
     @staticmethod
-    def _normalize_direct_render_mode(value: object) -> str:
-        mode = str(value or "auto").strip().lower()
-        return mode if mode in {"auto", "compact", "full"} else "auto"
-
-    @staticmethod
-    def _normalize_retrieval_mode(value: object) -> str:
-        mode = str(value or "graph").strip().lower()
-        return mode if mode in {"graph", "bucket"} else "graph"
-
-    @staticmethod
     def _normalize_recall_fusion_mode(value: object) -> str:
         mode = str(value or "dynamic").strip().lower()
         return mode if mode in {"dynamic", "legacy"} else "dynamic"
@@ -12178,11 +12148,6 @@ class GatewayService:
         except (TypeError, ValueError):
             pass
         return has_favorite_memory_tag(meta.get("tags", []) or [], ai_name=self.identity.get("ai_name"))
-
-    @staticmethod
-    def _bucket_metadata_for_dehydration(bucket: dict) -> dict:
-        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
-        return {key: value for key, value in meta.items() if key not in {"tags", "comments"}}
 
     @staticmethod
     def _date_yyyy_mm_dd(value: Any) -> str:
@@ -14129,10 +14094,7 @@ class GatewayService:
             return False
         return self._auto_recall_low_signal_query(query) or self.recall_policy.is_auto_query_too_vague(query)
 
-    @staticmethod
-    def _query_has_explicit_recall_marker(query: str) -> bool:
-        text = str(query or "").lower()
-        return any(marker in text for marker in query_intent_terms("memory_sentinel.explicit_recall_markers"))
+    _query_has_explicit_recall_marker = staticmethod(query_has_explicit_recall_marker)
 
     def _memory_sentinel_should_review_checkin(self, query: str) -> bool:
         compact = self._compact_lookup_key(query)
@@ -15804,13 +15766,7 @@ class GatewayService:
                 best_field = field
         return best_score, best_field
 
-    @staticmethod
-    def _compact_exact_anchor_text(value: object) -> str:
-        return re.sub(
-            r"[\s，。！？、,.!?:：;；~～♡❤♥（）()\[\]【】「」『』“”\"'`-]+",
-            "",
-            str(value or "").strip().lower(),
-        )
+    _compact_exact_anchor_text = staticmethod(compact_phrase_key)
 
     def _planner_lexical_match_terms(self, terms: list[str] | None) -> list[str]:
         output = []
@@ -17668,9 +17624,7 @@ class GatewayService:
             or keyword_score >= self.high_confidence_keyword_score
         )
 
-    @staticmethod
-    def _compact_axis_text(value: object) -> str:
-        return re.sub(r"[^0-9a-z\u4e00-\u9fff_.:-]+", "", str(value or "").strip().lower())
+    _compact_axis_text = staticmethod(compact_symbol_key)
 
     @staticmethod
     def _axis_lite_config_terms(
@@ -19019,21 +18973,14 @@ class GatewayService:
             if topic_required and isinstance(bucket, dict)
             else False
         )
-        related_allowed = bool(gate["related_target"]["allowed"])
-        related_reason = str(gate["related_target"]["reason"])
-        if related_allowed and topic_required and not has_topic_evidence:
-            related_allowed = False
-            related_reason = "query_topic_evidence_missing"
-        gate["topic_evidence"] = {
-            "required": topic_required,
-            "present": has_topic_evidence if topic_required else None,
-        }
-        gate["related_injection"] = {
-            "allowed": related_allowed,
-            "reason": related_reason,
-        }
-        gate["would_inject_related"] = related_allowed
-        return gate
+        return apply_topic_evidence_gate(
+            gate,
+            source_key="related_target",
+            injection_key="related_injection",
+            would_inject_key="would_inject_related",
+            topic_required=topic_required,
+            topic_present=has_topic_evidence,
+        )
 
     def _moment_runtime_gate_payload(
         self,
@@ -19064,21 +19011,14 @@ class GatewayService:
             if topic_required and isinstance(moment, dict)
             else False
         )
-        direct_allowed = bool(gate["direct_seed"]["allowed"])
-        direct_reason = str(gate["direct_seed"]["reason"])
-        if direct_allowed and topic_required and not has_topic_evidence:
-            direct_allowed = False
-            direct_reason = "query_topic_evidence_missing"
-        gate["topic_evidence"] = {
-            "required": topic_required,
-            "present": has_topic_evidence if topic_required else None,
-        }
-        gate["direct_injection"] = {
-            "allowed": direct_allowed,
-            "reason": direct_reason,
-        }
-        gate["would_inject_direct"] = direct_allowed
-        return gate
+        return apply_topic_evidence_gate(
+            gate,
+            source_key="direct_seed",
+            injection_key="direct_injection",
+            would_inject_key="would_inject_direct",
+            topic_required=topic_required,
+            topic_present=has_topic_evidence,
+        )
 
     def _moment_related_runtime_gate_payload(
         self,
@@ -19095,21 +19035,14 @@ class GatewayService:
             if topic_required and isinstance(moment, dict)
             else False
         )
-        related_allowed = bool(gate["related_target"]["allowed"])
-        related_reason = str(gate["related_target"]["reason"])
-        if related_allowed and topic_required and not has_topic_evidence:
-            related_allowed = False
-            related_reason = "query_topic_evidence_missing"
-        gate["topic_evidence"] = {
-            "required": topic_required,
-            "present": has_topic_evidence if topic_required else None,
-        }
-        gate["related_injection"] = {
-            "allowed": related_allowed,
-            "reason": related_reason,
-        }
-        gate["would_inject_related"] = related_allowed
-        return gate
+        return apply_topic_evidence_gate(
+            gate,
+            source_key="related_target",
+            injection_key="related_injection",
+            would_inject_key="would_inject_related",
+            topic_required=topic_required,
+            topic_present=has_topic_evidence,
+        )
 
     def _format_diffused_moment_debug(
         self,
@@ -22211,14 +22144,14 @@ async def _stream_response_with_keepalives(
     """Start an SSE response before Gateway preparation or upstream I/O completes."""
 
     interval = max(0.001, float(interval_seconds or CHAT_STREAM_KEEPALIVE_SECONDS))
-    response_task: asyncio.Task[Response] | None = None
+    response_task: asyncio.Future[Response] | None = None
     response: Response | None = None
     iterator: Any = None
     next_chunk_task: asyncio.Task[Any] | None = None
 
     yield _sse_comment(f"{prefix}-start")
     try:
-        response_task = asyncio.create_task(response_factory())
+        response_task = asyncio.ensure_future(response_factory())
         while True:
             done, _ = await asyncio.wait({response_task}, timeout=interval)
             if done:
@@ -22285,7 +22218,9 @@ async def _stream_response_with_keepalives(
         close_iterator = getattr(iterator, "aclose", None)
         if callable(close_iterator):
             with suppress(Exception):
-                await close_iterator()
+                close_result = close_iterator()
+                if isawaitable(close_result):
+                    await close_result
 
 
 def _keepalive_streaming_response(

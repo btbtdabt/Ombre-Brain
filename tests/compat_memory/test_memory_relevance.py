@@ -8,6 +8,7 @@ from memory_relevance import (
     extract_protected_phrases,
     facets_for_node,
     facets_for_text,
+    join_evidence_spans,
     memory_relevance_options_from_config,
     query_has_explicit_entity_marker,
     recall_focus_query,
@@ -15,6 +16,13 @@ from memory_relevance import (
     recall_topic_query,
     relevance_decision,
 )
+
+
+def test_join_evidence_spans_accepts_structured_and_plain_entries() -> None:
+    assert join_evidence_spans(
+        [{"text": "first"}, {"span": "second"}, "third", {"text": ""}]
+    ) == "first second third"
+    assert join_evidence_spans("not-a-list") == ""
 
 
 def test_stopword_loader_treats_an_undecodable_resource_as_missing(tmp_path):

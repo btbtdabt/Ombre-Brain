@@ -30,6 +30,7 @@ from datetime import datetime, timedelta
 from ombrebrain.policy.surfacing import SurfacePolicyVM
 from .. import _runtime as rt
 from utils import parse_bool, parse_iso_datetime
+from ._filters import bucket_has_tags
 from ._verbatim import render_stored_bucket
 
 # U-07 fix: throttle the sampling-fallback INFO log to once per 5 minutes.
@@ -43,13 +44,6 @@ _BUDGET_NOTICE = (
     "已返回正文均保持完整，未截断或摘要。"
     "当前约使用 {used}/{limit} token，如需被省略的整桶请提高 max_tokens 后重试。"
 )
-
-
-def _bucket_has_tags(meta: dict, tag_filter: list) -> bool:
-    if not tag_filter:
-        return True
-    bucket_tags = set(meta.get("tags", []) or [])
-    return all(t in bucket_tags for t in tag_filter)
 
 
 def _can_surface(bucket: dict) -> bool:
@@ -114,7 +108,7 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
         and not b["metadata"].get("pinned", False)
         and not b["metadata"].get("protected", False)
         and not b["metadata"].get("dont_surface", False)
-        and _bucket_has_tags(b["metadata"], tag_filter)
+        and bucket_has_tags(b["metadata"], tag_filter)
     ]
 
     rt.logger.info(

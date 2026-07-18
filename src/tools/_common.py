@@ -27,17 +27,18 @@ tools/_common.py — 跨工具共享的辅助逻辑
 ========================================
 """
 
-from typing import Tuple
 import asyncio
+from collections.abc import Awaitable, Callable, Mapping
 from copy import deepcopy
 from concurrent.futures import Future, InvalidStateError
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 import hashlib
 import math
 import os
 from pathlib import Path
 import threading
 import time
+from typing import Any, Tuple, cast
 import uuid
 
 from utils import parse_bool
@@ -99,6 +100,10 @@ _CONTENT_LOCK_WAIT_GRACE_SECONDS = 30.0
 # asyncio.Lock is not a cross-loop primitive and allowed two first writes to race.
 _merge_content_tails: dict[str, Future[None]] = {}
 _merge_content_tails_guard = threading.Lock()
+
+_ExactContentFinder = Callable[..., Mapping[str, Any] | None]
+_BucketTurnFactory = Callable[[str], AbstractAsyncContextManager[object]]
+_AsyncBucketUpdate = Callable[..., Awaitable[bool]]
 
 
 def _complete_content_turn(key: str, turn: Future[None]) -> None:
@@ -672,6 +677,51 @@ def append_plan_change_log(old_history, action: str, **fields) -> list:
     return history
 
 
+def apply_plan_change_log(bucket: dict, updates: dict) -> None:
+    """Append plan status/content history to an in-flight update payload."""
+
+    metadata = bucket.get("metadata", {})
+    if metadata.get("type") != "plan" or not ({"status", "content"} & updates.keys()):
+        return
+    history = list(metadata.get("change_log") or [])
+    if "status" in updates and updates["status"] != metadata.get("status"):
+        history = append_plan_change_log(
+            history,
+            "status",
+            **{"from": metadata.get("status"), "to": updates["status"]},
+        )
+    if "content" in updates:
+        history = append_plan_change_log(history, "edit")
+    updates["change_log"] = history
+
+
+def apply_memory_detail_updates(
+    updates: dict,
+    *,
+    why_remembered: object,
+    meaning_append: object,
+    meaning_replace: object | None,
+    media_append: object,
+    media_replace: object | None,
+) -> None:
+    """Apply trace-compatible meaning, media, and remembrance updates."""
+
+    remembered = str(why_remembered or "").strip()
+    if remembered == "\\clear":
+        updates["why_remembered"] = ""
+    elif remembered:
+        updates["why_remembered"] = remembered[:500]
+    appended_meaning = str(meaning_append or "").strip()
+    if appended_meaning:
+        updates["meaning_append"] = appended_meaning
+    if meaning_replace is not None:
+        updates["meaning"] = meaning_replace
+    if media_append:
+        updates["media_append"] = media_append
+    if media_replace is not None:
+        updates["media"] = media_replace
+
+
 async def merge_or_create(
     content: str,
     tags: list,
@@ -734,6 +784,7 @@ async def _merge_or_create_inner(
 ) -> Tuple[str, bool, str]:
     """实际的 search→merge/create 逻辑，由 merge_or_create 在 Lock 保护下调用。"""
     exact_storage_match = False
+    existing: list[dict[str, Any]]
     try:
         existing = await rt.bucket_mgr.search(content, limit=1, domain_filter=domain or None)
     except Exception as e:
@@ -746,7 +797,8 @@ async def _merge_or_create_inner(
     exact_finder = getattr(rt.bucket_mgr, "find_exact_content", None)
     if callable(exact_finder):
         try:
-            exact = exact_finder(content, domain_filter=domain or None)
+            find_exact_content = cast(_ExactContentFinder, exact_finder)
+            exact = find_exact_content(content, domain_filter=domain or None)
         except Exception as exc:
             rt.logger.warning(f"Exact-content storage check failed: {exc}")
         else:
@@ -843,12 +895,18 @@ async def _merge_or_create_inner(
                         update_locked = getattr(
                             rt.bucket_mgr, "_update_locked", None
                         )
-                        use_locked_update = callable(bucket_turn) and callable(
-                            update_locked
-                        )
-                        if use_locked_update:
+                        locked_update_method: _AsyncBucketUpdate | None = None
+                        if callable(bucket_turn) and callable(update_locked):
+                            bucket_turn_factory = cast(
+                                _BucketTurnFactory,
+                                bucket_turn,
+                            )
+                            locked_update_method = cast(
+                                _AsyncBucketUpdate,
+                                update_locked,
+                            )
                             await commit_stack.enter_async_context(
-                                bucket_turn(candidate_id)
+                                bucket_turn_factory(candidate_id)
                             )
 
                         locked_bucket = await rt.bucket_mgr.get(candidate_id)
@@ -880,19 +938,24 @@ async def _merge_or_create_inner(
                                 )
                             )
 
-                        update_method = (
-                            update_locked
-                            if use_locked_update
-                            else rt.bucket_mgr.update
-                        )
-                        committed = await update_method(
-                            candidate_id,
-                            allow_embedding_fallback=(
-                                raw_merge and source_tool == "hold"
-                            ),
-                            bump_active=True,
-                            **update_kwargs,
-                        )
+                        if locked_update_method is not None:
+                            committed = await locked_update_method(
+                                candidate_id,
+                                allow_embedding_fallback=(
+                                    raw_merge and source_tool == "hold"
+                                ),
+                                bump_active=True,
+                                **update_kwargs,
+                            )
+                        else:
+                            committed = await rt.bucket_mgr.update(
+                                candidate_id,
+                                allow_embedding_fallback=(
+                                    raw_merge and source_tool == "hold"
+                                ),
+                                bump_active=True,
+                                **update_kwargs,
+                            )
                         if not committed:
                             break
 
@@ -964,14 +1027,14 @@ async def _merge_or_create_inner(
         if pending:
             embedding_state = "queued"
         else:
-            existing = None
+            stored_embedding = None
             lookup_error = None
             if engine and getattr(engine, "enabled", False):
                 try:
-                    existing = await engine.get_embedding(bucket_id)
+                    stored_embedding = await engine.get_embedding(bucket_id)
                 except Exception as exc:
                     lookup_error = exc
-            if existing is not None:
+            if stored_embedding is not None:
                 embedding_state = "indexed"
             else:
                 # Defensive repair: a stale reconcile/path-index race must not

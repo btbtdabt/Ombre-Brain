@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Awaitable, Callable
+from typing import Any, cast
 
 from identity import identity_names
 from utils import strip_wikilinks
@@ -99,7 +100,20 @@ class LetterService:
             safe_limit = 10
 
         try:
-            letters = await self.bucket_mgr.list_letters()
+            list_letters = getattr(self.bucket_mgr, "list_letters", None)
+            if callable(list_letters):
+                list_letters_fn = cast(
+                    Callable[[], Awaitable[list[dict[str, Any]]]],
+                    list_letters,
+                )
+                letters = await list_letters_fn()
+            else:
+                letters = [
+                    item
+                    for item in await self.bucket_mgr.list_all(include_archive=False)
+                    if str((item.get("metadata") or {}).get("type") or "").lower()
+                    == "letter"
+                ]
         except Exception as exc:
             return f"读取信件失败: {exc}"
 

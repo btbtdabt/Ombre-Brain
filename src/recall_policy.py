@@ -24,6 +24,8 @@ from memory_relevance import (
 from identity import identity_names
 from query_terms import GENERIC_LEXICAL_STOPWORDS, RECALL_SYSTEM_META_TERMS, identity_address_terms
 from query_understanding import query_intent_terms
+from query_normalization import compact_lookup_key, compact_symbol_key
+from runtime_values import float_value as _safe_float, optional_float as _maybe_float
 
 
 CONTEXT_ONLY_SECTIONS = frozenset({"affect_anchor", "favorite_reason", "comment", "followup"})
@@ -50,6 +52,18 @@ CONTEXT_ONLY_SECTION_ALIASES = {
     "待办": "followup",
     "待办事项": "followup",
 }
+
+
+def query_has_explicit_recall_marker(query: str) -> bool:
+    text = str(query or "").strip().lower()
+    return bool(
+        text
+        and any(
+            str(marker or "").strip().lower() in text
+            for marker in query_intent_terms("memory_sentinel.explicit_recall_markers")
+            if str(marker or "").strip()
+        )
+    )
 MARKDOWN_HEADING_RE = re.compile(r"^(#{2,6})\s+(.+?)\s*$")
 WEAK_RECALL_TOPIC_TERMS = frozenset(
     {
@@ -1330,8 +1344,7 @@ def _anchor_term_variants(key: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(variants)) or (key,)
 
 
-def _compact_anchor_term(value: object) -> str:
-    return re.sub(r"[^0-9a-z\u4e00-\u9fff_.:-]+", "", str(value or "").strip().lower())
+_compact_anchor_term = compact_symbol_key
 
 
 def _canonical_anchor_state(term: str) -> str:
@@ -1632,17 +1645,7 @@ class RecallPolicy:
             return True, "no_locatable_terms"
         return False, ""
 
-    @staticmethod
-    def _query_has_explicit_recall_marker(query: str) -> bool:
-        text = str(query or "").strip().lower()
-        return bool(
-            text
-            and any(
-                str(marker or "").strip().lower() in text
-                for marker in query_intent_terms("memory_sentinel.explicit_recall_markers")
-                if str(marker or "").strip()
-            )
-        )
+    _query_has_explicit_recall_marker = staticmethod(query_has_explicit_recall_marker)
 
     def _query_has_recall_system_meta_terms(self, query: str) -> bool:
         compact = self._compact_entity_keyword(query)
@@ -1918,9 +1921,7 @@ class RecallPolicy:
         compact = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", key)
         return key in self.recall_context_terms or compact in self.recall_context_terms
 
-    @staticmethod
-    def _compact_marker_text(value: object) -> str:
-        return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(value or "").strip().lower())
+    _compact_marker_text = staticmethod(compact_lookup_key)
 
     def _marker_in_text(self, marker: object, text: str, compact_text: str) -> bool:
         marker_text = str(marker or "").strip().lower()
@@ -2274,9 +2275,7 @@ class RecallPolicy:
         cleaned = re.sub(r"\s+", " ", cleaned)
         return cleaned.strip("，。！？、,.!?:：;；~～♡❤♥（）()[]【】")
 
-    @staticmethod
-    def _compact_entity_keyword(value: object) -> str:
-        return re.sub(r"[^0-9a-z\u4e00-\u9fff_.:-]+", "", str(value or "").strip().lower())
+    _compact_entity_keyword = staticmethod(compact_symbol_key)
 
     def _entity_keyword_allowed(self, value: str, *, strong: bool = False) -> bool:
         compact = self._compact_entity_keyword(value)
@@ -2991,15 +2990,3 @@ def _term_subsumes(container: str, contained: str) -> bool:
     if not re.search(r"\d", contained):
         return False
     return contained in container
-
-
-def _maybe_float(value: Any) -> float | None:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _safe_float(value: Any, default: float) -> float:
-    number = _maybe_float(value)
-    return default if number is None else number

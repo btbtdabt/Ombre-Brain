@@ -11,8 +11,8 @@ web/system.py — 心跳 / 日志 / 错误码面板
 ========================================
 """
 
-import ast
 import asyncio
+from collections.abc import Iterable, Mapping
 import json
 import os
 import time
@@ -23,6 +23,7 @@ import yaml
 from starlette.requests import Request
 from starlette.responses import Response
 
+from file_tail import iter_tail_lines
 from . import _shared as sh
 
 from ombrebrain.app.legacy_runtime import LegacyRuntime
@@ -42,8 +43,10 @@ from ombrebrain.maintenance import (
     VNextPreflightReportBuilder,
 )
 from ombrebrain.observability import ObservabilityMetricBoundary
-from ombrebrain.policy import RedLineContract, RedLineFeatureSpec, SurfaceDecision
+from ombrebrain.policy.red_lines import RedLineContract, RedLineFeatureSpec
+from ombrebrain.policy.surfacing import SurfaceDecision
 from ombrebrain.protocol import PublicToolDesignContract, PublicToolSpec
+from tools.current.manifest import REGISTERED_TOOL_NAMES
 from ombrebrain.resilience import CrashRecoveryContract, CrashRecoveryPlan, PathStep
 from ombrebrain.retrieval import SurfaceContextCompiler
 from deployment_profile import effective_configuration_report
@@ -67,7 +70,6 @@ except ImportError:  # pragma: no cover
 _LOGS_DEFAULT_LIMIT = 200
 _LOGS_MAX_LIMIT = 2000
 _MAX_LOG_TAIL_SCAN_BYTES = 8 * 1024 * 1024
-_LOG_TAIL_CHUNK_BYTES = 64 * 1024
 _ERRORS_DEFAULT_LIMIT = 50
 _ERRORS_MAX_LIMIT = 500
 
@@ -88,32 +90,14 @@ def _read_filtered_log_tail(
     """
 
     selected: list[str] = []
-    with open(path, "rb") as handle:
-        handle.seek(0, os.SEEK_END)
-        position = handle.tell()
-        remaining = max(0, int(max_bytes))
-        carry = b""
-        while position > 0 and remaining > 0 and len(selected) < limit:
-            chunk_size = min(_LOG_TAIL_CHUNK_BYTES, position, remaining)
-            position -= chunk_size
-            remaining -= chunk_size
-            handle.seek(position)
-            block = handle.read(chunk_size) + carry
-            parts = block.split(b"\n")
-            carry = parts.pop(0)
-            for raw_line in reversed(parts):
-                line = raw_line.decode("utf-8", errors="replace").rstrip("\r")
-                if not line:
-                    continue
-                if keep is None or any(f" {level}: " in line for level in keep):
-                    selected.append(line)
-                    if len(selected) >= limit:
-                        break
-
-        if position == 0 and carry and len(selected) < limit:
-            line = carry.decode("utf-8", errors="replace").rstrip("\r")
-            if line and (keep is None or any(f" {level}: " in line for level in keep)):
-                selected.append(line)
+    for line in iter_tail_lines(path, max_bytes=max_bytes):
+        line = line.rstrip("\r")
+        if not line:
+            continue
+        if keep is None or any(f" {level}: " in line for level in keep):
+            selected.append(line)
+            if len(selected) >= limit:
+                break
 
     selected.reverse()
     return selected
@@ -227,41 +211,29 @@ def _build_diagnostics_observability_metrics(checks: list[dict[str, Any]]) -> li
     return metrics
 
 
-def _read_public_tool_specs_from_server_source(repo_root: str) -> dict[str, Any]:
-    server_path = os.path.join(str(repo_root or ""), "src", "server.py")
-    if not os.path.isfile(server_path):
-        return {
-            "ok": False,
-            "server_path": server_path,
-            "error": "server.py not found",
-            "specs": [],
-            "tool_names": [],
-        }
-
-    with open(server_path, "r", encoding="utf-8") as f:
-        tree = ast.parse(f.read(), filename=server_path)
-
-    specs: list[PublicToolSpec] = []
-    for node in tree.body:
-        if not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
-            continue
-        if any(_is_public_mcp_tool_decorator(decorator) for decorator in node.decorator_list):
-            specs.append(PublicToolSpec(name=node.name))
-
+def _read_public_tool_specs(tool_names: Iterable[str] | None = None) -> dict[str, Any]:
+    expected_names = list(REGISTERED_TOOL_NAMES)
+    source = "live_registry" if tool_names is not None else "manifest_fallback"
+    actual_names = list(
+        dict.fromkeys(
+            str(name).strip()
+            for name in (tool_names if tool_names is not None else expected_names)
+            if str(name).strip()
+        )
+    )
+    expected = set(expected_names)
+    actual = set(actual_names)
+    specs = [PublicToolSpec(name=name) for name in actual_names]
     return {
         "ok": True,
-        "server_path": server_path,
+        "manifest_path": "src/tools/current/manifest.py",
+        "source": source,
         "specs": specs,
-        "tool_names": [spec.name for spec in specs],
+        "tool_names": actual_names,
+        "matches_manifest": actual == expected,
+        "missing_tool_names": sorted(expected - actual),
+        "unexpected_tool_names": sorted(actual - expected),
     }
-
-
-def _is_public_mcp_tool_decorator(decorator: ast.expr) -> bool:
-    call = decorator if isinstance(decorator, ast.Call) else None
-    func = call.func if call is not None else decorator
-    if not isinstance(func, ast.Attribute) or func.attr != "tool":
-        return False
-    return isinstance(func.value, ast.Name) and func.value.id in {"mcp", "mcp_extra"}
 
 
 def _read_adr_documents_from_repo(repo_root: str) -> dict[str, Any]:
@@ -440,10 +412,10 @@ def _build_replication_contract_diagnostics() -> dict[str, Any]:
             **contract.evaluate_segment(
                 ReplicationSegment(
                     replica_id="replica-a",
-                    events=[
+                    events=(
                         {"event_type": "TraceCreated", "trace_id": "t1", "trace_kind": "dynamic"},
                         {"event_type": "TraceDeletedToArchive", "trace_id": "t1", "payload": {"tombstone": True}},
-                    ],
+                    ),
                 )
             ).to_dict(),
         },
@@ -576,8 +548,9 @@ def _build_preflight_cli_diagnostics(repo_root: str) -> dict[str, Any]:
 
 
 def _build_preflight_report_self_diagnostics(vnext_preflight: dict[str, Any]) -> dict[str, Any]:
-    checks = vnext_preflight.get("checks") if isinstance(vnext_preflight.get("checks"), dict) else {}
-    self_check = checks.get("preflight_report_self") if isinstance(checks, dict) else None
+    raw_checks = vnext_preflight.get("checks")
+    checks: dict[str, Any] = dict(raw_checks) if isinstance(raw_checks, dict) else {}
+    self_check = checks.get("preflight_report_self")
     if not isinstance(self_check, dict):
         return {
             "ok": False,
@@ -595,8 +568,9 @@ def _build_preflight_report_self_diagnostics(vnext_preflight: dict[str, Any]) ->
 
 
 def _build_vnext_coverage_diagnostics(vnext_preflight: dict[str, Any]) -> dict[str, Any]:
-    checks = vnext_preflight.get("checks") if isinstance(vnext_preflight.get("checks"), dict) else {}
-    coverage = checks.get("vnext_coverage") if isinstance(checks, dict) else None
+    raw_checks = vnext_preflight.get("checks")
+    checks: dict[str, Any] = dict(raw_checks) if isinstance(raw_checks, dict) else {}
+    coverage = checks.get("vnext_coverage")
     if not isinstance(coverage, dict):
         return {
             "ok": False,
@@ -637,7 +611,9 @@ def _read_persisted_runtime_config() -> tuple[str, dict[str, Any]]:
     return path, raw
 
 
-async def build_system_diagnostics() -> dict[str, Any]:
+async def build_system_diagnostics(
+    public_tool_names: Iterable[str] | None = None,
+) -> dict[str, Any]:
     """Build a read-only Dashboard diagnostics report.
 
     This intentionally avoids network calls; explicit connectivity probes remain
@@ -744,7 +720,8 @@ async def build_system_diagnostics() -> dict[str, Any]:
         ))
 
     try:
-        stats = await sh.bucket_mgr.get_stats() if sh.bucket_mgr else {}
+        bucket_manager: Any = sh.bucket_mgr
+        stats = await bucket_manager.get_stats() if bucket_manager is not None else {}
         permanent = int(stats.get("permanent_count", 0) or 0)
         dynamic = int(stats.get("dynamic_count", 0) or 0)
         archive = int(stats.get("archive_count", 0) or 0)
@@ -772,7 +749,10 @@ async def build_system_diagnostics() -> dict[str, Any]:
     ledger_reporter = getattr(sh.bucket_mgr, "ledger_integrity_report", None)
     if callable(ledger_reporter):
         try:
-            ledger_report = ledger_reporter()
+            raw_ledger_report = ledger_reporter()
+            if not isinstance(raw_ledger_report, Mapping):
+                raise TypeError("ledger integrity report must be a mapping")
+            ledger_report = dict(raw_ledger_report)
             invalid_lines = ledger_report.get("invalid_lines", []) or []
             checks.append(_check(
                 "ledger",
@@ -823,7 +803,7 @@ async def build_system_diagnostics() -> dict[str, Any]:
         ))
 
     try:
-        manifest = _read_public_tool_specs_from_server_source(sh.repo_root)
+        manifest = _read_public_tool_specs(public_tool_names)
         if not manifest.get("ok"):
             checks.append(_check(
                 "public_tool_manifest",
@@ -831,33 +811,52 @@ async def build_system_diagnostics() -> dict[str, Any]:
                 "warning",
                 "Public MCP tool manifest could not be inspected",
                 details=manifest,
-                action="Inspect src/server.py path and diagnostics configuration",
+                action="Inspect the canonical tool manifest",
             ))
         else:
             specs = list(manifest.get("specs", []))
             report = PublicToolDesignContract.default().evaluate_manifest(specs).to_dict()
             tool_names = list(manifest.get("tool_names", []))
+            raw_decisions = report.get("decisions", [])
+            decisions = raw_decisions if isinstance(raw_decisions, list) else []
+            matches_manifest = bool(manifest.get("matches_manifest"))
+            contract_ok = bool(report.get("ok"))
             compatibility_names = [
                 decision.get("tool_name")
-                for decision in report.get("decisions", [])
-                if decision.get("reason") == "legacy-compatible public name"
+                for decision in decisions
+                if isinstance(decision, Mapping)
+                and decision.get("reason") == "legacy-compatible public name"
             ]
             checks.append(_check(
                 "public_tool_manifest",
                 "Public Tool Manifest",
-                "ok" if report.get("ok") else "error",
+                "ok" if contract_ok and matches_manifest else "error",
                 (
-                    "Public MCP tool names stay within organ-language boundaries"
-                    if report.get("ok")
+                    "Live public MCP tools match the canonical manifest"
+                    if contract_ok and matches_manifest
+                    else "Live public MCP tools differ from the canonical manifest"
+                    if contract_ok
                     else "Public MCP tool names include forbidden or database-like labels"
                 ),
                 details={
-                    "server_path": manifest.get("server_path", ""),
+                    "manifest_path": manifest.get("manifest_path", ""),
+                    "source": manifest.get("source", ""),
                     "tool_names": tool_names,
+                    "matches_manifest": matches_manifest,
+                    "missing_tool_names": manifest.get("missing_tool_names", []),
+                    "unexpected_tool_names": manifest.get(
+                        "unexpected_tool_names", []
+                    ),
                     "compatibility_tool_names": compatibility_names,
                     "report": report,
                 },
-                action="" if report.get("ok") else "Rename or restrict rejected public MCP tools",
+                action=(
+                    ""
+                    if contract_ok and matches_manifest
+                    else "Restore the live MCP registry to the canonical manifest"
+                    if contract_ok
+                    else "Rename or restrict rejected public MCP tools"
+                ),
             ))
     except Exception as e:
         checks.append(_check(
@@ -865,7 +864,7 @@ async def build_system_diagnostics() -> dict[str, Any]:
             "Public Tool Manifest",
             "warning",
             f"Public MCP tool manifest check could not run: {e}",
-            action="Inspect src/server.py public tool decorators",
+            action="Inspect the live MCP registry and canonical manifest",
         ))
 
     try:
@@ -1284,11 +1283,13 @@ async def build_system_diagnostics() -> dict[str, Any]:
         action=emb_action,
     ))
 
-    pending_ids = set()
+    pending_ids: set[str] = set()
     pending_fn = getattr(emb_outbox, "pending_ids", None)
     if callable(pending_fn):
         try:
-            pending_ids = pending_fn()
+            raw_pending_ids = pending_fn()
+            if isinstance(raw_pending_ids, (set, list, tuple)):
+                pending_ids = {item for item in raw_pending_ids if isinstance(item, str)}
         except Exception:
             pending_ids = set()
     integrity = await asyncio.to_thread(
@@ -1482,12 +1483,13 @@ def register(mcp) -> None:
         err = sh._require_auth(request)
         if err:
             return err
+        decay_engine: Any = sh.decay_engine
         return JSONResponse({
             "alive": True,
             "ts": time.time(),
             "uptime_s": int(time.time() - sh._SERVER_START_TS),
             "last_op_ts": sh._LAST_OP_TS,
-            "decay_engine": "running" if sh.decay_engine.is_running else "stopped",
+            "decay_engine": "running" if decay_engine.is_running else "stopped",
         })
 
     @mcp.custom_route("/api/system/diagnostics", methods=["GET"])
@@ -1496,7 +1498,15 @@ def register(mcp) -> None:
         err = sh._require_auth(request)
         if err:
             return err
-        return JSONResponse(await build_system_diagnostics())
+        try:
+            live_tools = await mcp.list_tools()
+            live_tool_names = [str(tool.name) for tool in live_tools]
+        except Exception as exc:
+            sh.logger.warning("Could not inspect live MCP tool registry: %s", exc)
+            live_tool_names = []
+        return JSONResponse(
+            await build_system_diagnostics(public_tool_names=live_tool_names)
+        )
 
     @mcp.custom_route("/api/logs", methods=["GET"])
     async def api_logs(request: Request) -> Response:

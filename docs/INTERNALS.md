@@ -107,7 +107,7 @@ Ombre-Brain/
 
 每个模块「干什么、边界在哪、依赖谁」：
 
-- **server.py**（约 1000 行）— MCP 服务入口。创建所有组件后调 `tools._runtime.init(...)` 注入依赖；以 `@mcp.tool()` / `@mcp_extra.tool()` 注册 **14 个薄封装**（每个 ≤ 10 行，只转发到 `tools/<名字>/`）；启动入口处把 `mcp_extra` 的 7 个工具回灌进 `mcp`，对外只暴露 **单连接器 `/mcp`**（14 工具全在这一条，详见 §3 抬头）；启动段调 `web.register_all(mcp)` 装配所有 HTTP 路由，并起 `mcp.streamable_http_app()` 一个 uvicorn 进程。**不写业务逻辑，也不再直接定义 HTTP 路由**——后者已全部迁到 `web/`。
+- **server.py** — MCP 服务装配入口。创建组件后调 `tools._runtime.init(...)` 注入依赖，再把 `tools/current/manifest.py` 的唯一 `TOOL_MANIFEST` 注册到一个 `FastMCP` 实例；对外只暴露单连接器 `/mcp`。历史的 `mcp_extra` 和 server 内 decorator wrappers 已移除。启动段调 `web.register_all(mcp)` 装配 HTTP 路由，并起 `mcp.streamable_http_app()` 一个 uvicorn 进程。工具业务逻辑归 `tools/`，HTTP 业务逻辑归 `web/`。
 - **tools/**（MCP 工具应用层）— 详见下面「1.x tools/ 包结构」。
 - **web/**（HTTP/Dashboard 路由层）— 详见下面「1.y web/ 包结构」。从旧 server.py 巨石里拆出的 16 个域模块，每个导出 `register(mcp)`；cookie/CSRF/会话鉴权等共享依赖在 `web/_shared.py`（类比 `tools/_runtime.py`）。
 - **bucket_manager.py** — 桶 CRUD + 多维加权搜索 + `touch()` 激活刷新 + `_time_ripple()` 时间涟漪 + 文件搬运（archive/permanent 之间）。
@@ -265,14 +265,18 @@ feel 桶自身：
 
 ---
 
-## 3. MCP 工具规格（共 14 个）
+## 3. MCP 工具规格（单 manifest，共 30 个）
 
-> **单连接器（iter 2.2）**：claude.ai 的 5 工具上限已解除，14 个工具合并回一个连接器 `/mcp`。
-> 历史上（iter 2.1）曾因该上限拆成主 `mcp`（`/mcp`，5 个）+ 副 `mcp_extra`（`/mcp-extra`，7 个）两个 FastMCP 实例。
-> 现在 `mcp_extra` 仅作工具分组容器保留（7 个 `@mcp_extra.tool()` 注册不动），启动入口处统一把它的工具
-> 回灌进 `mcp`，三种 transport（stdio / sse / streamable-http）都只对外暴露一条 `/mcp`。
-> - 高频 7 个 —— `breath` / `breath_search` / `breath_advanced` / `hold` / `grow` / `trace` / `dream`
-> - 低频 7 个 —— `anchor` / `release` / `pulse` / `plan` / `letter_write` / `letter_read` / `I`
+生产注册只有一个事实来源：`tools/current/manifest.py::TOOL_MANIFEST`。它把 Yinglianchun/current 功能与 P0luz 兼容工具组成一个 30 工具并集，通过同一个 `/mcp` 连接器暴露：
+
+- 记忆读取：`breath` / `breath_search` / `breath_advanced` / `read_bucket` / `list_buckets_light`
+- 记忆写入与整理：`hold` / `grow` / `trace` / `comment_bucket` / `delete_bucket_comment` / `profile_fact` / `anchor` / `release`
+- 内在状态：`pulse` / `introspection` / `dream` / `I`
+- Darkroom：`darkroom_enter` / `darkroom_rooms` / `darkroom_view` / `darkroom_delete` / `darkroom_status` / `darkroom_release`
+- 信件、计划与提醒：`letter_write` / `letter_read` / `plan` / `reminder_create` / `reminder_list` / `reminder_update`
+- 维护：`entity_edge_backfill`
+
+下面 3.1–3.11 保留 P0 核心工具的详细行为说明；current 扩展工具的参数与描述由同一 manifest 中的 handler docstring 提供。历史 `mcp_extra` 只存在于迁移记录，不再是运行对象。
 
 ### 3.1 `breath` / `breath_search` / `breath_advanced` — 检索/浮现
 
@@ -467,7 +471,7 @@ feel 桶自身：
 | `/api/env-vars` | GET | 🔒 | dashboard 设置页「⑤ 环境变量」只读区：当前进程读到的所有 `OMBRE_*`，敏感字段脱敏 |
 | `/api/env-config` | GET | 🔒 | 可写 6 字段的当前值（脱敏） |
 | `/api/env-config` | POST | 🔒 | 热更新 6 字段并写回 `.env`（重启仍有效） |
-| `/mcp/*` | — | 公开 | FastMCP 单连接器（iter 2.2）：全部 14 个工具 —— breath / breath_search / breath_advanced / hold / grow / dream / trace / anchor / release / pulse / plan / letter_write / letter_read / **I** |
+| `/mcp/*` | — | 公开 | FastMCP 单连接器：canonical manifest 的全部 30 个工具（P0 核心 14 + current 扩展 16） |
 
 🔒 = 需要 cookie 认证，未认证返回 `JSON {error, setup_needed}` 状态码 401。
 
@@ -764,7 +768,7 @@ Phase 38 后，Dashboard `/api/system/diagnostics` 会追加 `migration_preserva
 
 工程名不能作为 public MCP tool 暴露：`remember`、`touch`、`resolve`、`suppress`、`surface`、`hippocampal_recall`、`offline_consolidate`、`update_memory_row` 等只允许作为 internal label。restricted/admin 工具（如 `verify_ledger`、`replay_ledger`、`rebuild_projection`、`admin_erasure_request`）必须显式标为 restricted 且要求 admin。
 
-这一步的边界是 diagnostic/manifest validation：它保证工具名设计不会滑回 database/API 语言，也不会让 `delete`、`dump_all`、`set_emotion`、`decide`、`update_user_profile`、`force_personality` 这类破坏 OB 哲学边界的名字进入普通工具清单。Dashboard `/api/system/diagnostics` 的 `public_tool_manifest` 检查会解析 `src/server.py` 中的 `@mcp.tool()` / `@mcp_extra.tool()` 装饰器，把公开工具名交给该 contract 校验；它不导入 `server.py`，避免启动副作用。
+这一步的边界是 diagnostic/manifest validation：它保证工具名设计不会滑回 database/API 语言，也不会让 `delete`、`dump_all`、`set_emotion`、`decide`、`update_user_profile`、`force_personality` 这类破坏 OB 哲学边界的名字进入普通工具清单。Dashboard `/api/system/diagnostics` 读取 FastMCP 当前实际暴露的工具，并与 canonical `REGISTERED_TOOL_NAMES` 比较后交给 contract 校验；不再通过 AST 猜测 server decorator，也不会拿 manifest 自己验证自己。
 
 ### 4.3.10.7 Code Standards Contract（vNext Phase 17，diagnostic）
 
@@ -991,9 +995,7 @@ Phase 42 后，Dashboard `/api/system/diagnostics` 会追加 `vnext_coverage` �
 
 ### 4.3.10.21 Public Tool Manifest Diagnostics（Phase 32）
 
-`web.system.build_system_diagnostics()` 现在会追加 `public_tool_manifest` check。它通过 AST 解析 `src/server.py`，收集 `@mcp.tool()` 和 `@mcp_extra.tool()` 装饰的公开 MCP 工具函数名，然后用 `PublicToolDesignContract.evaluate_manifest()` 校验这些名字仍然符合器官语言边界。
-
-这一步刻意不 import `server.py`，因为 server 模块带有 FastMCP 实例和启动副作用；源码审计足以覆盖当前公开注册点。如果后续 FastMCP 注册方式迁移到独立 manifest，可以把这个 diagnostics check 的输入从 AST 换成真实 manifest，但仍应先经过 `PublicToolDesignContract` 再显示或发布。
+`web.system.build_system_diagnostics()` 会追加 `public_tool_manifest` check。它直接读取 `tools.current.manifest.REGISTERED_TOOL_NAMES`，并用 `PublicToolDesignContract.evaluate_manifest()` 校验真实注册清单仍符合器官语言边界。manifest 模块不启动 FastMCP 服务，因此 diagnostics 不需要导入带启动副作用的 `server.py`。
 
 ### 4.3.10.22 ADR Requirements Diagnostics（Phase 33）
 

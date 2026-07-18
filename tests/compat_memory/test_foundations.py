@@ -5,6 +5,7 @@ from favorite_tags import (
     ai_favorite_tag,
     favorite_memory_aliases,
     favorite_policy_tags,
+    has_favorite_reason,
     is_favorite_memory_tag,
 )
 from identity import generic_identity_names, identity_names, render_identity_template
@@ -41,6 +42,12 @@ def test_identity_and_favorite_helpers_preserve_configured_names_and_aliases():
         "echo_favorite",
         "flavor_tender",
     ]
+
+
+def test_favorite_reason_recognizes_heading_and_plain_language_markers():
+    assert has_favorite_reason("### favorite_reason\nIt mattered") is True
+    assert has_favorite_reason("喜欢它的原因：那天很温柔") is True
+    assert has_favorite_reason("ordinary memory") is False
 
 
 def test_identity_query_terms_include_current_names_without_forcing_legacy_aliases():

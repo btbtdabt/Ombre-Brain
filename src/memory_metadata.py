@@ -5,6 +5,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from runtime_values import enabled_value as _truthy
+from runtime_values import text_value as _clean
+
 DOMAIN_LABELS = {
     "relationship": "关系",
     "intimacy": "亲密",
@@ -421,10 +424,6 @@ def normalize_memory_metadata(bucket: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def _clean(value: Any) -> str:
-    return str(value or "").strip()
-
-
 def _string_list(value: Any) -> list[str]:
     if value is None:
         return []
@@ -600,13 +599,6 @@ def _flags(
     add("profile_fact", "profile_fact" in compact or "profilefact" in compact or bool(_clean(meta.get("profile_kind"))))
     add("archived", _infer_status(meta, type_value, path_value, legacy_domain, tags) == "archived")
     return flags
-
-
-def _truthy(value: Any) -> bool:
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
-
 
 def _has_exact_marker(legacy_domain: list[str], tags: list[str], markers: set[str]) -> bool:
     compact_markers = {_compact(marker) for marker in markers}

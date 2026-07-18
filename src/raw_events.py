@@ -6,8 +6,11 @@ import logging
 import os
 import re
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
+
+from runtime_values import parse_comparable_datetime, utc_now_iso
+from sqlite_support import connect_rows
 
 
 logger = logging.getLogger("ombre_brain.raw_events")
@@ -113,9 +116,7 @@ class RawEventStore:
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
+        return connect_rows(self.db_path)
 
     def _init_db(self) -> None:
         conn = self._connect()
@@ -285,17 +286,6 @@ class RawEventStore:
 
         compare_tz = start_at.tzinfo or end_at.tzinfo
 
-        def parse_local(value: Any) -> datetime | None:
-            try:
-                parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
-            except ValueError:
-                return None
-            if compare_tz is None:
-                return parsed.replace(tzinfo=None) if parsed.tzinfo is not None else parsed
-            if parsed.tzinfo is None:
-                return parsed.replace(tzinfo=compare_tz)
-            return parsed.astimezone(compare_tz)
-
         start = start_at
         end = end_at
         if compare_tz is not None:
@@ -314,7 +304,7 @@ class RawEventStore:
 
         selected: list[dict[str, Any]] = []
         for row in rows:
-            created = parse_local(row["created_at"])
+            created = parse_comparable_datetime(row["created_at"], compare_tz)
             if created is None or not (start <= created < end):
                 continue
             selected.append(self._row_to_event(row))
@@ -449,9 +439,7 @@ class RawEventStore:
             return RawEventStore._now_iso()
         return text[:80]
 
-    @staticmethod
-    def _now_iso() -> str:
-        return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    _now_iso = staticmethod(utc_now_iso)
 
     @staticmethod
     def _coerce_text(value: Any) -> str:

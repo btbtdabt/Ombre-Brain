@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from runtime_values import int_value as _safe_int
+
 
 def source_ref_window(
     moment: dict,
@@ -59,13 +61,6 @@ def _safe_source_path(ref: dict[str, Any], allowed_root: str) -> Path | None:
     if root not in (resolved, *resolved.parents):
         return None
     return resolved
-
-
-def _safe_int(value: Any, default: int) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
 
 
 def _clip_text(text: str, max_chars: int) -> str:

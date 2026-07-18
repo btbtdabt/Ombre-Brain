@@ -29,16 +29,18 @@ trace 是 OB 唯一的「写元数据」入口，承接所有桶字段更新和�
 ========================================
 """
 
-import math
 from contextlib import AsyncExitStack
 from typing import Optional
 
 from memory_messages import resolved_hint
+from runtime_values import finite_float
 from utils import parse_bool
 from .. import _runtime as rt
 from .._common import (
     _HIGH_IMP_THRESHOLD,
     _quota_turn,
+    apply_memory_detail_updates,
+    apply_plan_change_log,
     check_content_size,
     check_metadata_size,
     check_pinned_quota,
@@ -117,22 +119,15 @@ async def trace_core(
     hard_delete = parse_bool(hard_delete, default=False)
     delete_reason = "" if delete_reason is None else str(delete_reason).strip()
 
-    def _finite_float(value, default: float) -> float:
-        try:
-            numeric = float(value)
-        except (TypeError, ValueError, OverflowError):
-            return default
-        return numeric if math.isfinite(numeric) else default
-
     def _safe_int(value, default: int) -> int:
         try:
             return int(value)
         except (TypeError, ValueError, OverflowError):
             return default
 
-    valence = _finite_float(valence, -1)
-    arousal = _finite_float(arousal, -1)
-    weight = _finite_float(weight, -1)
+    valence = finite_float(valence, -1)
+    arousal = finite_float(arousal, -1)
+    weight = finite_float(weight, -1)
     importance = _safe_int(importance, -1)
     resolved = _safe_int(resolved, -1)
     pinned = _safe_int(pinned, -1)
@@ -370,38 +365,19 @@ async def trace_core(
             # Unpinning/restoring surfacing can create an ordinary high slot.
             # Persist quota degradation in the same bucket transaction.
             updates["importance"] = final_importance
-        why_remembered = str(why_remembered).strip()
-        if why_remembered == "\\clear":
-            updates["why_remembered"] = ""
-        elif why_remembered:
-            updates["why_remembered"] = why_remembered[:500]
-
-        # --- Miss: meaning / media —— 追加是日常操作，整体替换只用于纠错/清理 ---
-        if meaning_append.strip():
-            updates["meaning_append"] = meaning_append.strip()
-        if meaning_replace is not None:
-            updates["meaning"] = meaning_replace
-        if media_append:
-            updates["media_append"] = media_append
-        if media_replace is not None:
-            updates["media"] = media_replace
+        apply_memory_detail_updates(
+            updates,
+            why_remembered=why_remembered,
+            meaning_append=meaning_append,
+            meaning_replace=meaning_replace,
+            media_append=media_append,
+            media_replace=media_replace,
+        )
 
         if not updates:
             return "没有任何字段需要修改。"
 
-        # --- plan 桶：status / content 改变时追加 change_log ---
-        if bucket.get("metadata", {}).get("type") == "plan" and ("status" in updates or "content" in updates):
-            from .._common import append_plan_change_log
-            old_meta = bucket.get("metadata", {})
-            history = list(old_meta.get("change_log") or [])
-            if "status" in updates and updates["status"] != old_meta.get("status"):
-                history = append_plan_change_log(
-                    history, "status",
-                    **{"from": old_meta.get("status"), "to": updates["status"]},
-                )
-            if "content" in updates:
-                history = append_plan_change_log(history, "edit")
-            updates["change_log"] = history
+        apply_plan_change_log(bucket, updates)
 
         success = await rt.bucket_mgr.update(bucket_id, **updates)
         if not success:

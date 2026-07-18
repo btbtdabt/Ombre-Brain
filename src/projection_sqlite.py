@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from projection_mirror import TraceCatalogProjection
+from runtime_values import optional_int as _optional_int
 
 
 class TraceSQLiteProjection:
@@ -151,7 +152,9 @@ class TraceSQLiteProjection:
             )
 
     def _insert_trace(self, conn: sqlite3.Connection, trace: dict[str, Any], *, fts_enabled: bool) -> None:
-        metadata = trace.get("metadata") if isinstance(trace.get("metadata"), dict) else {}
+        metadata = trace.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
         search_text = _search_text(trace)
         values = (
             str(trace.get("trace_id") or ""),
@@ -223,7 +226,9 @@ def _trace_from_row(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _search_text(trace: dict[str, Any]) -> str:
-    metadata = trace.get("metadata") if isinstance(trace.get("metadata"), dict) else {}
+    metadata = trace.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
     parts = [
         trace.get("trace_id"),
         trace.get("trace_kind"),
@@ -274,12 +279,3 @@ def _int_meta(conn: sqlite3.Connection, key: str) -> int:
 def _bool_meta(conn: sqlite3.Connection, key: str) -> bool:
     row = conn.execute("SELECT value FROM projection_meta WHERE key = ?", (key,)).fetchone()
     return bool(row and str(row[0]).lower() == "true")
-
-
-def _optional_int(value: Any) -> int | None:
-    if value in (None, ""):
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None

@@ -17,9 +17,9 @@ web/config_api.py — Dashboard 配置 / 环境变量 / API Key 测试 / 模型�
 """
 
 import os
-import sys
 import secrets
 from collections.abc import Mapping
+from typing import TYPE_CHECKING, cast
 
 import httpx
 
@@ -30,6 +30,9 @@ from deployment_profile import normalize_public_https_origin
 from public_origin import configured_public_origin
 
 from . import _shared as sh
+
+if TYPE_CHECKING:
+    from dehydrator import Dehydrator
 
 try:
     from utils import (  # type: ignore
@@ -399,7 +402,7 @@ def register(mcp) -> None:
 
         # --- Dehydration config ---
         if "dehydration" in body:
-            d = body["dehydration"]
+            d = cast(dict[str, object], body["dehydration"])
             dehy = sh.config.setdefault("dehydration", {})
             for key in ("model", "base_url", "max_tokens", "temperature", "api_format", "timeout_seconds"):
                 if key in d:
@@ -409,29 +412,34 @@ def register(mcp) -> None:
                 dehy["api_key"] = d["api_key"]
                 updated.append("dehydration.api_key")
             # Hot-reload dehydrator — sync ALL attributes so dashboard changes take effect immediately
-            sh.dehydrator.model = dehy.get("model", sh.dehydrator.model)
-            sh.dehydrator.base_url = dehy.get("base_url", sh.dehydrator.base_url)
-            sh.dehydrator.max_tokens = int(dehy.get("max_tokens") or sh.dehydrator.max_tokens)
-            sh.dehydrator.temperature = float(dehy.get("temperature") or sh.dehydrator.temperature)
-            sh.dehydrator.timeout_seconds = _positive_float(dehy.get("timeout_seconds"), sh.dehydrator.timeout_seconds)
-            sh.dehydrator.api_format = dehy.get("api_format", getattr(sh.dehydrator, "api_format", "openai_compat"))
+            dehydrator = cast("Dehydrator", sh.dehydrator)
+            dehydrator.model = dehy.get("model", dehydrator.model)
+            dehydrator.base_url = dehy.get("base_url", dehydrator.base_url)
+            dehydrator.max_tokens = int(dehy.get("max_tokens") or dehydrator.max_tokens)
+            dehydrator.temperature = float(dehy.get("temperature") or dehydrator.temperature)
+            dehydrator.timeout_seconds = _positive_float(
+                dehy.get("timeout_seconds"), dehydrator.timeout_seconds
+            )
+            dehydrator.api_format = dehy.get(
+                "api_format", getattr(dehydrator, "api_format", "openai_compat")
+            )
             if "api_key" in d and d["api_key"]:
-                sh.dehydrator.api_key = dehy["api_key"]
-            sh.dehydrator.api_available = bool(sh.dehydrator.api_key)
+                dehydrator.api_key = dehy["api_key"]
+            dehydrator.api_available = bool(dehydrator.api_key)
             # Rebuild OpenAI-compat client whenever key or url changes
-            if sh.dehydrator.api_available and sh.dehydrator.api_format == "openai_compat":
+            if dehydrator.api_available and dehydrator.api_format == "openai_compat":
                 from openai import AsyncOpenAI
-                sh.dehydrator.client = AsyncOpenAI(
-                    api_key=sh.dehydrator.api_key,
-                    base_url=sh.dehydrator.base_url,
-                    timeout=sh.dehydrator.timeout_seconds,
+                dehydrator.client = AsyncOpenAI(
+                    api_key=dehydrator.api_key,
+                    base_url=dehydrator.base_url,
+                    timeout=dehydrator.timeout_seconds,
                 )
             else:
-                sh.dehydrator.client = None
+                dehydrator.client = None
 
         # --- Embedding config ---
         if "embedding" in body:
-            e = embedding_payload
+            e = cast(dict[str, object], embedding_payload)
             emb = sh.config.setdefault("embedding", {})
             rebuild_embedding = False
             if embedding_enabled is not None:
@@ -1207,13 +1215,7 @@ def register(mcp) -> None:
         # 4. 延迟自重启，让本次响应先回到前端（参照 /api/do-update 的重启节奏）。
         import threading
 
-        def _do_restart() -> None:
-            try:
-                os.execv(sys.executable, [sys.executable] + sys.argv)
-            except Exception:
-                os._exit(0)
-
-        threading.Timer(1.0, _do_restart).start()
+        threading.Timer(1.0, sh.restart_current_process).start()
         logger.info(f"[transport] 切换 {current} → {new_t}，1s 后自重启生效")
         return JSONResponse({
             "ok": True,

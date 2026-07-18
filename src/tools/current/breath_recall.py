@@ -8,6 +8,7 @@ import hashlib
 from dataclasses import replace
 from typing import Any
 
+from config_modes import normalize_direct_render_mode, normalize_retrieval_mode
 from memory_diffusion import (
     diffuse_memory,
     diffusion_options_from_config,
@@ -16,21 +17,35 @@ from memory_diffusion import (
     seed_scores_for_buckets,
 )
 from memory_layers import (
-    LAYER_SOURCE_RECORD,
     can_bucket_be_related_target,
     can_moment_be_direct_seed,
     can_moment_be_recall_context,
-    infer_bucket_layer,
+    is_source_record_bucket,
 )
 from memory_moments import parse_bucket_moments
 from memory_relevance import (
-    active_facets,
-    facets_for_text,
     memory_relevance_options_from_config,
-    query_has_explicit_entity_marker,
     recall_rank,
     recall_search_query,
     relevance_multiplier,
+)
+from recall_pipeline import (
+    TASK_ONLY_MOMENT_SECTIONS,
+    TEMPERATURE_MOMENT_SECTIONS,
+    admit_moments,
+    append_lexical_matches,
+    append_word_map_matches,
+    dehydration_metadata,
+    group_moments_by_bucket,
+    is_unpinned_anchor_candidate,
+    moment_rerank_document,
+    recallable_bucket as _recallable_bucket,
+    recall_thresholds,
+    safe_float as _safe_float,
+    score_unit as _score_unit,
+    seed_diagnostic,
+    source_record_fragment_window,
+    trim_to_token_budget,
 )
 from recall_policy import RecallPolicy
 from self_anchor import SELF_ANCHOR_TAG, is_self_anchor_bucket
@@ -45,17 +60,18 @@ from utils import (
 )
 
 from .. import _runtime as rt
-from ._helpers import call_async, dict_items, float_between, identity, int_between, runtime_config
+from ._helpers import (
+    call_async,
+    clip_text as _clip,
+    dict_items,
+    float_between,
+    identity,
+    int_between,
+    log_warning as _warning,
+    runtime_config,
+)
 
-
-TASK_ONLY_MOMENT_SECTIONS = {"followup", "followup_log"}
-TEMPERATURE_MOMENT_SECTIONS = {"affect_anchor", "favorite_reason", "comment"}
-
-
-def _warning(message: str, *args: Any) -> None:
-    warning = getattr(getattr(rt, "logger", None), "warning", None)
-    if callable(warning):
-        warning(message, *args)
+__all__ = ["normalize_direct_render_mode", "normalize_retrieval_mode"]
 
 
 def _config_section(name: str) -> dict:
@@ -63,54 +79,7 @@ def _config_section(name: str) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def _safe_float(value: Any, default: float | None = None) -> float | None:
-    try:
-        return float(value)
-    except (TypeError, ValueError, OverflowError):
-        return default
-
-
-def _score_unit(value: Any) -> float:
-    score = _safe_float(value, 0.0) or 0.0
-    if score > 1.0:
-        score /= 100.0
-    return max(0.0, min(1.0, score))
-
-
-def _clip(value: Any, max_chars: int) -> str:
-    text = " ".join(str(value or "").split()).strip()
-    if len(text) <= max_chars:
-        return text
-    return text[: max(0, max_chars - 1)].rstrip() + "…"
-
-
-def _trim_tokens(value: str, token_budget: int) -> str:
-    text = str(value or "").strip()
-    if token_budget <= 0 or not text:
-        return ""
-    if count_tokens_approx(text) <= token_budget:
-        return text
-    low, high = 0, len(text)
-    while low < high:
-        middle = (low + high + 1) // 2
-        candidate = text[:middle].rstrip() + "…"
-        if count_tokens_approx(candidate) <= token_budget:
-            low = middle
-        else:
-            high = middle - 1
-    return text[:low].rstrip() + ("…" if low else "")
-
-
-def normalize_direct_render_mode(value: Any) -> str:
-    mode = str(value or "auto").strip().lower()
-    return mode if mode in {"auto", "compact", "full"} else "auto"
-
-
-def normalize_retrieval_mode(value: Any) -> str:
-    mode = str(value or "graph").strip().lower()
-    if mode == "legacy":
-        return "bucket"
-    return mode if mode in {"graph", "bucket"} else "graph"
+_trim_tokens = trim_to_token_budget
 
 
 def _relevance_options():
@@ -139,18 +108,6 @@ def _policy() -> RecallPolicy:
         ),
         ai_reaction_names=[ai_name] if ai_name else [],
     )
-
-
-def _is_daily_impression(bucket: dict) -> bool:
-    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
-    tags = {str(tag).lower() for tag in meta.get("tags", []) or []}
-    return meta.get("type") == "feel" and bool(
-        {"relationship_weather", "daily_impression", "weekly_impression"} & tags
-    )
-
-
-def _recallable_bucket(bucket: dict) -> bool:
-    return bool(bucket.get("id")) and not is_self_anchor_bucket(bucket) and not _is_daily_impression(bucket)
 
 
 def _rendered_content(bucket: dict) -> str:
@@ -193,11 +150,6 @@ def _direct_header(bucket: dict, moment: dict) -> str:
         )
         if part
     )
-
-
-def _bucket_metadata_for_dehydration(bucket: dict) -> dict:
-    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
-    return {key: value for key, value in meta.items() if key not in {"tags", "comments"}}
 
 
 def _high_value(bucket: dict) -> bool:
@@ -247,15 +199,7 @@ def _window_around_moment(original: str, moment: dict, max_chars: int = 760) -> 
     return ("…" if start else "") + window + ("…" if end < len(compact) else "")
 
 
-def _moments_by_bucket(moments: list[dict]) -> dict[str, list[dict]]:
-    grouped: dict[str, list[dict]] = {}
-    for moment in moments:
-        bucket_id = str(moment.get("bucket_id") or "")
-        if bucket_id:
-            grouped.setdefault(bucket_id, []).append(moment)
-    for bucket_moments in grouped.values():
-        bucket_moments.sort(key=lambda item: int(item.get("ordinal") or 0))
-    return grouped
+_moments_by_bucket = group_moments_by_bucket
 
 
 def _direct_moments_for_bucket(bucket: dict, query: str) -> list[dict]:
@@ -269,31 +213,19 @@ def _direct_moments_for_bucket(bucket: dict, query: str) -> list[dict]:
     ]
 
 
-def _is_source_record_bucket(bucket: dict | None) -> bool:
-    return isinstance(bucket, dict) and infer_bucket_layer(bucket) == LAYER_SOURCE_RECORD
+_is_source_record_bucket = is_source_record_bucket
 
 
 def _source_record_fragment(query: str, bucket: dict, max_chars: int = 360) -> str:
     original = _rendered_content(bucket)
     if not original:
         return ""
-    matches = []
-    lowered = original.lower()
-    for term in _policy().specific_query_terms(query):
-        needle = str(term or "").strip().lower()
-        if len(needle) < 2:
-            continue
-        index = lowered.find(needle)
-        if index >= 0:
-            matches.append((index, needle))
-    if not matches:
-        return ""
-    index, needle = min(matches, key=lambda item: (item[0], -len(item[1])))
-    half = max_chars // 2
-    start = max(0, index - half)
-    end = min(len(original), index + len(needle) + half)
-    fragment = original[start:end].strip()
-    return ("…" if start else "") + fragment + ("…" if end < len(original) else "")
+    fragment, clipped_start, clipped_end = source_record_fragment_window(
+        original,
+        _policy().specific_query_terms(query),
+        max_chars,
+    )
+    return ("…" if clipped_start else "") + fragment + ("…" if clipped_end else "")
 
 
 def _lookup_key(value: Any) -> str:
@@ -469,7 +401,7 @@ async def _format_direct_bucket(
                     await call_async(
                         dehydrate,
                         original or matched,
-                        _bucket_metadata_for_dehydration(bucket),
+                        dehydration_metadata(bucket),
                     )
                     or matched
                 )
@@ -495,7 +427,7 @@ async def _format_direct_bucket(
         if callable(dehydrate):
             try:
                 capsule = str(
-                    await call_async(dehydrate, original, _bucket_metadata_for_dehydration(bucket))
+                    await call_async(dehydrate, original, dehydration_metadata(bucket))
                     or ""
                 )
                 block = (
@@ -537,7 +469,7 @@ async def _dehydrate_summary(bucket: dict, max_chars: int = 180) -> str:
     dehydrate = getattr(getattr(rt, "dehydrator", None), "dehydrate", None)
     if callable(dehydrate):
         try:
-            clean_meta = _bucket_metadata_for_dehydration(bucket)
+            clean_meta = dehydration_metadata(bucket)
             summary = await call_async(dehydrate, bucket_text_for_embedding(bucket), clean_meta)
             return _clip(summary, max_chars)
         except Exception as exc:
@@ -642,10 +574,7 @@ async def _diffused_bucket_blocks(
 def _select_anchors(all_buckets: list[dict], limit: int = 2) -> list[dict]:
     anchors = []
     for bucket in all_buckets:
-        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
-        if is_self_anchor_bucket(bucket) or not meta.get("anchor"):
-            continue
-        if meta.get("pinned") or meta.get("protected") or meta.get("type") in {"permanent", "feel"}:
+        if not is_unpinned_anchor_candidate(bucket):
             continue
         anchors.append(bucket)
     anchors.sort(
@@ -912,150 +841,6 @@ async def read_self_anchor_breath(
     return f"=== {title} ===\n" + ("\n---\n".join(rows) if rows else empty)
 
 
-def _recall_thresholds(query: str, max_results: int) -> dict[str, Any]:
-    cfg = _config_section("recall_thresholds")
-    options = _relevance_options()
-    query_facets = active_facets(facets_for_text(query, options))
-    explicit = query_has_explicit_entity_marker(query)
-    vague = not _policy().specific_query_terms(query)
-    profile = "explicit" if explicit else "vague" if vague else "facet" if query_facets else "default"
-    if explicit:
-        vector_min = float_between(cfg.get("explicit_vector_min_score"), 0.55, 0.0, 1.0)
-    elif vague:
-        vector_min = float_between(cfg.get("vague_vector_min_score"), 0.40, 0.0, 1.0)
-    elif query_facets:
-        vector_min = float_between(cfg.get("facet_vector_min_score"), 0.45, 0.0, 1.0)
-    else:
-        vector_min = float_between(cfg.get("vector_min_score"), 0.50, 0.0, 1.0)
-    top_k = max(max_results, 20)
-    if vague:
-        top_k = max(top_k, int_between(cfg.get("vague_top_k"), 50, 20, 100))
-    return {
-        "profile": profile,
-        "vector_min_score": vector_min,
-        "semantic_top_k": top_k,
-        "query_facets": sorted(query_facets),
-        "has_explicit_entity": explicit,
-        "is_vague": vague,
-    }
-
-
-def _seed_diagnostic(
-    diagnostics: dict[str, dict],
-    bucket: dict,
-    source: str,
-    *,
-    bucket_score: Any = None,
-    embedding_score: Any = None,
-) -> None:
-    bucket_id = str(bucket.get("id") or "")
-    if not bucket_id:
-        return
-    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
-    item = diagnostics.setdefault(
-        bucket_id,
-        {
-            "bucket_id": bucket_id,
-            "bucket_name": meta.get("name") or bucket_id,
-            "sources": [],
-        },
-    )
-    if source not in item["sources"]:
-        item["sources"].append(source)
-    if bucket_score is not None:
-        item["bucket_search_score"] = _safe_float(bucket_score, 0.0)
-        item["keyword_score"] = round(_score_unit(bucket_score), 4)
-    if embedding_score is not None:
-        item["embedding_score"] = round(_safe_float(embedding_score, 0.0) or 0.0, 4)
-
-
-def _bucket_haystack(bucket: dict) -> str:
-    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
-    return " ".join(
-        [
-            str(meta.get("name") or bucket.get("id") or ""),
-            " ".join(str(tag) for tag in meta.get("tags", []) or []),
-            " ".join(str(domain) for domain in meta.get("domain", []) or []),
-            bucket_content_for_recall(bucket),
-        ]
-    ).lower()
-
-
-def _append_lexical_matches(
-    query: str,
-    matches: list[dict],
-    all_buckets: list[dict],
-    diagnostics: dict[str, dict],
-) -> list[str]:
-    terms = [str(term).strip() for term in _policy().specific_query_terms(query) if str(term).strip()]
-    if not terms:
-        terms = re.findall(r"[A-Za-z][A-Za-z0-9_.:-]{1,}|[\u4e00-\u9fff]{2,}", query)
-    terms = list(dict.fromkeys(terms))[:5]
-    matched_ids = {str(bucket.get("id") or "") for bucket in matches}
-    for bucket in all_buckets:
-        bucket_id = str(bucket.get("id") or "")
-        if not bucket_id or bucket_id in matched_ids or not _recallable_bucket(bucket):
-            continue
-        haystack = _bucket_haystack(bucket)
-        hits = [term for term in terms if term.lower() in haystack]
-        if not hits:
-            continue
-        candidate = dict(bucket)
-        candidate["score"] = round(min(100.0, 70.0 + len(hits) * 8.0), 2)
-        matches.append(candidate)
-        matched_ids.add(bucket_id)
-        _seed_diagnostic(diagnostics, candidate, "lexical", bucket_score=candidate["score"])
-    return terms
-
-
-def _append_word_map_matches(
-    query: str,
-    matches: list[dict],
-    all_buckets: list[dict],
-    diagnostics: dict[str, dict],
-) -> dict[str, float]:
-    store = getattr(rt, "word_map_store", None)
-    gateway_cfg = _config_section("gateway")
-    enabled = bool(gateway_cfg.get("word_map_hint_enabled", False))
-    if not enabled or store is None or not getattr(store, "enabled", False):
-        return {}
-    terms = _policy().specific_query_terms(query)
-    try:
-        hints = store.hint_buckets_for_terms(
-            terms,
-            neighbor_limit=int_between(gateway_cfg.get("word_map_hint_neighbor_limit"), 6, 0, 40),
-            bucket_limit=int_between(gateway_cfg.get("word_map_hint_bucket_limit"), 12, 1, 100),
-        )
-    except Exception as exc:
-        _warning("Word-map hint lookup failed: %s", exc)
-        return {}
-    scores = {
-        str(bucket_id): float(score)
-        for bucket_id, score in (hints.get("bucket_scores") or {}).items()
-    }
-    bucket_map = {str(bucket.get("id") or ""): bucket for bucket in all_buckets}
-    matched_ids = {str(bucket.get("id") or "") for bucket in matches}
-    evidence = hints.get("evidence") if isinstance(hints.get("evidence"), dict) else {}
-    for bucket_id, score in scores.items():
-        bucket = bucket_map.get(bucket_id)
-        if not bucket or not _recallable_bucket(bucket):
-            continue
-        if bucket_id not in matched_ids:
-            candidate = dict(bucket)
-            candidate["score"] = round(score * 100, 2)
-            matches.append(candidate)
-            matched_ids.add(bucket_id)
-        _seed_diagnostic(diagnostics, bucket, "word_map", bucket_score=score)
-        diagnostics[bucket_id]["word_map_score"] = round(score, 4)
-        diagnostics[bucket_id]["word_map_terms"] = list(
-            (evidence.get(bucket_id) or {}).get("direct_terms") or []
-        )
-        diagnostics[bucket_id]["word_map_neighbor_terms"] = list(
-            (evidence.get(bucket_id) or {}).get("neighbor_terms") or []
-        )
-    return scores
-
-
 def _word_map_hint_enabled() -> bool:
     store = getattr(rt, "word_map_store", None)
     return bool(
@@ -1088,14 +873,21 @@ async def _collect_search_materials(
     matches = [dict(bucket) for bucket in matches if _recallable_bucket(bucket)]
     diagnostics: dict[str, dict] = {}
     for bucket in matches:
-        _seed_diagnostic(
+        seed_diagnostic(
             diagnostics,
             bucket,
             "keyword",
             bucket_score=bucket.get("score"),
         )
 
-    thresholds = _recall_thresholds(query, max_results)
+    specific_terms = _policy().specific_query_terms(query)
+    thresholds = recall_thresholds(
+        query,
+        max_results,
+        config=_config_section("recall_thresholds"),
+        options=_relevance_options(),
+        specific_terms=specific_terms,
+    )
     matched_ids = {str(bucket.get("id") or "") for bucket in matches}
     embedding = getattr(rt, "embedding_engine", None)
     vector_search = getattr(embedding, "search_similar", None)
@@ -1120,7 +912,12 @@ async def _collect_search_materials(
                 candidate["vector_match"] = True
                 matches.append(candidate)
                 matched_ids.add(bucket_id)
-                _seed_diagnostic(diagnostics, candidate, "vector", embedding_score=score)
+                seed_diagnostic(
+                    diagnostics,
+                    candidate,
+                    "vector",
+                    embedding_score=score,
+                )
         except Exception as exc:
             _warning("Vector search failed, using keyword only: %s", exc)
 
@@ -1131,12 +928,23 @@ async def _collect_search_materials(
         _warning("Moment recall list failed: %s", exc)
         all_buckets = list(matches)
     all_buckets = [bucket for bucket in all_buckets if isinstance(bucket, dict)]
-    lexical_terms = _append_lexical_matches(query, matches, all_buckets, diagnostics)
-    word_map_scores = _append_word_map_matches(
+    lexical_terms = append_lexical_matches(
         query,
         matches,
         all_buckets,
         diagnostics,
+        specific_terms=specific_terms,
+        recallable=_recallable_bucket,
+    )
+    word_map_scores = append_word_map_matches(
+        matches,
+        all_buckets,
+        diagnostics,
+        terms=specific_terms,
+        store=getattr(rt, "word_map_store", None),
+        gateway_config=_config_section("gateway"),
+        recallable=_recallable_bucket,
+        warning=_warning,
     )
     return (
         search_query,
@@ -1147,20 +955,6 @@ async def _collect_search_materials(
         lexical_terms,
         word_map_scores,
     )
-
-
-def _moment_rerank_document(moment: dict) -> str:
-    meta = moment.get("metadata", {}) if isinstance(moment.get("metadata"), dict) else {}
-    return "\n".join(
-        [
-            f"title: {meta.get('bucket_name') or moment.get('bucket_id') or ''}",
-            f"section: {moment.get('section') or ''}",
-            f"domain: {' '.join(str(item) for item in meta.get('bucket_domain', []) or [])}",
-            f"tags: {' '.join(str(item) for item in meta.get('bucket_tags', []) or [])}",
-            f"summary: {meta.get('annotation_summary') or meta.get('summary') or ''}",
-            f"text: {moment.get('text') or ''}",
-        ]
-    )[:4000]
 
 
 async def _rerank(query: str, candidates: list[dict]) -> list[dict]:
@@ -1175,7 +969,7 @@ async def _rerank(query: str, candidates: list[dict]) -> list[dict]:
     try:
         results = await engine.rerank(
             query,
-            [_moment_rerank_document(moment) for moment in head],
+            [moment_rerank_document(moment) for moment in head],
             top_n=len(head),
         )
     except Exception as exc:
@@ -1234,6 +1028,25 @@ def _apply_relevance_gate(query: str, candidates: list[dict]) -> list[dict]:
     return output
 
 
+def _source_record_admission_override(
+    moment: dict[str, Any],
+) -> tuple[str, dict[str, Any]] | None:
+    if not _is_source_record_synthetic(moment):
+        return None
+    metadata = (
+        moment.get("metadata", {})
+        if isinstance(moment.get("metadata"), dict)
+        else {}
+    )
+    return (
+        str(metadata.get("source_record_direct_reason") or "source_record_direct"),
+        {
+            "source_record_direct_override": True,
+            "fragment_seed": bool(metadata.get("source_record_fragment_seed")),
+        },
+    )
+
+
 def _admit_moments(
     query: str,
     candidates: list[dict],
@@ -1241,48 +1054,14 @@ def _admit_moments(
     *,
     auto_surface: bool,
 ) -> tuple[list[dict], list[dict]]:
-    admitted = []
-    suppressed = []
-    policy = _policy()
-    for moment in candidates:
-        if _is_source_record_synthetic(moment):
-            item = dict(moment)
-            meta = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
-            item["_admission_reason"] = str(
-                meta.get("source_record_direct_reason") or "source_record_direct"
-            )
-            item["_admission_debug"] = {
-                "source_record_direct_override": True,
-                "fragment_seed": bool(meta.get("source_record_fragment_seed")),
-            }
-            admitted.append(item)
-            continue
-        bucket_id = str(moment.get("bucket_id") or "")
-        seed = seed_diagnostics.get(bucket_id, {})
-        sources = set(seed.get("sources") or [])
-        word_map_only = bool(sources) and not (sources - {"word_map"})
-        has_topic = policy.moment_has_topic_evidence(query, moment)
-        if word_map_only and not has_topic:
-            item = dict(moment)
-            item["_admission_reason"] = "word_map_topic_evidence_missing"
-            suppressed.append(item)
-            continue
-        decision = policy.assess(
-            query,
-            moment,
-            has_topic_evidence=has_topic,
-            semantic_score=seed.get("embedding_score"),
-            rerank_score=moment.get("rerank_score"),
-            high_confidence_edge="lexical" in sources,
-            context_only=moment.get("section") in TEMPERATURE_MOMENT_SECTIONS,
-            auto=auto_surface,
-        )
-        item = dict(moment)
-        item["_admission_reason"] = decision.reason
-        item["_admission_debug"] = dict(decision.debug)
-        (admitted if decision.admit_direct else suppressed).append(item)
-    return admitted, suppressed
-
+    return admit_moments(
+        query,
+        candidates,
+        seed_diagnostics,
+        policy=_policy(),
+        auto=auto_surface,
+        direct_override=_source_record_admission_override,
+    )
 
 def _write_diagnostics(
     *,

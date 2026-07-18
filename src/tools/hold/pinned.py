@@ -24,6 +24,7 @@ permanent 目录，不衰减、不会被合并掉。
 
 from .. import _runtime as rt
 from .._common import check_pinned_quota, _quota_turn
+from .metadata import default_hold_analysis, normalize_hold_metadata
 
 
 async def store_pinned(
@@ -39,21 +40,9 @@ async def store_pinned(
         analysis = await rt.dehydrator.analyze(content)
     except Exception as e:
         rt.logger.warning(f"Auto-tagging failed, using defaults / 自动打标失败: {e}")
-        analysis = {
-            "domain": ["未分类"], "valence": 0.5, "arousal": 0.3,
-            "tags": [], "suggested_name": "",
-        }
+        analysis = default_hold_analysis()
 
-    domain = analysis.get("domain") or ["未分类"]
-    if not isinstance(domain, list):
-        domain = ["未分类"]
-    _v = analysis.get("valence", 0.5)
-    _a = analysis.get("arousal", 0.3)
-    final_valence = valence if 0 <= valence <= 1 else (float(_v) if _v is not None else 0.5)
-    final_arousal = arousal if 0 <= arousal <= 1 else (float(_a) if _a is not None else 0.3)
-    _raw_tags = analysis.get("tags") or []
-    all_tags = list(dict.fromkeys((_raw_tags if isinstance(_raw_tags, list) else []) + extra_tags))
-    suggested_name = analysis.get("suggested_name", "")
+    metadata = normalize_hold_metadata(analysis, extra_tags, valence, arousal)
 
     # 配额判定 + 落盘必须在同一把锁里：两个并发 hold(pinned=True) 都可能在
     # 对方提交前读到同一个「未满」快照，检查和创建隔着一次 await 就会互相看不见。
@@ -64,12 +53,12 @@ async def store_pinned(
 
         bucket_id = await rt.bucket_mgr.create(
             content=content,
-            tags=all_tags,
+            tags=metadata.tags,
             importance=10,
-            domain=domain,
-            valence=final_valence,
-            arousal=final_arousal,
-            name=suggested_name or None,
+            domain=metadata.domains,
+            valence=metadata.valence,
+            arousal=metadata.arousal,
+            name=metadata.suggested_name or None,
             bucket_type="permanent",
             pinned=True,
             why_remembered=why_remembered,
@@ -78,4 +67,4 @@ async def store_pinned(
             meaning=meaning,
             media=media,
         )
-    return f"📌钉选→{bucket_id} {','.join(str(d) for d in domain if d is not None)}"
+    return f"📌钉选→{bucket_id} {','.join(str(d) for d in metadata.domains if d is not None)}"

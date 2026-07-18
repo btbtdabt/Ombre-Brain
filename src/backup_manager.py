@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import inspect
 import os
-import re
 from contextlib import AsyncExitStack
 from pathlib import Path
 import shutil
@@ -20,15 +19,7 @@ from backup_archive import (
     extract_backup_archive_file,
     validate_sqlite_file,
 )
-try:
-    from media_store import media_bucket_directory_name
-except ImportError:
-
-    def media_bucket_directory_name(bucket_id: str) -> str:
-        """Match the P0 MediaStore directory normalization."""
-        return re.sub(r"[^a-zA-Z0-9_.-]", "_", str(bucket_id or ""))[:128]
-
-
+from media_store import media_bucket_directory_name
 from utils import atomic_write_text, now_iso, same_path
 
 

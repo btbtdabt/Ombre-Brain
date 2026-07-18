@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .._common import check_content_size, check_metadata_size, check_query_size
 from ._helpers import (
     ai_author_name,
     bucket_read_payload,
@@ -145,6 +146,16 @@ async def letter_write(
     ai_name: str = "",
 ) -> str:
     """永久保存一封独立信件。author 可用 user、ai、当前 AI 名称或自定义署名。"""
+    if error := check_content_size(content):
+        return error
+    if error := check_metadata_size(
+        author=author,
+        user_name=user_name,
+        title=title,
+        date=date,
+        ai_name=ai_name,
+    ):
+        return error
     service = require_runtime("letter_service")
     result = await service.write(
         author=author,
@@ -171,6 +182,14 @@ async def letter_read(
     date_to: str = "",
 ) -> str:
     """读取独立信件；可按关键词、署名和日期范围过滤，不混入普通 breath。"""
+    if error := check_query_size(query):
+        return error
+    if error := check_metadata_size(
+        author=author,
+        date_from=date_from,
+        date_to=date_to,
+    ):
+        return error
     service = require_runtime("letter_service")
     return await service.read(
         query=query,

@@ -38,6 +38,12 @@ from typing import Any, Awaitable, Callable, cast
 import jieba
 from rapidfuzz import fuzz
 
+from runtime_values import (
+    clamp_valence_arousal as _clamp_va,
+    float_between as _float_between,
+    int_between as _int_between,
+    iso_date_key as _date_key,
+)
 from tools._common import (
     _HIGH_IMP_THRESHOLD,
     _quota_turn,
@@ -222,27 +228,6 @@ def _import_content_hash(text: str) -> str:
     return hashlib.sha256(_normalize_import_text(text).encode()).hexdigest()
 
 
-def _int_between(value: object, default: int, minimum: int, maximum: int) -> int:
-    try:
-        number = int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError, OverflowError):
-        number = default
-    return max(minimum, min(maximum, number))
-
-
-def _float_between(
-    value: object,
-    default: float,
-    minimum: float,
-    maximum: float,
-) -> float:
-    try:
-        number = float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError, OverflowError):
-        number = default
-    return max(minimum, min(maximum, number))
-
-
 def _bool_value(value: object, default: bool = False) -> bool:
     return parse_bool(value, default=default)
 
@@ -293,11 +278,6 @@ def _dedupe_refs(values: list) -> list[dict]:
             seen.add(key)
             result.append(value)
     return result
-
-
-def _date_key(value: object) -> str:
-    match = re.search(r"\d{4}-\d{2}-\d{2}", str(value or ""))
-    return match.group(0) if match else ""
 
 
 def _date_ranges_disjoint(
@@ -431,21 +411,6 @@ async def _await_import_worker(func, *args):
         raise
 
 
-def _clamp_va(meta: dict) -> tuple[float, float]:
-    """将 meta 中的 valence / arousal 钳制到 [0, 1]。
-
-    与 dehydrator._clamp_va 同表现，这里单独复制一份是为了避免
-    import_memory 反向依赖 dehydrator 的私有方法。两者默认值一致（
-    rule.md §1.0 哲学：中性 V=0.5 / 低唤醒 A=0.3）。
-    """
-    try:
-        v = max(0.0, min(1.0, float(meta.get("valence", _DEFAULT_VALENCE))))
-        a = max(0.0, min(1.0, float(meta.get("arousal", _DEFAULT_AROUSAL))))
-        return v, a
-    except (ValueError, TypeError):
-        return _DEFAULT_VALENCE, _DEFAULT_AROUSAL
-
-
 def _clamp_importance(meta: dict) -> int:
     """将 meta.importance 钳制到 [1, 10]。解析失败返回默认 5。"""
     try:
@@ -457,9 +422,7 @@ def _clamp_importance(meta: dict) -> int:
         return _DEFAULT_IMPORTANCE
 
 
-def _strip_md_fence(raw: str) -> str:
-    """Backwards-compatible wrapper for tolerant LLM JSON extraction."""
-    return clean_llm_json(raw)
+_strip_md_fence = clean_llm_json
 
 
 # ============================================================

@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from runtime_values import int_between as _int_value
+
 
 _SENSITIVE_KEY_RE = re.compile(
     r"(authorization|api[-_]?key|x[-_]?api[-_]?key|token|secret|password|passwd|cookie)",
@@ -32,14 +34,6 @@ def _bool_value(value: Any, default: bool = False) -> bool:
     if text in {"0", "false", "no", "off", "disabled"}:
         return False
     return default
-
-
-def _int_value(value: Any, default: int, minimum: int, maximum: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default
-    return max(minimum, min(maximum, parsed))
 
 
 def _resolve_state_dir(config: dict[str, Any]) -> Path:

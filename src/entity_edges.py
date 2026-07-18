@@ -4,7 +4,10 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
+from edge_records import load_jsonl_records, upsert_by_confidence
+
 from identity import identity_names
+from query_normalization import unique_text_values
 from utils import strip_wikilinks
 
 
@@ -192,16 +195,7 @@ class EntityEdgeStore:
         )
         if not edge:
             return None
-        edges = self.list_edges()
-        replaced = False
-        for index, existing in enumerate(edges):
-            if self._same_edge(existing, edge):
-                if float(existing.get("confidence", 0.0)) <= edge["confidence"]:
-                    edges[index] = edge
-                replaced = True
-                break
-        if not replaced:
-            edges.append(edge)
+        edges = upsert_by_confidence(self.list_edges(), edge, self._same_edge)
         self._write_all(edges)
         return edge
 
@@ -245,22 +239,7 @@ class EntityEdgeStore:
         return [edge for edge in deduped if edge.get("bucket_id") == bucket_id]
 
     def list_edges(self) -> list[dict]:
-        if not os.path.exists(self.path):
-            return []
-        edges = []
-        with open(self.path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    raw = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                edge = self._normalize(raw)
-                if edge:
-                    edges.append(edge)
-        return edges
+        return load_jsonl_records(self.path, self._normalize)
 
     def delete_for_bucket(self, bucket_id: str) -> int:
         bucket_id = str(bucket_id or "").strip()
@@ -645,7 +624,7 @@ def _shared_subject(identity: dict) -> str:
 
 
 def _user_terms(identity: dict) -> list[str]:
-    return _unique_terms(
+    return unique_text_values(
         [
             identity.get("user_display_name"),
             identity.get("user_name"),
@@ -658,16 +637,7 @@ def _user_terms(identity: dict) -> list[str]:
 
 def _ai_terms(identity: dict) -> list[str]:
     ai_name = _canonical_ai_subject(identity)
-    return _unique_terms([ai_name, f"小{ai_name}"])
-
-
-def _unique_terms(values: list[Any]) -> list[str]:
-    output = []
-    for value in values:
-        text = str(value or "").strip()
-        if text and text not in output:
-            output.append(text)
-    return output
+    return unique_text_values([ai_name, f"小{ai_name}"])
 
 
 def _terms_pattern(terms: list[str]) -> str:

@@ -23,13 +23,12 @@ write_memory.py — 手动写入记忆的命令行小工具
 """
 
 import os
-import uuid
 import argparse
-import math
 
 import frontmatter
 
-from utils import atomic_write_text, load_config, now_iso
+from runtime_values import finite_unit_float as _finite_unit
+from utils import atomic_write_text, generate_bucket_id, load_config, now_iso
 
 
 _DEFAULT_MAX_BUCKET_BYTES = 50 * 1024
@@ -62,10 +61,6 @@ def _resolve_dynamic_dir() -> str:
 VAULT_DIR = _resolve_dynamic_dir()
 
 
-def gen_id():
-    return uuid.uuid4().hex[:12]
-
-
 def _max_bucket_bytes() -> int:
     try:
         raw = (load_config().get("limits") or {}).get(
@@ -86,16 +81,6 @@ def _bounded_strings(values: list[str]) -> list[str]:
         if len(result) >= _MAX_METADATA_ITEMS:
             break
     return result
-
-
-def _finite_unit(value: float, default: float) -> float:
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError, OverflowError):
-        return default
-    if not math.isfinite(numeric):
-        return default
-    return max(0.0, min(1.0, numeric))
 
 
 def write_memory(
@@ -120,7 +105,7 @@ def write_memory(
             f"content exceeds max_bucket_bytes ({size} > {cap})"
         )
 
-    mid = gen_id()
+    mid = generate_bucket_id()
     now = now_iso()
     try:
         normalized_importance = max(1, min(10, int(importance)))

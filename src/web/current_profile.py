@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from starlette.requests import Request
@@ -30,6 +29,12 @@ from .current_contract import (
     require_service,
     service_json,
     valid_memory_id,
+)
+from .profile_support import (
+    build_profile_payload,
+    is_profile_fact_bucket as _profile_fact_bucket,
+    legacy_profile_key as _profile_key,
+    profile_sections as _profile_sections,
 )
 
 
@@ -122,156 +127,16 @@ async def _portrait_state_direct(
     }
 
 
-def _profile_fact_bucket(bucket: dict[str, Any]) -> bool:
-    if is_self_anchor_bucket(bucket):
-        return False
-    metadata = bucket.get("metadata", {})
-    tags = {str(tag).strip() for tag in metadata.get("tags", []) or []}
-    return "profile_fact" in tags or bool(metadata.get("profile_kind"))
-
-
-def _profile_key(value: Any, default: str = "") -> str:
-    text = re.sub(r"[^a-z0-9_]+", "_", str(value or "").strip().lower())
-    return text.strip("_") or default
-
-
-def _profile_sections(content: str) -> dict[str, str]:
-    text = strip_wikilinks(str(content or "")).strip()
-    if not text:
-        return {}
-    matches = list(re.finditer(r"(?m)^###\s+([^\n]+)\n?", text))
-    if not matches:
-        return {"fact": text}
-    result: dict[str, str] = {}
-    for index, match in enumerate(matches):
-        heading = _profile_key(match.group(1))
-        if not heading:
-            continue
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        result[heading] = text[match.end() : end].strip()
-    prefix = text[: matches[0].start()].strip()
-    if "fact" not in result and prefix:
-        result["fact"] = prefix
-    return result
-
-
-def _profile_state(metadata: dict[str, Any]) -> str:
-    if metadata.get("deprecated") or metadata.get("active") is False:
-        return "deprecated"
-    if metadata.get("resolved") or metadata.get("digested"):
-        return "inactive"
-    return "active"
-
-
-def _profile_evidence(
-    dependencies: CurrentWebDependencies,
-    bucket: dict[str, Any],
-) -> list[dict[str, str]]:
-    metadata = bucket.get("metadata", {})
-    rows: list[dict[str, str]] = []
-    raw = metadata.get("evidence", [])
-    if isinstance(raw, dict):
-        raw = [raw]
-    if isinstance(raw, list):
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
-            bucket_id = str(item.get("bucket_id") or item.get("id") or "").strip()
-            if bucket_id:
-                rows.append(
-                    {
-                        "bucket_id": bucket_id,
-                        "moment_id": str(item.get("moment_id") or "").strip(),
-                    }
-                )
-    for bucket_key, moment_key in (
-        ("evidence_bucket_id", "evidence_moment_id"),
-        ("source_bucket_id", "source_moment_id"),
-    ):
-        bucket_id = str(metadata.get(bucket_key) or "").strip()
-        if bucket_id:
-            rows.append(
-                {
-                    "bucket_id": bucket_id,
-                    "moment_id": str(metadata.get(moment_key) or "").strip(),
-                }
-            )
-    edge_store = dependencies.memory_edge_store
-    if edge_store is not None:
-        try:
-            for edge in edge_store.list_edges():
-                if (
-                    str(edge.get("source") or "") == str(bucket.get("id") or "")
-                    and str(edge.get("relation_type") or "") == "evidenced_by"
-                ):
-                    rows.append(
-                        {"bucket_id": str(edge.get("target") or ""), "moment_id": ""}
-                    )
-        except Exception:
-            pass
-    bucket_ids_with_moment = {
-        row["bucket_id"]
-        for row in rows
-        if row["bucket_id"] and row["moment_id"]
-    }
-    seen: set[tuple[str, str]] = set()
-    result = []
-    for row in rows:
-        if not row["moment_id"] and row["bucket_id"] in bucket_ids_with_moment:
-            continue
-        key = (row["bucket_id"], row["moment_id"])
-        if row["bucket_id"] and key not in seen:
-            seen.add(key)
-            result.append(row)
-    return result
-
-
 async def _profile_payload(
     dependencies: CurrentWebDependencies,
     bucket: dict[str, Any],
 ) -> dict[str, Any]:
     manager = require_dependency(dependencies, "bucket_mgr")
-    metadata = bucket.get("metadata", {})
-    sections = _profile_sections(bucket.get("content", ""))
-    evidence = []
-    for row in _profile_evidence(dependencies, bucket):
-        evidence_bucket = (
-            await manager.get(row["bucket_id"])
-            if valid_memory_id(row["bucket_id"])
-            else None
-        )
-        evidence_metadata = (evidence_bucket or {}).get("metadata", {})
-        evidence.append(
-            {
-                **row,
-                "name": evidence_metadata.get("name", row["bucket_id"]),
-                "exists": bool(evidence_bucket),
-            }
-        )
-    state = _profile_state(metadata)
-    kind = str(metadata.get("profile_kind") or "").strip()
-    return {
-        "id": bucket.get("id", ""),
-        "name": metadata.get("name", bucket.get("id", "")),
-        "fact": sections.get("fact", strip_wikilinks(bucket.get("content", "")).strip()),
-        "sections": sections,
-        "kind": kind,
-        "subject": metadata.get("subject", ""),
-        "predicate": metadata.get("predicate", ""),
-        "object": metadata.get("object", ""),
-        "evidence": evidence,
-        "confidence": metadata.get("confidence"),
-        "source": metadata.get("source", "profile_fact"),
-        "active": state == "active",
-        "deprecated": state == "deprecated",
-        "state": state,
-        "tags": metadata.get("tags", []),
-        "created": metadata.get("created", ""),
-        "updated_at": metadata.get("updated_at", ""),
-        "last_active": metadata.get("last_active", ""),
-        "content_preview": strip_wikilinks(bucket.get("content", ""))[:200],
-    }
-
+    return await build_profile_payload(
+        bucket,
+        get_bucket=manager.get,
+        edge_store=dependencies.memory_edge_store,
+    )
 
 async def _profile_facts_direct(
     dependencies: CurrentWebDependencies,
@@ -336,7 +201,9 @@ async def _profile_update_direct(
     elif action == "deprecate":
         updates.update(active=False, deprecated=True, resolved=True, digested=True)
     else:
-        sections = _profile_sections(bucket.get("content", ""))
+        sections = _profile_sections(
+            bucket.get("content", ""), key_normalizer=_profile_key
+        )
         fact = str(body.get("fact", sections.get("fact", "")) or "").strip()
         if not fact:
             return JSONResponse({"error": "fact is required"}, status_code=400)

@@ -10,8 +10,11 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
+from config_modes import normalize_thinking_mode
 from identity import generic_identity_names, identity_names, render_identity_template
 from persona_event_selection import trim_persona_excerpt
+from runtime_values import clamp_float, enabled_value, parse_utc_datetime, utc_now
+from sqlite_support import connect_rows
 
 logger = logging.getLogger("ombre_brain.persona")
 
@@ -107,9 +110,7 @@ class PersonaStateEngine:
         self.mode = self.persona_cfg.get("mode", "llm")
         self.base_url = self.persona_cfg.get("base_url", "https://api.deepseek.com/v1")
         self.model = self.persona_cfg.get("model", "deepseek-chat")
-        self.thinking_mode = self._normalize_thinking_mode(
-            self.persona_cfg.get("thinking_mode", "")
-        )
+        self.thinking_mode = normalize_thinking_mode(self.persona_cfg.get("thinking_mode", ""))
         self.temperature = float(self.persona_cfg.get("temperature", 0.1))
         self.max_tokens = int(self.persona_cfg.get("max_tokens", 500))
         self.session_mood_half_life_minutes = float(
@@ -118,7 +119,7 @@ class PersonaStateEngine:
         self.max_personality_delta = float(self.persona_cfg.get("max_personality_delta", 0.01))
         self.max_relationship_delta = float(self.persona_cfg.get("max_relationship_delta", 0.03))
         self.max_affect_delta = float(self.persona_cfg.get("max_affect_delta", 0.18))
-        self.event_recording_enabled = self._coerce_bool(
+        self.event_recording_enabled = enabled_value(
             self.persona_cfg.get("event_recording_enabled"),
             True,
         )
@@ -197,9 +198,7 @@ class PersonaStateEngine:
             self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, timeout=30.0)
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
+        return connect_rows(self.db_path)
 
     def _init_db(self) -> None:
         conn = self._connect()
@@ -331,6 +330,10 @@ class PersonaStateEngine:
         return render_identity_template(POST_REPLY_EVALUATION_PROMPT_TEMPLATE, self.identity)
 
     async def build_pre_reply_guidance(self, session_id: str, latest_user_message: str = "") -> dict:
+        _ = latest_user_message  # Reserved for the pre-reply compatibility contract.
+        return self._current_state_snapshot(session_id)
+
+    def _current_state_snapshot(self, session_id: str) -> dict:
         now = self._now()
         global_state = self._ensure_global_state(now)
         session_state = self._ensure_session_state(session_id, now)
@@ -527,11 +530,7 @@ class PersonaStateEngine:
         return not cleaned
 
     def get_current_state(self, session_id: str) -> dict:
-        now = self._now()
-        global_state = self._ensure_global_state(now)
-        session_state = self._ensure_session_state(session_id, now)
-        session_state = self._apply_session_decay(session_id, session_state, now)
-        return self._snapshot(global_state, session_state, self.fallback_guidance)
+        return self._current_state_snapshot(session_id)
 
     def get_dashboard_payload(
         self,
@@ -664,11 +663,11 @@ class PersonaStateEngine:
     def _normalize_evaluation(self, data: dict) -> dict:
         raw_relationship_delta = data.get("relationship_delta", {})
         raw_personality_delta = data.get("personality_delta", {})
-        relationship_event = self._coerce_bool(
+        relationship_event = enabled_value(
             data.get("relationship_event"),
             self._has_nonzero_delta(raw_relationship_delta),
         )
-        personality_signal = self._coerce_bool(
+        personality_signal = enabled_value(
             data.get("personality_signal"),
             self._has_nonzero_delta(raw_personality_delta),
         )
@@ -1163,17 +1162,9 @@ class PersonaStateEngine:
         default = float(self.default_affect[key])
         return self._clamp_float(default + (float(current) - default) * retention)
 
-    def _parse_iso(self, value: Any) -> datetime | None:
-        try:
-            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        except (TypeError, ValueError):
-            return None
-        if parsed.tzinfo is None:
-            return parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc)
+    _parse_iso = staticmethod(parse_utc_datetime)
 
-    def _now(self) -> datetime:
-        return datetime.now(timezone.utc)
+    _now = staticmethod(utc_now)
 
     def _format_time(self, value: datetime) -> str:
         return value.astimezone(timezone.utc).isoformat(timespec="seconds")
@@ -1402,21 +1393,7 @@ class PersonaStateEngine:
                 continue
         return False
 
-    def _coerce_bool(self, value: Any, default: bool = False) -> bool:
-        if value is None:
-            return default
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            return value.strip().lower() in {"1", "true", "yes", "on"}
-        return bool(value)
-
-    def _clamp_float(self, value: Any, lower: float = 0.0, upper: float = 1.0) -> float:
-        try:
-            number = float(value)
-        except (TypeError, ValueError):
-            number = lower
-        return max(lower, min(upper, number))
+    _clamp_float = staticmethod(clamp_float)
 
     def _completion_options(self) -> dict[str, Any]:
         options: dict[str, Any] = {
@@ -1426,19 +1403,3 @@ class PersonaStateEngine:
         if self.thinking_mode:
             options["extra_body"] = {"thinking": {"type": self.thinking_mode}}
         return options
-
-    def _normalize_thinking_mode(self, value: Any) -> str:
-        normalized = str(value or "").strip().lower()
-        aliases = {
-            "enabled": "enabled",
-            "enable": "enabled",
-            "on": "enabled",
-            "true": "enabled",
-            "disabled": "disabled",
-            "disable": "disabled",
-            "off": "disabled",
-            "false": "disabled",
-            "non-thinking": "disabled",
-            "non_thinking": "disabled",
-        }
-        return aliases.get(normalized, "")

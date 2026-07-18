@@ -3,6 +3,10 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
+from edge_records import load_jsonl_records, upsert_by_confidence
+
+from runtime_values import rounded_unit_float
+
 
 RELATION_TYPES = {
     "triggers",
@@ -61,16 +65,7 @@ class MemoryEdgeStore:
             "reason": str(reason or "").strip()[:240],
             "created_at": created_at or datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
-        edges = self.list_edges()
-        replaced = False
-        for index, existing in enumerate(edges):
-            if self._same_edge(existing, edge):
-                if float(existing.get("confidence", 0.0)) <= edge["confidence"]:
-                    edges[index] = edge
-                replaced = True
-                break
-        if not replaced:
-            edges.append(edge)
+        edges = upsert_by_confidence(self.list_edges(), edge, self._same_edge)
         self._write_all(edges)
         return edge
 
@@ -99,22 +94,7 @@ class MemoryEdgeStore:
         return saved
 
     def list_edges(self) -> list[dict]:
-        if not os.path.exists(self.path):
-            return []
-        edges = []
-        with open(self.path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    edge = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                normalized = self._normalize(edge)
-                if normalized:
-                    edges.append(normalized)
-        return edges
+        return load_jsonl_records(self.path, self._normalize)
 
     def related_edges(
         self,
@@ -190,10 +170,4 @@ class MemoryEdgeStore:
             and left.get("relation_type") == right.get("relation_type")
         )
 
-    @staticmethod
-    def _clamp(value: Any) -> float:
-        try:
-            number = float(value)
-        except (TypeError, ValueError):
-            number = 0.5
-        return max(0.0, min(1.0, round(number, 3)))
+    _clamp = staticmethod(rounded_unit_float)

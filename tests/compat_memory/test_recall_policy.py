@@ -1,5 +1,10 @@
 from memory_relevance import memory_relevance_options_from_config
-from recall_policy import RecallPolicy
+from recall_policy import RecallPolicy, query_has_explicit_recall_marker
+
+
+def test_explicit_recall_marker_is_shared_with_gateway_routing():
+    assert query_has_explicit_recall_marker("你还记得那件事吗")
+    assert not query_has_explicit_recall_marker("今天天气怎么样")
 
 
 def test_context_only_moment_cannot_be_direct_seed():

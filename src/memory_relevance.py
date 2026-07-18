@@ -8,7 +8,9 @@ from typing import Any
 import jieba
 
 from identity import identity_names
+from query_normalization import compact_phrase_key
 from query_terms import RECALL_SYSTEM_META_TERMS
+from runtime_values import float_value as _safe_float
 
 
 DEFAULT_FACET_ALIASES = {
@@ -1534,7 +1536,7 @@ def facets_for_node(
                     str(node.get("content") or ""),
                     str(meta.get("summary") or ""),
                     str(meta.get("annotation_summary") or ""),
-                    _join_evidence_spans(meta.get("evidence_spans")),
+                    join_evidence_spans(meta.get("evidence_spans")),
                 ]
             )[:4000],
             0.5,
@@ -2184,7 +2186,7 @@ def _numeric_facets(raw: Any) -> dict[str, float]:
     return facets
 
 
-def _join_evidence_spans(raw: Any) -> str:
+def join_evidence_spans(raw: Any) -> str:
     if not isinstance(raw, list):
         return ""
     parts = []
@@ -2274,7 +2276,7 @@ def _node_text(node: dict) -> str:
             str(meta.get("bucket_name") or ""),
             str(meta.get("summary") or ""),
             str(meta.get("annotation_summary") or ""),
-            _join_evidence_spans(meta.get("evidence_spans")),
+            join_evidence_spans(meta.get("evidence_spans")),
             _join_text(meta.get("tags")),
             _join_text(meta.get("bucket_tags")),
             _join_text(meta.get("domain")),
@@ -2346,19 +2348,7 @@ def _recall_speaker_pattern(options: MemoryRelevanceOptions) -> str:
     return "|".join(kept) or re.escape("我")
 
 
-def _safe_float(value: Any) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _compact_emotional_text(value: object) -> str:
-    return re.sub(
-        r"[\s，。！？、,.!?:：;；~～♡❤♥（）()\[\]【】「」『』“”\"'`-]+",
-        "",
-        str(value or "").strip().lower(),
-    )
+_compact_emotional_text = compact_phrase_key
 
 
 def _emotional_term_hits(text: str, terms: frozenset[str]) -> list[tuple[str, int, int]]:

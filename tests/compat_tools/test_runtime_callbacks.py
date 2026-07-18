@@ -8,6 +8,20 @@ from tools import _runtime as runtime
 from tools.current import _helpers
 
 
+def test_shared_current_text_helpers_preserve_compaction_and_logging(monkeypatch):
+    warnings = []
+    monkeypatch.setattr(
+        runtime,
+        "logger",
+        SimpleNamespace(warning=lambda message, *args: warnings.append((message, args))),
+    )
+
+    assert _helpers.clip_text("  one\n two three  ", 9) == "one two…"
+    _helpers.log_warning("failed %s", "once")
+
+    assert warnings == [("failed %s", ("once",))]
+
+
 @pytest.mark.asyncio
 async def test_embedding_refresh_prefers_the_shared_runtime_callback(monkeypatch):
     calls = []

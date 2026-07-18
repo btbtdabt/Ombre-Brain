@@ -235,12 +235,7 @@ def _oauth_required_from_config() -> bool:
     )
 
 
-def _oauth_not_found() -> Response:
-    """Do not advertise an OAuth surface when this MCP server is public."""
-    return Response(
-        status_code=404,
-        headers={"Cache-Control": "no-store"},
-    )
+_oauth_not_found = sh.oauth_not_found_response
 
 
 def _first_forwarded(value: str) -> str:
