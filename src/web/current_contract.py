@@ -117,6 +117,8 @@ CURRENT_ROUTE_SPECS = (
     _route("GET", "/api/daily-chat-memory/pending", "operations"),
     _route("POST", "/api/daily-chat-memory/confirm", "operations"),
     _route("GET", "/api/config/effective", "operations"),
+    _route("POST", "/api/backup/export/prepare", "operations"),
+    _route("GET", "/api/backup/export/status", "operations"),
     _route("GET", "/api/backup/export", "operations"),
     _route("POST", "/api/backup/restore", "operations"),
 )

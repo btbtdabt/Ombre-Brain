@@ -27,6 +27,7 @@ web/_shared.py — Dashboard/HTTP 层的共享依赖与鉴权工具
 """
 
 import asyncio
+import errno
 import os
 import sys
 import time
@@ -36,7 +37,9 @@ import hmac
 import ipaddress
 import secrets
 import logging
+import tempfile
 import threading
+from collections.abc import Mapping
 from collections import OrderedDict, deque
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -54,6 +57,7 @@ if TYPE_CHECKING:
     from dehydrator import Dehydrator
 
 logger = logging.getLogger("ombre_brain")
+_ENV_FILE_WRITE_LOCK = threading.RLock()
 
 # --- 运行环境探测（Docker vs 裸机）---
 # 本地向量化要按宿主类型分流：Docker 里 ollama 是独立容器（连 ombre-ollama），
@@ -352,9 +356,209 @@ restart_github_auto_task = None # def(interval_minutes: int) -> None（起停后
 
 
 # --- 项目 .env 读写（config / env-config / host-vault 路由共用，故放共享层）---
-# 与原 server.py 行为一致：.env 落在 src/.env。本文件在 src/web/ 下，上两级即 src/。
 def _project_env_path() -> str:
-    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+    """Return the launcher-owned env file, never the historical ``src/.env``."""
+    configured = os.environ.get("OMBRE_ENV_PATH", "").strip()
+    if configured:
+        if not os.path.isabs(configured):
+            raise ValueError("OMBRE_ENV_PATH must be an absolute path")
+        candidate = os.path.abspath(configured)
+    else:
+        root = str(repo_root or "").strip()
+        if not root:
+            root = os.path.dirname(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            )
+        root = os.path.realpath(os.path.abspath(root))
+        candidate = os.path.abspath(os.path.join(root, ".env"))
+        resolved_candidate = os.path.realpath(candidate)
+        try:
+            contained = os.path.commonpath([root, resolved_candidate]) == root
+        except ValueError:
+            contained = False
+        if not contained:
+            raise ValueError("repository .env path escapes the repository root")
+
+    if os.path.lexists(candidate) and os.path.islink(candidate):
+        raise ValueError("OMBRE_ENV_PATH must not be a symlink")
+    if os.path.exists(candidate) and not os.path.isfile(candidate):
+        raise ValueError("OMBRE_ENV_PATH must point to a regular file")
+    return os.path.realpath(candidate)
+
+
+def _env_persistence_issue() -> str:
+    """Explain why Dashboard env writes would not survive a process restart."""
+    configured = os.environ.get("OMBRE_ENV_PATH", "").strip()
+    externally_managed = in_docker() or any(
+        os.environ.get(name, "").strip()
+        for name in (
+            "RENDER",
+            "RAILWAY_ENVIRONMENT",
+            "FLY_APP_NAME",
+            "K_SERVICE",
+            "DYNO",
+        )
+    )
+    if externally_managed and not configured:
+        return (
+            "Secrets are managed by the deployment environment. Mount its real "
+            ".env source and set OMBRE_ENV_PATH before saving keys here."
+        )
+    try:
+        env_path = _project_env_path()
+    except ValueError as exc:
+        return str(exc)
+    parent = os.path.dirname(env_path)
+    if os.path.exists(env_path):
+        if os.access(env_path, os.W_OK):
+            # A writable single-file bind mount remains a durable source even
+            # when its container-side parent directory is read-only.
+            return ""
+        return "OMBRE_ENV_PATH is read-only; mount a writable .env source"
+    if not os.path.isdir(parent) or not os.access(parent, os.W_OK):
+        return "OMBRE_ENV_PATH parent directory is not writable"
+    return ""
+
+
+def _serialize_env_value(
+    value: str, *, shell_source: bool | None = None
+) -> str:
+    """Quote a value for Compose dotenv or the native POSIX launchers."""
+    if shell_source is None:
+        shell_source = not in_docker()
+    if shell_source:
+        return "'" + value.replace("'", "'\"'\"'") + "'"
+    escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{escaped}'"
+
+
+def _write_env_bytes(path: str, payload: bytes) -> None:
+    with open(path, "wb") as target:
+        target.write(payload)
+        target.flush()
+        os.fsync(target.fileno())
+
+
+def _overwrite_mounted_env(path: str, payload: bytes) -> None:
+    """Overwrite an unreplaceable bind-file mount and restore on failure."""
+    with open(path, "rb") as source:
+        previous = source.read()
+    try:
+        _write_env_bytes(path, payload)
+        with open(path, "rb") as persisted:
+            if persisted.read() != payload:
+                raise OSError("mounted .env verification failed")
+    except Exception as write_error:
+        try:
+            _write_env_bytes(path, previous)
+        except Exception as restore_error:
+            raise OSError(
+                "mounted .env write failed and restoring the previous file also failed"
+            ) from restore_error
+        raise write_error
+
+
+def _can_overwrite_mounted_env(path: str, error: OSError) -> bool:
+    return (
+        error.errno in {errno.EACCES, errno.EBUSY, errno.EPERM, errno.EXDEV}
+        and os.path.isfile(path)
+        and not os.path.islink(path)
+        and os.access(path, os.W_OK)
+    )
+
+
+def _atomic_update_env_vars(updates: Mapping[str, str]) -> None:
+    """Safely upsert one env batch while preserving unrelated file content."""
+    if not updates:
+        return
+    env_path = _project_env_path()
+    directory = os.path.dirname(env_path)
+    with _ENV_FILE_WRITE_LOCK:
+        lines: list[str] = []
+        if os.path.exists(env_path):
+            with open(env_path, "r", encoding="utf-8") as source:
+                lines = source.readlines()
+
+        remaining = dict(updates)
+        rewritten: list[str] = []
+        written: set[str] = set()
+        for raw in lines:
+            stripped = raw.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                rewritten.append(raw)
+                continue
+            key = stripped.partition("=")[0].strip()
+            if key not in updates:
+                rewritten.append(raw)
+                continue
+            if key in written:
+                continue
+            rewritten.append(f"{key}={_serialize_env_value(updates[key])}\n")
+            written.add(key)
+            remaining.pop(key, None)
+        lines = rewritten
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        for key, value in remaining.items():
+            lines.append(f"{key}={_serialize_env_value(value)}\n")
+        payload = "".join(lines).encode("utf-8")
+
+        # A direct bind-file source can have a read-only parent. It cannot host
+        # a sibling temporary file, but the mounted file itself is durable.
+        if (
+            os.path.isfile(env_path)
+            and not os.path.islink(env_path)
+            and not os.access(directory, os.W_OK)
+        ):
+            _overwrite_mounted_env(env_path, payload)
+            return
+
+        os.makedirs(directory, exist_ok=True)
+        temp_path = ""
+        try:
+            try:
+                descriptor, temp_path = tempfile.mkstemp(
+                    prefix=".env.", suffix=".tmp", dir=directory
+                )
+            except OSError as exc:
+                if _can_overwrite_mounted_env(env_path, exc):
+                    _overwrite_mounted_env(env_path, payload)
+                    return
+                raise
+            try:
+                os.chmod(temp_path, 0o600)
+            except OSError:
+                pass
+            with os.fdopen(descriptor, "wb") as target:
+                target.write(payload)
+                target.flush()
+                os.fsync(target.fileno())
+            try:
+                os.replace(temp_path, env_path)
+                temp_path = ""
+            except OSError as exc:
+                if not _can_overwrite_mounted_env(env_path, exc):
+                    raise
+                _overwrite_mounted_env(env_path, payload)
+        finally:
+            if temp_path:
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
+
+
+def _decode_env_value(raw: str) -> str:
+    value = raw.strip()
+    if len(value) < 2 or value[0] != value[-1] or value[0] not in {"'", '"'}:
+        return value
+    quote = value[0]
+    inner = value[1:-1]
+    if quote == "'":
+        if not in_docker():
+            return inner.replace("'\"'\"'", "'")
+        return inner.replace("\\'", "'").replace("\\\\", "\\")
+    return inner.replace('\\"', '"').replace("\\\\", "\\")
 
 
 def _read_env_var(name: str) -> str:
@@ -373,42 +577,15 @@ def _read_env_var(name: str) -> str:
                     continue
                 k, _, v = line.partition("=")
                 if k.strip() == name:
-                    return v.strip().strip('"').strip("'")
+                    return _decode_env_value(v)
     except Exception:
         pass
     return ""
 
 
 def _write_env_var(name: str, value: str) -> None:
-    """Idempotent upsert of `NAME=value` in project .env. Creates file if missing.
-    Preserves other entries verbatim. Quotes values containing spaces.
-    """
-    env_path = _project_env_path()
-    quoted = f'"{value}"' if value and (" " in value or "#" in value) else value
-    new_line = f"{name}={quoted}\n"
-
-    lines: list[str] = []
-    if os.path.exists(env_path):
-        with open(env_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-
-    replaced = False
-    for i, raw in enumerate(lines):
-        stripped = raw.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        k, _, _v = stripped.partition("=")
-        if k.strip() == name:
-            lines[i] = new_line
-            replaced = True
-            break
-    if not replaced:
-        if lines and not lines[-1].endswith("\n"):
-            lines[-1] += "\n"
-        lines.append(new_line)
-
-    with open(env_path, "w", encoding="utf-8") as f:
-        f.writelines(lines)
+    """Persist one allowlisted route value through the shared transaction."""
+    _atomic_update_env_vars({name: value})
 
 
 # --- Dashboard 鉴权常量（原 server.py 调参面板）---

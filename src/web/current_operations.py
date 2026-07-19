@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
+import secrets
 import tempfile
+import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-from starlette.background import BackgroundTask
 from starlette.datastructures import UploadFile
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, Response
+from starlette.responses import JSONResponse, Response
 
 from backup_archive import BackupArchiveError, MAX_ARCHIVE_BYTES
 from config_diagnostics import effective_config_report
@@ -35,7 +37,116 @@ from .current_contract import (
     require_service,
     service_json,
 )
+from .import_api import _CleanupFileResponse
 from .upload_limits import read_multipart_form_limited
+
+
+_NO_WORKER_RESULT = object()
+
+
+async def _settle_cancelled_worker(worker: asyncio.Task[Any]) -> Any:
+    """Reap a thread worker even if its caller is cancelled repeatedly."""
+
+    while not worker.done():
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            continue
+        except BaseException:
+            break
+    try:
+        return worker.result()
+    except BaseException:
+        return _NO_WORKER_RESULT
+
+
+async def _run_blocking(operation: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Run blocking work off-loop and never abandon a live worker on cancellation."""
+
+    worker = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        await _settle_cancelled_worker(worker)
+        raise
+
+
+def _invoke_maybe_async(operation: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Invoke sync or async dependency code inside a worker-owned event loop."""
+
+    return asyncio.run(maybe_await(operation(*args, **kwargs)))
+
+
+def _unlink_file(path: str) -> None:
+    Path(path).unlink(missing_ok=True)
+
+
+def _discard_upload_temp(result: tuple[int, str]) -> None:
+    descriptor, upload_path = result
+    try:
+        os.close(descriptor)
+    finally:
+        _unlink_file(upload_path)
+
+
+async def _create_upload_temp_off_loop() -> tuple[int, str]:
+    """Create a restore spool without leaking it across request cancellation."""
+
+    worker = asyncio.create_task(
+        asyncio.to_thread(
+            tempfile.mkstemp,
+            prefix="ombre-upload-",
+            suffix=".zip",
+        )
+    )
+    try:
+        result = await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        result = await _settle_cancelled_worker(worker)
+        if (
+            isinstance(result, tuple)
+            and len(result) == 2
+            and isinstance(result[0], int)
+        ):
+            cleanup_worker = asyncio.create_task(
+                asyncio.to_thread(_discard_upload_temp, result)
+            )
+            await _settle_cancelled_worker(cleanup_worker)
+        raise
+    return int(result[0]), str(result[1])
+
+
+async def _create_archive_off_loop(manager: Any) -> tuple[str, dict[str, Any]]:
+    """Build an archive in a worker and remove a late result after cancellation."""
+
+    worker = asyncio.create_task(
+        asyncio.to_thread(_invoke_maybe_async, manager.create_archive)
+    )
+    try:
+        result = await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        result = await _settle_cancelled_worker(worker)
+        if isinstance(result, tuple) and result and result[0]:
+            cleanup_worker = asyncio.create_task(
+                asyncio.to_thread(_unlink_file, str(result[0]))
+            )
+            await _settle_cancelled_worker(cleanup_worker)
+        raise
+    candidate_path = (
+        str(result[0])
+        if isinstance(result, tuple) and result and result[0]
+        else ""
+    )
+    if not isinstance(result, tuple) or len(result) != 2:
+        if candidate_path:
+            await _run_blocking(_unlink_file, candidate_path)
+        raise TypeError("backup manager returned an invalid archive result")
+    archive_path, manifest = result
+    if not isinstance(manifest, dict):
+        if candidate_path:
+            await _run_blocking(_unlink_file, candidate_path)
+        raise TypeError("backup manager returned an invalid archive manifest")
+    return str(archive_path), manifest
 
 
 async def _store_activity_summary(
@@ -171,7 +282,7 @@ async def _read_backup_upload(request: Request, target) -> int:
                 total += len(chunk)
                 if total > MAX_ARCHIVE_BYTES:
                     raise BackupArchiveError("备份压缩包超过 512 MiB 上限")
-                target.write(chunk)
+                await _run_blocking(target.write, chunk)
         finally:
             await form.close()
     else:
@@ -179,12 +290,100 @@ async def _read_backup_upload(request: Request, target) -> int:
             total += len(chunk)
             if total > MAX_ARCHIVE_BYTES:
                 raise BackupArchiveError("备份压缩包超过 512 MiB 上限")
-            target.write(chunk)
+            await _run_blocking(target.write, chunk)
     return total
+
+
+async def _restore_backup_off_loop(
+    dependencies: CurrentWebDependencies,
+    manager: Any,
+    upload_path: str,
+    mode: str,
+) -> dict[str, Any]:
+    """Restore and rebuild its disk-backed indexes on a worker-owned loop."""
+
+    async def restore_operation() -> dict[str, Any]:
+        result = await maybe_await(manager.restore_archive(upload_path, mode=mode))
+        if not isinstance(result, dict):
+            raise TypeError("backup manager returned an invalid restore result")
+        result["scope"] = "memory-vault"
+        restored_ids = [str(item) for item in result.get("restored_ids", [])]
+        result["derived_indexes"] = await _refresh_restore_indexes(
+            dependencies, restored_ids
+        )
+        return result
+
+    return await _run_blocking(lambda: asyncio.run(restore_operation()))
 
 
 def register(mcp: Any, dependencies: CurrentWebDependencies) -> None:
     """Register operational current-production compatibility routes."""
+
+    # Archive creation and restore both scan or mutate the full vault. FastMCP
+    # can dispatch this route set from different event loops/threads, so a
+    # process-wide threading lock is the admission boundary for this register.
+    vault_operation_lock = threading.Lock()
+    export_ticket_lock = threading.Lock()
+    export_tickets: dict[str, dict[str, Any]] = {}
+
+    def reserve_vault_operation() -> Callable[[], None] | None:
+        if not vault_operation_lock.acquire(blocking=False):
+            return None
+        release_guard = threading.Lock()
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            with release_guard:
+                if released:
+                    return
+                released = True
+            vault_operation_lock.release()
+
+        return release
+
+    def vault_busy_response() -> JSONResponse:
+        return JSONResponse(
+            {"error": "A backup operation is already active"},
+            status_code=409,
+        )
+
+    def expire_export_ticket(ticket: str) -> None:
+        with export_ticket_lock:
+            entry = export_tickets.pop(ticket, None)
+        if entry is None:
+            return
+        try:
+            _unlink_file(str(entry["archive_path"]))
+        finally:
+            entry["release"]()
+
+    def store_export_ticket(
+        archive_path: str,
+        filename: str,
+        release: Callable[[], None],
+    ) -> str:
+        ticket = secrets.token_urlsafe(32)
+        timer = threading.Timer(120.0, expire_export_ticket, args=(ticket,))
+        timer.daemon = True
+        with export_ticket_lock:
+            export_tickets[ticket] = {
+                "archive_path": archive_path,
+                "filename": filename,
+                "release": release,
+                "timer": timer,
+            }
+        timer.start()
+        return ticket
+
+    def consume_export_ticket(ticket: str) -> dict[str, Any] | None:
+        with export_ticket_lock:
+            entry = export_tickets.pop(ticket, None)
+        if entry is not None:
+            timer = entry.get("timer")
+            if isinstance(timer, threading.Timer):
+                timer.cancel()
+        return entry
 
     @mcp.custom_route("/api/diffusion-debug", methods=["GET"])
     async def diffusion_debug(request: Request) -> Response:
@@ -469,23 +668,114 @@ def register(mcp: Any, dependencies: CurrentWebDependencies) -> None:
         except Exception as exc:
             return exception_response(exc)
 
-    @mcp.custom_route("/api/backup/export", methods=["GET"])
-    async def backup_export(request: Request) -> Response:
+    @mcp.custom_route("/api/backup/export/prepare", methods=["POST"])
+    async def backup_export_prepare(request: Request) -> Response:
         if error := await dashboard_auth(dependencies, request):
             return error
         try:
             manager = require_dependency(dependencies, "backup_manager")
-            archive_path, _manifest = await maybe_await(manager.create_archive())
-            filename = f"ombre-memory-vault-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
-            return FileResponse(
-                archive_path,
-                media_type="application/zip",
-                filename=filename,
-                background=BackgroundTask(
-                    lambda: Path(archive_path).unlink(missing_ok=True)
-                ),
-            )
         except Exception as exc:
+            return exception_response(exc)
+        release_operation = reserve_vault_operation()
+        if release_operation is None:
+            return vault_busy_response()
+        archive_path = ""
+        try:
+            archive_path, _manifest = await _create_archive_off_loop(manager)
+            filename = (
+                f"ombre-memory-vault-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
+            )
+            ticket = store_export_ticket(
+                archive_path,
+                filename,
+                release_operation,
+            )
+            return JSONResponse({"ok": True, "ticket": ticket})
+        except asyncio.CancelledError:
+            release_operation()
+            raise
+        except Exception as exc:
+            try:
+                if archive_path:
+                    await _run_blocking(_unlink_file, archive_path)
+            finally:
+                release_operation()
+            return exception_response(exc)
+
+    @mcp.custom_route("/api/backup/export/status", methods=["GET"])
+    async def backup_export_status(request: Request) -> Response:
+        if error := await dashboard_auth(dependencies, request):
+            return error
+        return JSONResponse({"ok": True, "active": vault_operation_lock.locked()})
+
+    @mcp.custom_route("/api/backup/export", methods=["GET"])
+    async def backup_export(request: Request) -> Response:
+        if error := await dashboard_auth(dependencies, request):
+            return error
+        ticket = str(request.query_params.get("ticket") or "").strip()
+        if ticket:
+            entry = consume_export_ticket(ticket)
+            if entry is None:
+                return JSONResponse(
+                    {"error": "Backup export ticket expired or was already used"},
+                    status_code=410,
+                )
+            archive_path = str(entry["archive_path"])
+            release_operation = entry["release"]
+
+            async def cleanup_prepared_export() -> None:
+                try:
+                    await _run_blocking(_unlink_file, archive_path)
+                finally:
+                    release_operation()
+
+            try:
+                return _CleanupFileResponse(
+                    archive_path,
+                    media_type="application/zip",
+                    filename=str(entry["filename"]),
+                    cleanup=cleanup_prepared_export,
+                )
+            except BaseException:
+                await cleanup_prepared_export()
+                raise
+        try:
+            manager = require_dependency(dependencies, "backup_manager")
+        except Exception as exc:
+            return exception_response(exc)
+        release_operation = reserve_vault_operation()
+        if release_operation is None:
+            return vault_busy_response()
+        archive_path = ""
+        try:
+            archive_path, _manifest = await _create_archive_off_loop(manager)
+            filename = f"ombre-memory-vault-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
+
+            async def cleanup_export() -> None:
+                try:
+                    await _run_blocking(_unlink_file, archive_path)
+                finally:
+                    release_operation()
+
+            try:
+                return _CleanupFileResponse(
+                    archive_path,
+                    media_type="application/zip",
+                    filename=filename,
+                    cleanup=cleanup_export,
+                )
+            except BaseException:
+                await cleanup_export()
+                raise
+        except asyncio.CancelledError:
+            release_operation()
+            raise
+        except Exception as exc:
+            try:
+                if archive_path:
+                    await _run_blocking(_unlink_file, archive_path)
+            finally:
+                release_operation()
             return exception_response(exc)
 
     @mcp.custom_route("/api/backup/restore", methods=["POST"])
@@ -498,25 +788,46 @@ def register(mcp: Any, dependencies: CurrentWebDependencies) -> None:
                 {"error": "mode must be skip or overwrite"},
                 status_code=400,
             )
-        descriptor, upload_path = tempfile.mkstemp(prefix="ombre-upload-", suffix=".zip")
         try:
-            with os.fdopen(descriptor, "wb") as target:
+            manager = require_dependency(dependencies, "backup_manager")
+        except Exception as exc:
+            return exception_response(exc)
+        release_operation = reserve_vault_operation()
+        if release_operation is None:
+            return vault_busy_response()
+        upload_path = ""
+        try:
+            descriptor, upload_path = await _create_upload_temp_off_loop()
+            try:
+                target = os.fdopen(descriptor, "wb")
+            except BaseException:
+                await _run_blocking(
+                    _discard_upload_temp,
+                    (descriptor, upload_path),
+                )
+                upload_path = ""
+                raise
+            try:
                 total = await _read_backup_upload(request, target)
-                target.flush()
-                os.fsync(target.fileno())
+                await _run_blocking(target.flush)
+                await _run_blocking(os.fsync, target.fileno())
+            finally:
+                await _run_blocking(target.close)
             if total == 0:
                 return JSONResponse({"error": "Empty backup"}, status_code=400)
-            manager = require_dependency(dependencies, "backup_manager")
-            result = await manager.restore_archive(upload_path, mode=mode)
-            result["scope"] = "memory-vault"
-            restored_ids = [str(item) for item in result.get("restored_ids", [])]
-            result["derived_indexes"] = await _refresh_restore_indexes(
-                dependencies, restored_ids
+            result = await _restore_backup_off_loop(
+                dependencies,
+                manager,
+                upload_path,
+                mode,
             )
+            # The outbox start hook intentionally captures the long-lived
+            # application loop. Archive extraction/index rebuild stays on the
+            # worker, then durable embedding jobs are admitted back here.
             if result.get("embedding_snapshot") != "restored":
                 embeddings_queued = 0
-                for bucket_id in restored_ids:
-                    if await queue_embedding(dependencies, bucket_id):
+                for bucket_id in result.get("restored_ids", []):
+                    if await queue_embedding(dependencies, str(bucket_id)):
                         embeddings_queued += 1
                 result["embeddings_queued"] = embeddings_queued
             else:
@@ -527,7 +838,11 @@ def register(mcp: Any, dependencies: CurrentWebDependencies) -> None:
         except Exception as exc:
             return exception_response(exc)
         finally:
-            Path(upload_path).unlink(missing_ok=True)
+            try:
+                if upload_path:
+                    await _run_blocking(_unlink_file, upload_path)
+            finally:
+                release_operation()
 
 
 __all__ = ["register"]

@@ -194,3 +194,76 @@ async def test_empty_vector_index_does_not_call_query_provider(tmp_path, monkeyp
     monkeypatch.setattr(engine, "_generate_async", unexpected_provider_call)
 
     assert await engine.search_similar_strict("anything", top_k=5) == []
+
+
+@pytest.mark.asyncio
+async def test_query_resurface_flag_disables_legacy_tag_resurfacing(
+    bucket_mgr, decay_eng, monkeypatch
+):
+    direct_id = await bucket_mgr.create(
+        content="Quartz marker with allowed tag.",
+        tags=["allowed"],
+        domain=["work"],
+    )
+    same_tag_id = await bucket_mgr.create(
+        content="Allowed resurfaced memory.",
+        tags=["allowed"],
+        domain=["work"],
+    )
+    blocked_tag_id = await bucket_mgr.create(
+        content="Blocked resurfaced memory.",
+        tags=["blocked"],
+        domain=["work"],
+    )
+    install_runtime(bucket_mgr, decay_eng, EchoDehydrator(), DisabledEmbedding())
+    rt.config["recall"] = {"query_resurface_enabled": False}
+    monkeypatch.setattr("tools.breath.search.random.random", lambda: 0.0)
+    monkeypatch.setattr(
+        rt.decay_engine,
+        "calculate_score",
+        lambda meta: 1.0 if "allowed" in (meta.get("tags") or []) else 5.0,
+    )
+
+    result = await run_search("Quartz marker", tags=["allowed"])
+
+    assert direct_id in result
+    assert same_tag_id not in result
+    assert blocked_tag_id not in result
+    assert "[surface_type: resurface]" not in result
+
+
+@pytest.mark.asyncio
+async def test_legacy_resurfacing_keeps_tag_filter_when_enabled(
+    bucket_mgr, decay_eng, monkeypatch
+):
+    direct_id = await bucket_mgr.create(
+        content="Quartz marker with allowed tag.",
+        tags=["allowed"],
+        domain=["work"],
+    )
+    same_tag_id = await bucket_mgr.create(
+        content="Allowed resurfaced memory.",
+        tags=["allowed"],
+        domain=["work"],
+    )
+    blocked_tag_id = await bucket_mgr.create(
+        content="Blocked resurfaced memory.",
+        tags=["blocked"],
+        domain=["work"],
+    )
+    install_runtime(bucket_mgr, decay_eng, EchoDehydrator(), DisabledEmbedding())
+    rt.config["recall"] = {"query_resurface_enabled": True}
+    monkeypatch.setattr("tools.breath.search.random.random", lambda: 0.0)
+    monkeypatch.setattr("tools.breath.search.random.sample", lambda items, k: items[:k])
+    monkeypatch.setattr(
+        rt.decay_engine,
+        "calculate_score",
+        lambda meta: 1.0 if "allowed" in (meta.get("tags") or []) else 5.0,
+    )
+
+    result = await run_search("Quartz marker", tags=["allowed"])
+
+    assert direct_id in result
+    assert same_tag_id in result
+    assert blocked_tag_id not in result
+    assert "[surface_type: resurface]" in result

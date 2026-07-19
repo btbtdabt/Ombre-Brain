@@ -52,7 +52,36 @@ async def test_env_config_can_clear_ai_display_name(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_compress_runtime_reload_survives_config_persistence_failure(
+async def test_env_config_rejects_nul_before_runtime_or_persistence(
+    monkeypatch, tmp_path
+):
+    writes = []
+    monkeypatch.setattr(config_api.sh, "_require_auth", lambda request: None)
+    monkeypatch.setattr(
+        config_api.sh, "_project_env_path", lambda: str(tmp_path / ".env")
+    )
+    monkeypatch.setattr(config_api.sh, "config", {})
+    monkeypatch.setattr(
+        config_api, "_atomic_update_env_vars", lambda updates: writes.append(updates)
+    )
+
+    mcp = FakeMCP()
+    config_api.register(mcp)
+    response = await mcp.routes[("POST", "/api/env-config")](
+        JsonRequest({"updates": {"AI_NAME": "unsafe\0value"}})
+    )
+    payload = json.loads(response.body)
+
+    assert response.status_code == 400
+    assert payload["ok"] is False
+    assert payload["updated"] == []
+    assert "NUL" in payload["error"]
+    assert writes == []
+    assert os.environ.get("AI_NAME") != "unsafe\0value"
+
+
+@pytest.mark.asyncio
+async def test_compress_runtime_reload_rolls_back_when_env_persistence_fails(
     monkeypatch, tmp_path
 ):
     import openai
@@ -83,12 +112,7 @@ async def test_compress_runtime_reload_survives_config_persistence_failure(
             "api_format": "openai_compat",
         }
     }
-    persistence_calls = []
-
-    def fail_config_persistence(mutate):
-        persisted = {}
-        mutate(persisted)
-        persistence_calls.append(persisted)
+    def fail_env_persistence(_updates):
         raise OSError("Device or resource busy")
 
     monkeypatch.setattr(config_api.sh, "_require_auth", lambda request: None)
@@ -97,7 +121,12 @@ async def test_compress_runtime_reload_survives_config_persistence_failure(
     )
     monkeypatch.setattr(config_api.sh, "config", runtime_config)
     monkeypatch.setattr(config_api.sh, "dehydrator", dehydrator)
-    monkeypatch.setattr(config_api, "atomic_update_config_yaml", fail_config_persistence)
+    monkeypatch.setattr(config_api, "_atomic_update_env_vars", fail_env_persistence)
+    monkeypatch.setattr(
+        config_api,
+        "atomic_update_config_yaml",
+        lambda _mutate: pytest.fail("env-config must never persist secrets to YAML"),
+    )
     monkeypatch.setattr(openai, "AsyncOpenAI", FakeAsyncOpenAI)
     monkeypatch.setenv("OMBRE_COMPRESS_API_KEY", "old-key")
     monkeypatch.setenv("OMBRE_COMPRESS_BASE_URL", "https://old.example/v1")
@@ -120,41 +149,30 @@ async def test_compress_runtime_reload_survives_config_persistence_failure(
     )
     payload = json.loads(response.body)
 
-    assert payload["ok"] is True
-    assert payload["partial"] is True
-    assert payload["updated"] == list(updates)
+    assert response.status_code == 409
+    assert payload["ok"] is False
+    assert payload["partial"] is False
+    assert payload["updated"] == []
     assert payload["persisted"] == []
-    assert any(
-        "config.yaml 持久化失败" in warning
-        and "运行时已生效" in warning
-        and "重启后可能恢复旧值" in warning
-        for warning in payload["warnings"]
-    )
-    assert len(persistence_calls) == 1
-    assert persistence_calls[0]["dehydration"] == {
-        "model": "new-model",
-        "api_key": "new-key",
-        "timeout_seconds": "45",
-        "base_url": "https://new.example/v1",
-    }
+    assert payload["error"] == "environment persistence failed"
 
-    assert runtime_config["dehydration"]["api_key"] == "new-key"
-    assert runtime_config["dehydration"]["base_url"] == "https://new.example/v1"
-    assert runtime_config["dehydration"]["model"] == "new-model"
-    assert dehydrator.api_key == "new-key"
-    assert dehydrator.base_url == "https://new.example/v1"
-    assert dehydrator.model == "new-model"
-    assert dehydrator.timeout_seconds == 45.0
+    assert runtime_config["dehydration"]["api_key"] == "old-key"
+    assert runtime_config["dehydration"]["base_url"] == "https://old.example/v1"
+    assert runtime_config["dehydration"]["model"] == "old-model"
+    assert dehydrator.api_key == "old-key"
+    assert dehydrator.base_url == "https://old.example/v1"
+    assert dehydrator.model == "old-model"
+    assert dehydrator.timeout_seconds == 60.0
     assert dehydrator.api_available is True
     assert len(created_clients) == 1
-    assert dehydrator.client is created_clients[0]
+    assert dehydrator.client is old_client
     assert created_clients[0].kwargs == {
         "api_key": "new-key",
         "base_url": "https://new.example/v1",
         "timeout": 45.0,
     }
-    assert os.environ["OMBRE_COMPRESS_API_KEY"] == "new-key"
-    assert os.environ["OMBRE_COMPRESS_BASE_URL"] == "https://new.example/v1"
+    assert os.environ["OMBRE_COMPRESS_API_KEY"] == "old-key"
+    assert os.environ["OMBRE_COMPRESS_BASE_URL"] == "https://old.example/v1"
 
 
 @pytest.mark.asyncio
@@ -221,8 +239,7 @@ async def test_compress_client_rebuild_failure_is_not_reported_as_success(
     assert payload["partial"] is False
     assert payload["updated"] == []
     assert payload["persisted"] == []
-    assert "压缩配置热更新失败" in payload["error"]
-    assert "ValueError: invalid base URL" in payload["error"]
+    assert payload["error"] == "provider configuration could not be applied"
     assert persistence_called is False
     assert runtime_config["dehydration"]["api_key"] == "old-key"
     assert runtime_config["dehydration"]["base_url"] == "https://old.example/v1"
@@ -380,16 +397,14 @@ async def test_embedding_provider_tuple_rebuilds_and_persists_once(
         }
     }
     rebuild_snapshots = []
-    persisted_configs = []
+    persisted_env = []
 
     def rebuild_once():
         rebuild_snapshots.append(dict(runtime_config["embedding"]))
         return SimpleNamespace(enabled=True)
 
-    def persist_once(mutate):
-        saved = {}
-        mutate(saved)
-        persisted_configs.append(saved)
+    def persist_once(updates):
+        persisted_env.append(dict(updates))
 
     monkeypatch.setattr(config_api.sh, "_require_auth", lambda request: None)
     monkeypatch.setattr(
@@ -400,7 +415,12 @@ async def test_embedding_provider_tuple_rebuilds_and_persists_once(
         config_api.sh, "embedding_engine", SimpleNamespace(enabled=True)
     )
     monkeypatch.setattr(config_api, "_rebuild_embedding_runtime", rebuild_once)
-    monkeypatch.setattr(config_api, "atomic_update_config_yaml", persist_once)
+    monkeypatch.setattr(config_api, "_atomic_update_env_vars", persist_once)
+    monkeypatch.setattr(
+        config_api,
+        "atomic_update_config_yaml",
+        lambda _mutate: pytest.fail("env-config must never persist secrets to YAML"),
+    )
 
     updates = {
         "OMBRE_EMBED_API_KEY": "new-key",
@@ -426,10 +446,61 @@ async def test_embedding_provider_tuple_rebuilds_and_persists_once(
         "base_url": "https://api.siliconflow.cn/v1",
         "model": "BAAI/bge-m3",
     }
-    assert len(persisted_configs) == 1
-    assert persisted_configs[0]["embedding"]["api_key"] == "new-key"
-    assert persisted_configs[0]["embedding"]["base_url"] == updates[
-        "OMBRE_EMBED_BASE_URL"
-    ]
-    assert persisted_configs[0]["embedding"]["model"] == "BAAI/bge-m3"
-    assert persisted_configs[0]["embedding"]["api_format"] == "openai_compat"
+    assert persisted_env == [updates]
+
+
+@pytest.mark.asyncio
+async def test_clearing_embedding_key_rolls_back_engine_and_all_holders_on_env_failure(
+    monkeypatch, tmp_path
+):
+    from tools import _runtime as tools_runtime
+
+    old_backend = object()
+    engine = SimpleNamespace(enabled=True, _backend=old_backend)
+    bucket_mgr = SimpleNamespace(embedding_engine=engine)
+    import_engine = SimpleNamespace(embedding_engine=engine)
+    migrate_engine = SimpleNamespace(_embedding_engine=engine)
+
+    class Outbox:
+        embedding_engine = engine
+
+        def set_embedding_engine(self, replacement):
+            self.embedding_engine = replacement
+
+    outbox = Outbox()
+    runtime_config = {"embedding": {"enabled": True, "api_key": "old-key"}}
+    monkeypatch.setattr(config_api.sh, "_require_auth", lambda request: None)
+    monkeypatch.setattr(
+        config_api.sh, "_project_env_path", lambda: str(tmp_path / ".env")
+    )
+    monkeypatch.setattr(config_api.sh, "config", runtime_config)
+    monkeypatch.setattr(config_api.sh, "embedding_engine", engine)
+    monkeypatch.setattr(config_api.sh, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(config_api.sh, "import_engine", import_engine)
+    monkeypatch.setattr(config_api.sh, "migrate_engine", migrate_engine)
+    monkeypatch.setattr(config_api.sh, "embedding_outbox", outbox)
+    monkeypatch.setattr(tools_runtime, "embedding_engine", engine)
+    monkeypatch.setattr(
+        config_api,
+        "_atomic_update_env_vars",
+        lambda _updates: (_ for _ in ()).throw(OSError("bind write failed")),
+    )
+    monkeypatch.setenv("OMBRE_EMBED_API_KEY", "old-key")
+
+    mcp = FakeMCP()
+    config_api.register(mcp)
+    response = await mcp.routes[("POST", "/api/env-config")](
+        JsonRequest({"updates": {"OMBRE_EMBED_API_KEY": ""}})
+    )
+
+    assert response.status_code == 409
+    assert runtime_config == {"embedding": {"enabled": True, "api_key": "old-key"}}
+    assert os.environ["OMBRE_EMBED_API_KEY"] == "old-key"
+    assert engine.enabled is True
+    assert engine._backend is old_backend
+    assert config_api.sh.embedding_engine is engine
+    assert bucket_mgr.embedding_engine is engine
+    assert import_engine.embedding_engine is engine
+    assert migrate_engine._embedding_engine is engine
+    assert tools_runtime.embedding_engine is engine
+    assert outbox.embedding_engine is engine

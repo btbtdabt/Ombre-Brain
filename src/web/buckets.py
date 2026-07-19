@@ -22,6 +22,7 @@ from memory_messages import resolved_hint
 from . import _shared as sh
 
 logger = sh.logger
+FULL_LIST_MAX_RESULTS = 200
 
 try:
     from utils import (  # type: ignore
@@ -90,11 +91,55 @@ def register(mcp) -> None:
 
     @mcp.custom_route("/api/buckets", methods=["GET"])
     async def api_buckets(request: Request) -> Response:
-        """List buckets, optionally ordered by their first-recorded time."""
+        """List buckets, with an optional bounded page for richer summaries.
+
+        Calls without ``limit`` keep the legacy bare-array response and the
+        historical active-plus-archive default. Dashboard callers pass an
+        explicit archive flag and limit, receiving the true total alongside
+        the bounded page just like the light-list contract.
+        """
         from starlette.responses import JSONResponse
         err = sh._require_auth(request)
         if err:
             return err
+        raw_include_archive = request.query_params.get("include_archive")
+        try:
+            include_archive = (
+                True
+                if raw_include_archive is None
+                else parse_bool(raw_include_archive)
+            )
+        except ValueError:
+            return JSONResponse(
+                {
+                    "error": "invalid include_archive",
+                    "allowed": ["0", "1", "false", "true"],
+                },
+                status_code=400,
+            )
+        raw_limit = request.query_params.get("limit")
+        limit: int | None = None
+        if raw_limit not in (None, ""):
+            try:
+                limit = int(raw_limit)
+            except (TypeError, ValueError, OverflowError):
+                return JSONResponse(
+                    {
+                        "error": "invalid limit",
+                        "minimum": 1,
+                        "maximum": FULL_LIST_MAX_RESULTS,
+                    },
+                    status_code=400,
+                )
+            if limit < 1 or limit > FULL_LIST_MAX_RESULTS:
+                return JSONResponse(
+                    {
+                        "error": "invalid limit",
+                        "minimum": 1,
+                        "maximum": FULL_LIST_MAX_RESULTS,
+                    },
+                    status_code=400,
+                )
         sort_mode = str(request.query_params.get("sort", "score") or "score").strip()
         allowed_sort_modes = {"score", "created_desc", "created_asc"}
         if sort_mode not in allowed_sort_modes:
@@ -106,7 +151,20 @@ def register(mcp) -> None:
                 status_code=400,
             )
         try:
-            all_buckets = await sh.bucket_mgr.list_all(include_archive=True)
+            bounded_count: int | None = None
+            if limit is None:
+                all_buckets = await sh.bucket_mgr.list_all(
+                    include_archive=include_archive
+                )
+            else:
+                all_buckets, bounded_count = await sh.bucket_mgr.list_light(
+                    include_archive=include_archive,
+                    limit=limit,
+                    offset=0,
+                    sort=sort_mode,
+                    score_calculator=sh.decay_engine.calculate_score,
+                    exclude_deleted=True,
+                )
             result = []
             for b in all_buckets:
                 meta = b.get("metadata", {})
@@ -114,6 +172,9 @@ def register(mcp) -> None:
                     continue
                 created_epoch_ms = _datetime_epoch_ms(meta.get("created"))
                 last_active_epoch_ms = _datetime_epoch_ms(meta.get("last_active"))
+                score = b.get("score")
+                if not isinstance(score, (int, float)):
+                    score = sh.decay_engine.calculate_score(meta)
                 result.append({
                     "id": b["id"],
                     "name": meta.get("name", b["id"]),
@@ -132,7 +193,7 @@ def register(mcp) -> None:
                     "last_active": meta.get("last_active", ""),
                     "last_active_epoch_ms": last_active_epoch_ms,
                     "activation_count": meta.get("activation_count", 0),
-                    "score": sh.decay_engine.calculate_score(meta),
+                    "score": score,
                     "content_preview": strip_wikilinks(b.get("content", ""))[:200],
                     # iter 1.8 新增字段（后台老桶读出默认值）
                     "why_remembered": meta.get("why_remembered", ""),
@@ -164,6 +225,17 @@ def register(mcp) -> None:
                     return (0, ordered_timestamp, str(item["id"]))
 
                 result.sort(key=created_sort_key)
+            if limit is not None:
+                return JSONResponse(
+                    {
+                        "buckets": result,
+                        "count": bounded_count,
+                        "include_archive": include_archive,
+                        "limit": limit,
+                        "offset": 0,
+                    },
+                    headers={"Cache-Control": "no-store"},
+                )
             return JSONResponse(result, headers={"Cache-Control": "no-store"})
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)

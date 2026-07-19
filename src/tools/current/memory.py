@@ -494,23 +494,66 @@ async def read_bucket(bucket_id: str) -> dict:
     return bucket_read_payload(bucket)
 
 
+def _light_pagination_integer(value: Any, name: str) -> int:
+    """Parse MCP pagination strictly instead of clamping invalid tool input."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if re.fullmatch(r"[+-]?[0-9]+", text):
+            try:
+                return int(text)
+            except ValueError:
+                pass
+    raise ValueError(f"{name} must be an integer")
+
+
 async def list_buckets_light(
     include_archive: bool = False,
     limit: int = 500,
     offset: int = 0,
 ) -> dict:
     """只读列出桶的轻量元数据；不返回正文，给同步脚本和外部索引用。"""
-    safe_limit = int_between(limit, 500, 1, 2000)
-    safe_offset = int_between(offset, 0, 0, 2**31 - 1)
     try:
-        all_buckets = await require_runtime("bucket_mgr").list_all(
-            include_archive=bool_value(include_archive)
-        )
-        items = [bucket_light_payload(bucket) for bucket in all_buckets]
-        items.sort(key=lambda item: str(item.get("created") or ""), reverse=True)
+        safe_limit = _light_pagination_integer(limit, "limit")
+        safe_offset = _light_pagination_integer(offset, "offset")
+    except ValueError as exc:
+        return {"error": str(exc), "buckets": []}
+    if not 1 <= safe_limit <= 2000:
         return {
-            "buckets": items[safe_offset : safe_offset + safe_limit],
-            "count": len(items),
+            "error": "limit must be between 1 and 2000",
+            "buckets": [],
+        }
+    try:
+        manager = require_runtime("bucket_mgr")
+        max_offset = int(getattr(manager, "light_max_offset", 100_000))
+        if safe_offset < 0:
+            return {
+                "error": f"offset must be between 0 and {max_offset}",
+                "buckets": [],
+            }
+        if safe_offset > max_offset:
+            return {
+                "error": "offset exceeds maximum",
+                "max_offset": max_offset,
+                "buckets": [],
+            }
+        score_calculator = getattr(
+            getattr(rt, "decay_engine", None),
+            "calculate_score",
+            None,
+        )
+        buckets, count = await manager.list_light(
+            include_archive=bool_value(include_archive),
+            limit=safe_limit,
+            offset=safe_offset,
+            sort="created_desc",
+            score_calculator=score_calculator,
+        )
+        items = [bucket_light_payload(bucket) for bucket in buckets]
+        return {
+            "buckets": items,
+            "count": count,
             "include_archive": bool_value(include_archive),
             "limit": safe_limit,
             "offset": safe_offset,

@@ -1,0 +1,233 @@
+.workspace-tabs {
+  align-items: stretch;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 10px 24px 8px;
+  scrollbar-width: thin;
+}
+
+.workspace-tab {
+  align-items: flex-start;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+  display: inline-flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 112px;
+  padding: 8px 13px;
+  text-align: left;
+  transition: background .16s ease, border-color .16s ease, color .16s ease;
+}
+
+.workspace-tab span {
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: .01em;
+}
+
+.workspace-tab small {
+  font-family: "Share Tech Mono", ui-monospace, monospace;
+  font-size: 10px;
+  letter-spacing: .06em;
+  opacity: .74;
+  text-transform: uppercase;
+}
+
+.workspace-tab:hover,
+.workspace-tab:focus-visible {
+  background: var(--surface);
+  border-color: var(--border);
+  color: var(--text);
+  outline: none;
+}
+
+.workspace-tab.active,
+.workspace-tab[aria-selected="true"] {
+  background: color-mix(in srgb, var(--accent) 9%, var(--surface));
+  border-color: color-mix(in srgb, var(--accent) 44%, var(--border));
+  color: var(--accent);
+}
+
+#panel-tabs .tab[hidden] {
+  display: none !important;
+}
+
+#panel-tabs {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+}
+
+#panel-tabs .tab[data-workspace] {
+  appearance: none;
+  background: transparent;
+  border-left: 0;
+  border-right: 0;
+  border-top: 0;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+#panel-tabs .tab-spacer {
+  flex: 1 0 18px;
+}
+
+body[data-dashboard-shell="unified-dashboard"] [data-unified-superseded-by] {
+  display: none !important;
+}
+
+.unified-canonical-link {
+  align-items: center;
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface-solid));
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+  border-radius: 12px;
+  display: flex;
+  gap: 18px;
+  justify-content: space-between;
+  margin-bottom: 18px;
+  padding: 14px 16px;
+}
+
+.unified-canonical-link strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.unified-canonical-link p {
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.55;
+  margin: 4px 0 0;
+}
+
+.unified-canonical-link button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.unified-panel {
+  display: none;
+  margin: 0 auto;
+  max-width: 1280px;
+  padding: 24px;
+}
+
+.unified-panel.active {
+  display: block;
+}
+
+.unified-panel-heading {
+  align-items: flex-start;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+
+.unified-panel-heading h2 {
+  color: var(--text);
+  font-family: "Cormorant Garamond", Georgia, serif;
+  font-size: 26px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.unified-panel-heading p {
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.55;
+  margin: 4px 0 0;
+}
+
+.unified-panel-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 16px;
+}
+
+.unified-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.unified-toolbar {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.unified-status {
+  border-radius: 10px;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.5;
+  min-height: 18px;
+  padding: 8px 10px;
+}
+
+.unified-status[data-tone="error"] {
+  background: color-mix(in srgb, var(--negative) 10%, transparent);
+  color: var(--negative);
+}
+
+.unified-status[data-tone="success"] {
+  background: color-mix(in srgb, var(--positive) 10%, transparent);
+  color: var(--positive);
+}
+
+.unified-empty {
+  color: var(--text-dim);
+  font-size: 13px;
+  padding: 24px 12px;
+  text-align: center;
+}
+
+.unified-shell-fatal {
+  background: color-mix(in srgb, var(--negative) 8%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--negative) 40%, var(--border));
+  border-radius: 12px;
+  color: var(--negative);
+  margin: 18px 24px;
+  padding: 14px 16px;
+}
+
+@media (max-width: 720px) {
+  .workspace-tabs {
+    padding: 8px 12px 7px;
+  }
+
+  .workspace-tab {
+    min-width: 96px;
+    padding: 7px 10px;
+  }
+
+  .unified-panel {
+    padding: 16px 12px 24px;
+  }
+
+  .unified-panel-heading {
+    flex-direction: column;
+  }
+
+  .unified-canonical-link {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace-tab {
+    transition: none;
+  }
+}

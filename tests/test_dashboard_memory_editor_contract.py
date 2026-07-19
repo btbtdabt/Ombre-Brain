@@ -10,6 +10,13 @@ import web.buckets as buckets_web
 
 ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD = ROOT / "frontend" / "dashboard.html"
+NODE = shutil.which("node")
+
+
+def _node_eval_args(script: str) -> list[str]:
+    node = NODE
+    assert node is not None, "Node.js is unavailable"
+    return [node, "-e", script]
 
 
 class FakeMCP:
@@ -200,7 +207,7 @@ def test_imported_memory_cards_open_the_full_editor_and_refresh_after_save():
     ) < save_source.index("} catch (e) {")
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
+@pytest.mark.skipif(NODE is None, reason="Node.js is unavailable")
 def test_imported_memory_editor_opens_and_focuses_at_runtime():
     html = DASHBOARD.read_text(encoding="utf-8")
     start = html.index("async function openImportedBucketEditor(")
@@ -243,7 +250,7 @@ async function showDetail(id) { passedId = id; return loadSucceeds; }
 });
 """
     completed = subprocess.run(
-        [shutil.which("node"), "-e", script],
+        _node_eval_args(script),
         check=True,
         capture_output=True,
         text=True,
@@ -254,7 +261,7 @@ async function showDetail(id) { passedId = id; return loadSucceeds; }
     ]
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
+@pytest.mark.skipif(NODE is None, reason="Node.js is unavailable")
 def test_import_results_latest_request_wins_and_preserves_scroll():
     html = DASHBOARD.read_text(encoding="utf-8")
     start = html.index("let importResultsLoadGeneration = 0;")
@@ -272,7 +279,7 @@ const document = {
   getElementById(id) { return id === 'import-results-list' ? container : null; },
 };
 const BASE = '';
-function fetch() { return new Promise(resolve => pending.push(resolve)); }
+function authFetch() { return new Promise(resolve => pending.push(resolve)); }
 async function readJsonSafe(response) { return response.payload; }
 function esc(value) { return String(value == null ? '' : value); }
 function escAttr(value) { return esc(value); }
@@ -301,7 +308,7 @@ function escAttr(value) { return esc(value); }
 });
 """
     completed = subprocess.run(
-        [shutil.which("node"), "-e", script],
+        _node_eval_args(script),
         check=True,
         capture_output=True,
         text=True,
@@ -310,7 +317,7 @@ function escAttr(value) { return esc(value); }
     assert json.loads(completed.stdout) == [True, False, 73]
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
+@pytest.mark.skipif(NODE is None, reason="Node.js is unavailable")
 def test_bucket_detail_latest_request_wins_at_runtime():
     html = DASHBOARD.read_text(encoding="utf-8")
     start = html.index("let detailLoadGeneration = 0;")
@@ -328,7 +335,7 @@ const document = {
   },
 };
 const BASE = '';
-function fetch(url) {
+function authFetch(url) {
   return new Promise(resolve => pending.push({url, resolve}));
 }
 async function readJsonSafe(response) { return response.payload; }
@@ -354,7 +361,7 @@ function esc(value) { return String(value == null ? '' : value); }
 });
 """
     completed = subprocess.run(
-        [shutil.which("node"), "-e", script],
+        _node_eval_args(script),
         check=True,
         capture_output=True,
         text=True,

@@ -165,6 +165,28 @@ async def test_host_vault_set_returns_restart_required_message(monkeypatch, tmp_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("unsafe", ["bad\0path", "bad\npath", "bad'path"])
+async def test_host_vault_set_rejects_unsafe_env_characters(monkeypatch, unsafe):
+    writes = []
+    monkeypatch.setattr(import_api.sh, "_require_auth", lambda _request: None)
+    monkeypatch.setattr(import_api.sh, "in_docker", lambda: False)
+    monkeypatch.setattr(
+        import_api.sh,
+        "_write_env_var",
+        lambda key, value: writes.append((key, value)),
+    )
+
+    mcp = FakeMCP()
+    import_api.register(mcp)
+    response = await mcp.routes[("POST", "/api/host-vault")](
+        JsonRequest({"value": unsafe})
+    )
+
+    assert response.status_code == 400
+    assert writes == []
+
+
+@pytest.mark.asyncio
 async def test_host_vault_set_rejects_container_local_fake_save(monkeypatch):
     writes = []
     monkeypatch.setattr(import_api.sh, "_require_auth", lambda _request: None)

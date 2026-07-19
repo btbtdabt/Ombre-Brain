@@ -233,11 +233,22 @@ async def test_config_api_reloads_one_embedding_engine_everywhere(monkeypatch, t
     monkeypatch.setattr(config_api.sh, "migrate_engine", migrate_holder)
     monkeypatch.setattr(config_api.sh, "embedding_engine", object())
     monkeypatch.setattr(tools_runtime, "embedding_engine", object())
+    persisted = {
+        "buckets_dir": str(tmp_path),
+        "embedding": {"enabled": True},
+    }
+
+    def update_persisted(mutator):
+        mutator(persisted)
+        return persisted
+
+    monkeypatch.setattr(config_api, "read_config_yaml", lambda: persisted)
+    monkeypatch.setattr(config_api, "atomic_update_config_yaml", update_persisted)
 
     mcp = _FakeMCP()
     config_api.register(mcp)
     response = await mcp.routes[("POST", "/api/config")](
-        _JsonRequest({"embedding": {"enabled": "false"}, "persist": "false"})
+        _JsonRequest({"embedding": {"enabled": "false"}, "persist": "true"})
     )
     payload = _json(response)
 
@@ -246,6 +257,7 @@ async def test_config_api_reloads_one_embedding_engine_everywhere(monkeypatch, t
     engine = config_api.sh.embedding_engine
     assert engine.enabled is False
     assert config_api.sh.config["embedding"]["enabled"] is False
+    assert persisted["embedding"]["enabled"] is False
     assert bucket_holder.embedding_engine is engine
     assert import_holder.embedding_engine is engine
     assert migrate_holder._embedding_engine is engine

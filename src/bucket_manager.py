@@ -29,6 +29,7 @@ bucket_manager.py — 记忆桶的增删改查与多维索引
 import os
 import re
 import asyncio
+import heapq
 import hashlib
 import inspect
 import json
@@ -39,7 +40,7 @@ import time
 import tempfile
 import uuid
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from contextlib import asynccontextmanager
 from datetime import date, datetime
 from functools import wraps
@@ -312,6 +313,7 @@ from utils import (
     now_iso,
     parse_bool,
     parse_iso_datetime,
+    strip_wikilinks,
 )
 from identity import identity_names
 from memory_relevance import (
@@ -333,6 +335,7 @@ from projection_mirror import TraceCatalogProjection
 from projection_sqlite import TraceSQLiteProjection
 from projection_vector import TraceVectorProjectionManifest
 from ombrebrain.policy.formal_invariants import FormalInvariantChecker
+from runtime_values import valid_memory_id
 
 try:
     from bm25_index import BM25Index as _BM25Index
@@ -464,6 +467,17 @@ _RIPPLE_BOOST = 0.3        # 唤醒时 activation_count 增量
 _MAX_METADATA_DEPTH = 16
 _MAX_METADATA_NODES = 10_000
 
+# Dashboard/MCP light listings may scan every bucket header to establish a
+# global sort order, but they must never pull every Markdown body into memory.
+# Keep these storage-boundary caps fixed and conservative: malformed files are
+# skipped instead of turning a read-only list request into unbounded I/O.
+_LIGHT_FRONTMATTER_MAX_BYTES = 64 * 1024
+_LIGHT_PREVIEW_MAX_BYTES = 4 * 1024
+_LIGHT_PREVIEW_CHARS = 200
+_LIGHT_MAX_OFFSET = 100_000
+_LIGHT_SORT_MODES = frozenset({"score", "created_desc", "created_asc"})
+_LIGHT_FILTER_TOKEN_RE = re.compile(r"^[\w.:-]{1,128}$", re.UNICODE)
+
 # --- search 评分 ---
 _VECTOR_TOPK = 50          # embedding 预取 top_k（仅作 semantic 分源，不窄化候选集）
 _VECTOR_RECALL_THRESHOLD = 0.65  # 纯语义候选进入结果池的最低余弦相似度
@@ -500,6 +514,8 @@ class BucketManager:
     桶以 Markdown 文件存储，YAML frontmatter 存元数据，正文存内容。
     天然兼容 Obsidian 直接浏览和编辑。
     """
+
+    light_max_offset = _LIGHT_MAX_OFFSET
 
     def __init__(self, config: dict, embedding_engine=None, v3_runtime=None):
         # iter 1.9 G: 保留原始 config 引用，让 create() 能读 bucket_type_defaults
@@ -3670,6 +3686,255 @@ class BucketManager:
         results.sort(key=lambda x: x.get("created", ""), reverse=True)
         return results
 
+    def _load_bucket_light_header(self, file_path: str) -> Optional[dict]:
+        """Read and normalize only one bucket's bounded YAML frontmatter."""
+        try:
+            with open(file_path, "rb") as handle:
+                first_line = handle.readline(8)
+                if first_line.strip() != b"---":
+                    raise ValueError("missing YAML frontmatter delimiter")
+
+                header_parts: list[bytes] = []
+                header_bytes = 0
+                while True:
+                    remaining = _LIGHT_FRONTMATTER_MAX_BYTES - header_bytes
+                    if remaining <= 0:
+                        raise ValueError("frontmatter exceeds light-list byte limit")
+                    line = handle.readline(remaining + 1)
+                    if not line:
+                        raise ValueError("unterminated YAML frontmatter")
+                    if line.strip() == b"---":
+                        body_offset = handle.tell()
+                        break
+                    if len(line) > remaining:
+                        raise ValueError("frontmatter exceeds light-list byte limit")
+                    header_parts.append(line)
+                    header_bytes += len(line)
+
+            header = b"".join(header_parts).decode("utf-8")
+            post = frontmatter.loads(f"---\n{header}\n---\n")
+            metadata = self._normalize_loaded_metadata(
+                dict(post.metadata),
+                source=f"light:{Path(file_path).name}",
+            )
+            bucket_id = metadata.get("id") or Path(file_path).stem
+            if not valid_memory_id(bucket_id):
+                raise ValueError("invalid or oversized bucket id")
+            return {
+                "id": str(bucket_id),
+                "metadata": metadata,
+                "path": file_path,
+                "_body_offset": body_offset,
+            }
+        except Exception as exc:
+            logger.warning(
+                "Skipping bucket in light listing / 轻量列表跳过桶: %s: %s",
+                file_path,
+                exc,
+            )
+            return None
+
+    @staticmethod
+    def _load_bucket_light_preview(file_path: str, body_offset: int) -> str:
+        """Read at most one fixed-size body prefix for a selected page item."""
+        try:
+            with open(file_path, "rb") as handle:
+                handle.seek(max(0, int(body_offset)))
+                raw = handle.read(_LIGHT_PREVIEW_MAX_BYTES)
+            # python-frontmatter removes the separator's blank line before
+            # exposing ``post.content``. Match that legacy preview exactly and
+            # remove Obsidian brackets before applying the 200-character cap.
+            text = raw.decode("utf-8", errors="replace").lstrip("\r\n")
+            return strip_wikilinks(text)[:_LIGHT_PREVIEW_CHARS]
+        except (OSError, TypeError, ValueError):
+            return ""
+
+    @staticmethod
+    def _light_epoch_ms(value: object) -> int | None:
+        try:
+            return round(parse_iso_datetime(value).timestamp() * 1000)
+        except (OSError, OverflowError, TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _light_score(
+        metadata: dict,
+        score_calculator: Callable[[dict], Any] | None,
+    ) -> float:
+        if not callable(score_calculator):
+            return 0.0
+        try:
+            score = float(score_calculator(metadata))
+        except Exception:
+            return 0.0
+        return score if math.isfinite(score) else 0.0
+
+    async def list_light(
+        self,
+        include_archive: bool = False,
+        *,
+        archive_only: bool = False,
+        limit: int = 500,
+        offset: int = 0,
+        sort: str = "created_desc",
+        score_calculator: Callable[[dict], Any] | None = None,
+        bucket_type: str = "",
+        required_tags: Sequence[str] | None = None,
+        exclude_deleted: bool = False,
+    ) -> tuple[list[dict], int]:
+        """Return a light page without blocking the caller's event loop."""
+        return await asyncio.to_thread(
+            self._list_light_sync,
+            include_archive,
+            archive_only=archive_only,
+            limit=limit,
+            offset=offset,
+            sort=sort,
+            score_calculator=score_calculator,
+            bucket_type=bucket_type,
+            required_tags=required_tags,
+            exclude_deleted=exclude_deleted,
+        )
+
+    def _list_light_sync(
+        self,
+        include_archive: bool = False,
+        *,
+        archive_only: bool = False,
+        limit: int = 500,
+        offset: int = 0,
+        sort: str = "created_desc",
+        score_calculator: Callable[[dict], Any] | None = None,
+        bucket_type: str = "",
+        required_tags: Sequence[str] | None = None,
+        exclude_deleted: bool = False,
+    ) -> tuple[list[dict], int]:
+        """Return one globally sorted page without eagerly reading bodies.
+
+        Every candidate contributes at most 64 KiB of frontmatter. Only the
+        selected page incurs a 4 KiB body-prefix read, and only the smallest
+        ``offset + limit`` candidates are retained while the vault is scanned.
+        ``include_archive`` preserves the legacy active-plus-archive union;
+        ``archive_only`` scopes the scan to the archive directory for callers
+        that need independently paginated archived results.
+        Malformed or oversized frontmatter is skipped like an unreadable full
+        bucket; no files or indexes are mutated.
+        """
+        sort_mode = str(sort or "created_desc").strip()
+        if sort_mode not in _LIGHT_SORT_MODES:
+            raise ValueError("invalid sort mode")
+        try:
+            safe_limit = max(1, min(int(limit), 2000))
+            requested_offset = int(offset)
+        except (OverflowError, TypeError, ValueError) as exc:
+            raise ValueError("invalid light-list pagination") from exc
+        if requested_offset > _LIGHT_MAX_OFFSET:
+            raise ValueError(
+                f"light-list offset exceeds maximum {_LIGHT_MAX_OFFSET}"
+            )
+        safe_offset = max(0, requested_offset)
+        type_filter = str(bucket_type or "").strip()
+        if type_filter and not _LIGHT_FILTER_TOKEN_RE.fullmatch(type_filter):
+            raise ValueError("invalid light-list type filter")
+        tag_filter: list[str] = []
+        for value in required_tags or ():
+            tag = str(value or "").strip()
+            if not _LIGHT_FILTER_TOKEN_RE.fullmatch(tag):
+                raise ValueError("invalid light-list tag filter")
+            if tag not in tag_filter:
+                tag_filter.append(tag)
+            if len(tag_filter) > 16:
+                raise ValueError("too many light-list tag filters")
+        required_tag_set = frozenset(tag_filter)
+
+        if archive_only:
+            dirs = [self.archive_dir]
+        else:
+            dirs = list(self._active_dirs)
+        if include_archive and not archive_only:
+            dirs.append(self.archive_dir)
+
+        count = 0
+
+        def candidates():
+            nonlocal count
+            for _root, _filename, file_path in self._iter_md_files(dirs):
+                loaded = self._load_bucket_light_header(file_path)
+                if loaded is None:
+                    continue
+                metadata = loaded["metadata"]
+                if exclude_deleted and metadata.get("deleted_at"):
+                    continue
+                if type_filter and str(
+                    metadata.get("type") or "dynamic"
+                ).strip() != type_filter:
+                    continue
+                metadata_tags = metadata.get("tags", [])
+                if isinstance(metadata_tags, str):
+                    candidate_tags = {metadata_tags}
+                elif isinstance(metadata_tags, list):
+                    candidate_tags = {str(tag) for tag in metadata_tags}
+                else:
+                    candidate_tags = set()
+                if not required_tag_set.issubset(candidate_tags):
+                    continue
+                # The heap can retain ``offset + limit`` candidates. Never put
+                # the normalized frontmatter dict in it: a 100k offset plus
+                # 64 KiB headers would otherwise permit multi-GB retention.
+                candidate = {
+                    "id": loaded["id"],
+                    "path": loaded["path"],
+                    "score": self._light_score(metadata, score_calculator),
+                    "created_epoch_ms": self._light_epoch_ms(
+                        metadata.get("created")
+                    ),
+                    "last_active_epoch_ms": self._light_epoch_ms(
+                        metadata.get("last_active")
+                    ),
+                }
+                count += 1
+                yield candidate
+
+        def sort_key(candidate: dict) -> tuple:
+            bucket_id = str(candidate.get("id") or "")
+            file_path = str(candidate.get("path") or "")
+            if sort_mode == "score":
+                return (-float(candidate.get("score", 0.0)), bucket_id, file_path)
+            timestamp = candidate.get("created_epoch_ms")
+            if timestamp is None:
+                return (1, 0, bucket_id, file_path)
+            ordered_timestamp = (
+                -int(timestamp) if sort_mode == "created_desc" else int(timestamp)
+            )
+            return (0, ordered_timestamp, bucket_id, file_path)
+
+        prefix_size = safe_offset + safe_limit
+        ordered_prefix = heapq.nsmallest(
+            prefix_size,
+            candidates(),
+            key=sort_key,
+        )
+        selected = ordered_prefix[safe_offset : safe_offset + safe_limit]
+        page: list[dict] = []
+        for candidate in selected:
+            # Re-read only page headers so retained heap entries stay compact.
+            # If a concurrent external edit makes the file unreadable, omit it
+            # safely; the next request will observe the new vault state.
+            item = self._load_bucket_light_header(
+                str(candidate.get("path") or "")
+            )
+            if item is None:
+                continue
+            item["score"] = candidate["score"]
+            item["created_epoch_ms"] = candidate["created_epoch_ms"]
+            item["last_active_epoch_ms"] = candidate["last_active_epoch_ms"]
+            item["content"] = self._load_bucket_light_preview(
+                str(item.get("path") or ""),
+                int(item.pop("_body_offset", 0) or 0),
+            )
+            page.append(item)
+        return page, count
+
     async def list_all(self, include_archive: bool = False) -> list[dict]:
         """
         Recursively walk directories (including domain subdirs), list all buckets.
@@ -4186,6 +4451,66 @@ class BucketManager:
             f"bucket metadata contains unsupported scalar: {type(value).__name__}"
         )
 
+    def _normalize_loaded_metadata(
+        self,
+        raw_metadata: dict,
+        *,
+        source: str,
+    ) -> dict[str, Any]:
+        """Normalize untrusted YAML metadata for both full and light reads."""
+        # Normalize the metadata object as one graph so aliases shared by
+        # different top-level keys cannot reset the node/depth budgets.
+        metadata = self._normalize_metadata_value(dict(raw_metadata))
+        if not isinstance(metadata, dict):  # pragma: no cover - defensive
+            raise ValueError("bucket metadata must be a mapping")
+        domain_value = metadata.get("domain")
+        if isinstance(domain_value, str):
+            metadata["domain"] = [domain_value] if domain_value.strip() else []
+        elif domain_value is None:
+            metadata["domain"] = []
+        elif not isinstance(domain_value, list):
+            metadata["domain"] = (
+                list(domain_value)
+                if isinstance(domain_value, tuple)
+                else [str(domain_value)]
+            )
+
+        # Historical buckets may store values such as ``V0.9`` or
+        # ``[我的视角:V0.3]`` instead of JSON numbers.
+        for field, default in (
+            ("valence", 0.5),
+            ("arousal", 0.3),
+            ("model_valence", 0.5),
+            ("weight", 0.5),
+        ):
+            if field in metadata:
+                metadata[field] = self._sanitize_float_field(
+                    metadata[field], default
+                )
+
+        # YAML is an external input boundary (manual files, migration ZIP,
+        # GitHub restore). Never let arbitrary scalar strings reach JSON
+        # consumers that treat these fields as numbers.
+        metadata["importance"] = _clamp_importance(
+            metadata.get("importance", 5), source
+        )
+        try:
+            activation_count = float(metadata.get("activation_count", 0) or 0)
+            if not math.isfinite(activation_count) or activation_count < 0:
+                raise ValueError("invalid activation_count")
+            metadata["activation_count"] = (
+                int(activation_count)
+                if activation_count.is_integer()
+                else round(activation_count, 3)
+            )
+        except (TypeError, ValueError, OverflowError):
+            metadata["activation_count"] = 0
+
+        # Defense in depth: future scalar branches must not accidentally
+        # reintroduce NaN/bytes/set values to web JSON consumers.
+        json.dumps(metadata, ensure_ascii=False, allow_nan=False)
+        return metadata
+
     def _load_bucket(self, file_path: str) -> Optional[dict]:
         """
         Parse a Markdown file and return structured bucket data.
@@ -4194,45 +4519,10 @@ class BucketManager:
         try:
             raw = Path(file_path).read_text(encoding="utf-8")
             post = frontmatter.loads(raw)
-            # Normalize the metadata object as one graph so aliases shared by
-            # different top-level keys cannot reset the node/depth budgets.
-            metadata = self._normalize_metadata_value(dict(post.metadata))
-            domain_value = metadata.get("domain")
-            if isinstance(domain_value, str):
-                metadata["domain"] = [domain_value] if domain_value.strip() else []
-            elif domain_value is None:
-                metadata["domain"] = []
-            elif not isinstance(domain_value, list):
-                metadata["domain"] = list(domain_value) if isinstance(domain_value, tuple) else [str(domain_value)]
-            # 兼容老桶可能存储了 'V0.9'、'[我的视角:V0.3]' 等字符串格式
-            for field, default in (
-                ("valence", 0.5),
-                ("arousal", 0.3),
-                ("model_valence", 0.5),
-                ("weight", 0.5),
-            ):
-                if field in metadata:
-                    metadata[field] = self._sanitize_float_field(metadata[field], default)
-            # YAML is an external input boundary (manual files, migration ZIP,
-            # GitHub restore).  Never let arbitrary scalar strings reach JSON
-            # consumers that treat these fields as numbers.
-            metadata["importance"] = _clamp_importance(
-                metadata.get("importance", 5), f"load:{Path(file_path).name}"
+            metadata = self._normalize_loaded_metadata(
+                dict(post.metadata),
+                source=f"load:{Path(file_path).name}",
             )
-            try:
-                activation_count = float(metadata.get("activation_count", 0) or 0)
-                if not math.isfinite(activation_count) or activation_count < 0:
-                    raise ValueError("invalid activation_count")
-                metadata["activation_count"] = (
-                    int(activation_count)
-                    if activation_count.is_integer()
-                    else round(activation_count, 3)
-                )
-            except (TypeError, ValueError, OverflowError):
-                metadata["activation_count"] = 0
-            # Defense in depth: future scalar branches must not accidentally
-            # reintroduce NaN/bytes/set values to web JSON consumers.
-            json.dumps(metadata, ensure_ascii=False, allow_nan=False)
             return {
                 "id": post.get("id", Path(file_path).stem),
                 "metadata": metadata,

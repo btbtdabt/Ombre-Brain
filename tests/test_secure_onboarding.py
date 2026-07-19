@@ -348,7 +348,8 @@ async def test_onboarding_apply_is_immediately_visible_as_saved_but_not_effectiv
 
 
 def test_onboarding_page_has_file_contract_and_safe_json_parser() -> None:
-    text = Path("frontend/onboarding.html").read_text(encoding="utf-8")
+    root = Path(__file__).resolve().parents[1]
+    text = (root / "frontend" / "onboarding.html").read_text(encoding="utf-8")
 
     assert "onboarding.html — Ombre Brain 首次部署向导" in text
     assert "本机模式" not in text  # 模式文案来自后端单一目录，页面不维护第二份。
@@ -360,8 +361,9 @@ def test_onboarding_page_has_file_contract_and_safe_json_parser() -> None:
     assert "已保存鉴权模式" in text
     assert "当前生效鉴权模式" in text
 
-    dashboard = Path("frontend/dashboard.html").read_text(encoding="utf-8")
-    assert 'href="/onboarding"' in dashboard
+    dashboard = (root / "frontend" / "dashboard.html").read_text(encoding="utf-8")
+    assert 'href="./onboarding"' in dashboard
+    assert 'href="/onboarding"' not in dashboard
     assert "打开安全部署向导" in dashboard
     assert "saveMcpAddress()" in dashboard
     assert "deployment: {public_url: publicUrl}" in dashboard

@@ -69,6 +69,8 @@ from ._helpers import (
     int_between,
     log_warning as _warning,
     runtime_config,
+    score_bucket,
+    split_csv,
 )
 
 __all__ = ["normalize_direct_render_mode", "normalize_retrieval_mode"]
@@ -852,6 +854,115 @@ def _word_map_hint_enabled() -> bool:
     )
 
 
+def _query_resurface_enabled() -> bool:
+    return bool(_config_section("recall").get("query_resurface_enabled", False))
+
+
+def _resurface_candidates(
+    *,
+    all_buckets: list[dict],
+    matched_bucket_ids: set[str],
+    domain_filter: list[str],
+) -> list[dict]:
+    candidates: list[dict] = []
+    seen: set[str] = set()
+    for bucket in all_buckets:
+        if not _recallable_bucket(bucket):
+            continue
+        bucket_id = str(bucket.get("id") or "")
+        if not bucket_id or bucket_id in matched_bucket_ids or bucket_id in seen:
+            continue
+        metadata = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        bucket_domains = set(split_csv(metadata.get("domain")))
+        if domain_filter and not bucket_domains.intersection(domain_filter):
+            continue
+        score = _safe_float(bucket.get("score"), None)
+        if score is None:
+            score = score_bucket(bucket)
+        if score is None or score >= 2.0:
+            continue
+        candidates.append(bucket)
+        seen.add(bucket_id)
+    return candidates
+
+
+async def _render_resurface_block(
+    *,
+    candidates: list[dict],
+    max_results: int,
+    max_tokens: int,
+) -> tuple[str, int]:
+    if max_tokens <= 0 or max_results <= 0 or not candidates:
+        return "", 0
+    rendered: list[str] = []
+    token_used = 0
+    for bucket in candidates[:max_results]:
+        bucket_id = str(bucket.get("id") or "")
+        if not bucket_id:
+            continue
+        summary = await _dehydrate_summary(bucket)
+        title = str((bucket.get("metadata") or {}).get("name") or bucket_id).strip()
+        block = _trim_tokens(
+            "\n".join(
+                part
+                for part in (
+                    f"[surface_type: resurface] [bucket_id:{bucket_id}]",
+                    title,
+                    summary,
+                )
+                if part
+            ),
+            max_tokens - token_used,
+        )
+        if not block:
+            break
+        tokens = count_tokens_approx(block)
+        if token_used + tokens > max_tokens:
+            break
+        rendered.append(block)
+        token_used += tokens
+    if not rendered:
+        return "", 0
+    return "=== 回响浮现 ===\n" + "\n---\n".join(rendered), token_used
+
+
+async def _maybe_resurface(
+    *,
+    all_buckets: list[dict],
+    matched_bucket_ids: set[str],
+    domain_filter: list[str],
+    direct_count: int,
+    max_results: int,
+    max_tokens: int,
+    related_included: bool,
+) -> tuple[str, int]:
+    if (
+        not _query_resurface_enabled()
+        or related_included
+        or max_tokens <= 0
+        or direct_count >= min(3, max_results)
+        or random.random() >= 0.4
+    ):
+        return "", 0
+    candidates = _resurface_candidates(
+        all_buckets=all_buckets,
+        matched_bucket_ids=matched_bucket_ids,
+        domain_filter=domain_filter,
+    )
+    if not candidates:
+        return "", 0
+    remaining_slots = max_results - direct_count
+    sampled = random.sample(
+        candidates,
+        min(random.randint(1, 3), len(candidates), remaining_slots),
+    )
+    return await _render_resurface_block(
+        candidates=sampled,
+        max_results=remaining_slots,
+        max_tokens=max_tokens,
+    )
+
+
 async def _collect_search_materials(
     *,
     query: str,
@@ -1148,6 +1259,8 @@ async def _bucket_search_mode(
     *,
     query: str,
     matches: list[dict],
+    all_buckets: list[dict],
+    domain_filter: list[str],
     seed_diagnostics: dict[str, dict],
     thresholds: dict[str, Any],
     lexical_terms: list[str],
@@ -1240,11 +1353,23 @@ async def _bucket_search_mode(
         is_session_start=is_session_start,
         auto_surface=auto_surface,
     )
+    resurface_entry, _ = await _maybe_resurface(
+        all_buckets=all_buckets,
+        matched_bucket_ids={str(bucket.get("id") or "") for bucket in matches},
+        domain_filter=domain_filter,
+        direct_count=len(direct_results),
+        max_results=max_results,
+        max_tokens=max(0, max_tokens - token_used),
+        related_included=False,
+    )
     response_parts = []
     sections = []
     if direct_results:
         response_parts.append("=== 直接命中记忆 ===\n" + "\n---\n".join(direct_results))
         sections.append("direct")
+    if resurface_entry:
+        response_parts.append(resurface_entry)
+        sections.append("resurface")
     if debug and suppressed:
         response_parts.append(_suppressed_debug_block(suppressed, bucket_mode=True))
     if dream:
@@ -1299,6 +1424,7 @@ async def _graph_search_mode(
     search_query: str,
     matches: list[dict],
     all_buckets: list[dict],
+    domain_filter: list[str],
     seed_diagnostics: dict[str, dict],
     thresholds: dict[str, Any],
     lexical_terms: list[str],
@@ -1320,6 +1446,8 @@ async def _graph_search_mode(
         return await _bucket_search_mode(
             query=query,
             matches=matches,
+            all_buckets=all_buckets,
+            domain_filter=domain_filter,
             seed_diagnostics=seed_diagnostics,
             thresholds=thresholds,
             lexical_terms=lexical_terms,
@@ -1361,6 +1489,8 @@ async def _graph_search_mode(
         return await _bucket_search_mode(
             query=query,
             matches=matches,
+            all_buckets=all_buckets,
+            domain_filter=domain_filter,
             seed_diagnostics=seed_diagnostics,
             thresholds=thresholds,
             lexical_terms=lexical_terms,
@@ -1501,6 +1631,20 @@ async def _graph_search_mode(
         is_session_start=is_session_start,
         auto_surface=auto_surface,
     )
+    resurface_entry, _ = await _maybe_resurface(
+        all_buckets=all_buckets,
+        matched_bucket_ids={
+            str(bucket.get("id") or "") for bucket in matches
+        } | displayed_bucket_ids,
+        domain_filter=domain_filter,
+        direct_count=len(displayed_bucket_ids),
+        max_results=max_results,
+        max_tokens=max(
+            0,
+            max_tokens - token_used - count_tokens_approx(related_entry),
+        ),
+        related_included=bool(related_entry),
+    )
     response_parts = []
     sections = []
     if direct_results:
@@ -1509,6 +1653,9 @@ async def _graph_search_mode(
     if related_entry:
         response_parts.append(related_entry)
         sections.append("related")
+    if resurface_entry:
+        response_parts.append(resurface_entry)
+        sections.append("resurface")
     if debug and suppressed:
         response_parts.append(_suppressed_debug_block(suppressed))
     if dream:
@@ -1588,6 +1735,8 @@ async def search_breath(
         return await _bucket_search_mode(
             query=query,
             matches=matches,
+            all_buckets=all_buckets,
+            domain_filter=[item.strip() for item in str(domain or "").split(",") if item.strip()],
             seed_diagnostics=seed_diagnostics,
             thresholds=thresholds,
             lexical_terms=lexical_terms,
@@ -1606,6 +1755,7 @@ async def search_breath(
         search_query=search_query,
         matches=matches,
         all_buckets=all_buckets,
+        domain_filter=[item.strip() for item in str(domain or "").split(",") if item.strip()],
         seed_diagnostics=seed_diagnostics,
         thresholds=thresholds,
         lexical_terms=lexical_terms,

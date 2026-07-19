@@ -4,11 +4,13 @@ import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urljoin
 
 import pytest
 
 import web.auth as auth_routes
 import web.buckets as bucket_routes
+import web.config_api as config_routes
 from tests.compat_web_current.conftest import RecordingMCP, request_for, response_json
 
 
@@ -19,6 +21,7 @@ ROOT_DASHBOARD_HTML = (ROOT / "frontend" / "dashboard.html").read_text(
 MEMORY_DASHBOARD_HTML = (ROOT / "frontend" / "memory-dashboard.html").read_text(
     encoding="utf-8"
 )
+CORE_ROOT = ROOT / "frontend" / "dashboard-assets" / "core"
 
 
 def _function_body(html: str, name: str) -> str:
@@ -38,77 +41,95 @@ def _catch_body(function_body: str) -> str:
 
 
 def test_memory_dashboard_resolves_api_and_assets_from_the_app_mount() -> None:
-    assert "(?:memory-dashboard|dashboard)" in MEMORY_DASHBOARD_HTML
-    assert "const BASE = location.origin + PATH_PREFIX;" in MEMORY_DASHBOARD_HTML
-    assert "script.src = BASE + path;" in MEMORY_DASHBOARD_HTML
+    path_source = (CORE_ROOT / "path.js").read_text(encoding="utf-8")
+    assert "memory-dashboard" in path_source
+    assert "dashboard" in path_source
+    assert "basePath" in path_source
+    assert "asset" in path_source
+    assert 'data-dashboard-shell="unified-dashboard"' in MEMORY_DASHBOARD_HTML
 
 
-def test_dashboards_link_to_each_other() -> None:
-    assert 'href="./memory-dashboard"' in ROOT_DASHBOARD_HTML
-    assert 'href="./"' in MEMORY_DASHBOARD_HTML
+def test_unified_shell_uses_workspaces_instead_of_cross_dashboard_links() -> None:
+    assert 'data-dashboard-shell="unified-dashboard"' in ROOT_DASHBOARD_HTML
+    assert 'data-workspace="memory"' in ROOT_DASHBOARD_HTML
+    assert 'data-workspace="system"' in ROOT_DASHBOARD_HTML
+    assert 'data-unified-jump="memory-reminders"' in ROOT_DASHBOARD_HTML
+    assert "主 Dashboard" not in MEMORY_DASHBOARD_HTML
 
 
-@pytest.mark.parametrize(
-    ("html", "label"),
-    [
-        pytest.param(ROOT_DASHBOARD_HTML, "root", id="root"),
-        pytest.param(MEMORY_DASHBOARD_HTML, "memory", id="memory"),
-    ],
-)
-def test_each_dashboard_bucket_loader_has_timeout_and_retry_ui(
-    html: str, label: str
-) -> None:
-    body = _function_body(html, "loadBuckets")
-    assert "AbortController" in body, f"{label} dashboard loadBuckets needs a timeout"
-    assert 'id="bucket-load-status"' in html
-    assert 'id="bucket-load-retry"' in html
+def test_canonical_bucket_loader_has_timeout_and_retry_ui() -> None:
+    body = _function_body(ROOT_DASHBOARD_HTML, "loadBuckets")
+    assert "AbortController" in body
+    assert 'id="bucket-load-status"' in ROOT_DASHBOARD_HTML
+    assert 'id="bucket-load-retry"' in ROOT_DASHBOARD_HTML
+    assert "loadBuckets" not in MEMORY_DASHBOARD_HTML
 
 
-@pytest.mark.parametrize(
-    ("html", "label"),
-    [
-        pytest.param(ROOT_DASHBOARD_HTML, "root", id="root"),
-        pytest.param(MEMORY_DASHBOARD_HTML, "memory", id="memory"),
-    ],
-)
-def test_each_dashboard_auth_check_is_bounded(html: str, label: str) -> None:
-    body = _function_body(html, "checkAuth")
-    assert "AbortController" in body, f"{label} dashboard auth check needs a timeout"
+def test_canonical_bucket_loader_uses_bounded_light_pages_and_discloses_truncation() -> None:
+    body = _function_body(ROOT_DASHBOARD_HTML, "loadBuckets")
+    assert "'/api/buckets/light'" in body
+    assert "limit=" in body
+    assert "offset=" in body
+    assert "requestedMode === 'archive' ? 'true' : 'false'" in body
+    assert re.search(r"/api/buckets(?!/light)", body) is None
+    assert "bucketServerTotal" in body
+    assert "renderBucketLoadStatus" in body
+    assert 'id="bucket-load-more"' in ROOT_DASHBOARD_HTML
+    assert "loadMoreBuckets" in ROOT_DASHBOARD_HTML
+    assert "currentFilter === 'archived' ? 'archive' : 'active'" in ROOT_DASHBOARD_HTML
+    assert "bucketPaginationByMode" in ROOT_DASHBOARD_HTML
+
+
+def test_canonical_auth_check_is_bounded() -> None:
+    body = _function_body(ROOT_DASHBOARD_HTML, "checkAuth")
+    assert "AbortController" in body
     assert "status === 502" in body
     assert "status === 503" in body
     assert "status === 504" in body
     assert "controller.signal.aborted" in body
+    assert "checkAuth" not in MEMORY_DASHBOARD_HTML
 
 
-def test_memory_dashboard_bounds_taxonomy_and_validates_bucket_payload() -> None:
-    body = _function_body(MEMORY_DASHBOARD_HTML, "loadBuckets")
-    taxonomy_body = _function_body(MEMORY_DASHBOARD_HTML, "loadDomainTaxonomy")
-    auth_fetch_body = _function_body(MEMORY_DASHBOARD_HTML, "authFetch")
-    assert "AbortController" in taxonomy_body
-    assert "loadDomainTaxonomy();" in body
-    assert "await loadDomainTaxonomy" not in body
-    assert "!res.ok || !Array.isArray(data)" in body
-    assert "throw e;" in auth_fetch_body
-    assert "AbortError') return null" not in auth_fetch_body
+def test_thin_memory_entry_has_no_duplicate_shared_application() -> None:
+    assert "function authFetch" not in MEMORY_DASHBOARD_HTML
+    assert "function loadBuckets" not in MEMORY_DASHBOARD_HTML
+    assert 'data-tab="list"' not in MEMORY_DASHBOARD_HTML
+    assert 'data-tab="breath"' not in MEMORY_DASHBOARD_HTML
+    assert 'data-tab="network"' not in MEMORY_DASHBOARD_HTML
+    assert 'data-tab="import"' not in MEMORY_DASHBOARD_HTML
 
 
-@pytest.mark.parametrize(
-    "html",
-    [ROOT_DASHBOARD_HTML, MEMORY_DASHBOARD_HTML],
-    ids=["root", "memory"],
-)
-def test_dashboards_only_retry_idempotent_requests(html: str) -> None:
-    auth_fetch_body = _function_body(html, "authFetch")
+def test_unified_api_only_retries_idempotent_requests() -> None:
+    auth_fetch_body = _function_body(ROOT_DASHBOARD_HTML, "authFetch")
     assert "retryableMethod" in auth_fetch_body
     assert "method === 'GET' || method === 'HEAD'" in auth_fetch_body
+    api_source = (CORE_ROOT / "api.js").read_text(encoding="utf-8")
+    assert "GET" in api_source
+    assert "HEAD" in api_source
+    assert "retry" in api_source.lower()
 
 
-def test_successful_login_starts_bucket_loading() -> None:
+def test_successful_login_reloads_the_authenticated_active_route() -> None:
     root_login = _function_body(ROOT_DASHBOARD_HTML, "doLogin")
-    memory_login = _function_body(MEMORY_DASHBOARD_HTML, "doLogin")
-    assert "loadBuckets();" in root_login
-    assert "loadStatusBanner();" in root_login
-    assert "if (await checkAuth()) loadBuckets();" in memory_login
+    assert "completeDashboardAuthentication" in root_login
+    assert "doLogin" not in MEMORY_DASHBOARD_HTML
+
+
+@pytest.mark.asyncio
+async def test_dashboard_compat_redirect_is_mount_relative() -> None:
+    mcp = RecordingMCP()
+    config_routes.register(mcp)
+    query = "workspace=models-data&panel=models-surfacing&q=Amy%20Aki&q=two"
+    request = request_for("GET", "/ombre/dashboard", query_string=query)
+    request.scope["root_path"] = "/ombre"
+
+    response = await mcp.routes[("GET", "/dashboard")](request)
+
+    assert response.status_code == 302
+    assert response.headers["location"] == f"memory-dashboard?{query}"
+    assert urljoin(str(request.url), response.headers["location"]) == (
+        f"http://testserver/ombre/memory-dashboard?{query}"
+    )
 
 
 def test_root_dashboard_auth_status_errors_fail_closed() -> None:

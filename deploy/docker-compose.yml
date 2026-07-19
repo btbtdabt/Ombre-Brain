@@ -32,6 +32,10 @@ services:
     environment:
       - OMBRE_TRANSPORT=streamable-http
       - OMBRE_CONFIG_PATH=/app/buckets/config.yaml
+      # Dashboard-managed provider keys live beside config in the persistent
+      # vault bind and are loaded literally before runtime config initialization.
+      - OMBRE_ENV_PATH=/app/buckets/.ombre-managed.env
+      - OMBRE_MANAGED_ENV_OVERRIDE=1
       - OMBRE_EMBED_BACKEND=${OMBRE_EMBED_BACKEND:-api}
       - OMBRE_COMPRESS_API_KEY=${OMBRE_COMPRESS_API_KEY}
       - OMBRE_COMPRESS_BASE_URL=${OMBRE_COMPRESS_BASE_URL:-}

@@ -2,6 +2,36 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`p0luz/ombre-brain:<VERSION>`）。
 
+## 2.8.0
+
+### 新增 / Added
+
+- 将 P0luz Dashboard 与 current / Ying 功能整合为同一个应用，统一由 `/` 提供，并按 Shared、Memory、Models & Data、System 四个工作区组织；`/memory-dashboard` 与 `/dashboard` 保留为兼容入口，不再维护第二套页面。
+- 在统一外壳中补齐提醒、自省、梦境、暗房、人物画像、长期画像、记忆洞察、Gateway 注入、模型配置、完整记忆库、兼容导出与迁移等现有功能，同时保留 P0luz 的系统管理能力。
+- Embeddings 编辑器现在实际挂载并唯一归属于 Models & Data；System 只保留跳转入口和只读诊断，不再提供第二套向量配置保存表单。
+
+### 修复 / Fixed
+
+- 去除重复导航、重复配置编辑器和双 Dashboard 状态漂移；桶列表、身份资料与功能面板现在共享同一套路径、请求、缓存和路由核心。
+- 桶轻量列表改为服务端有界分页：后端按全局顺序只保留当前 `offset + limit` 窗口，并只为所选页读取预览；`type` 使用精确匹配，`tags` 使用全部标签精确包含过滤，非法或过大的分页/过滤参数会在边界拒绝。
+- 修复并发刷新、过期详情回写、反思历史分页漂移以及延迟写操作可能作用到错误对象的问题。
+
+### 安全 / Security
+
+- Dashboard 配置写入增加完整字段验证、秘密遮罩和托管 `OMBRE_ENV_PATH` 持久化事务：受支持部署把 Dashboard 管理值放在持久目录中的独立 `.ombre-managed.env`，与 Compose / shell 读取的操作员 `.env` 隔离，并共用锁与原子更新；运行时重建、YAML 或环境提交任一步失败都会回滚已暂存状态，秘密不会提前发布，含引号与反斜杠的 Key 也会安全序列化。
+- Gateway 上游只允许新建 `OMBRE_GATEWAY_*_API_KEY` 专用密钥引用；旧引用与隐藏直写密钥仅可在目标地址完全不变时保留，避免把 OAuth、Dashboard、基础设施或其他进程秘密转发到可编辑的上游地址。
+- 收紧静态资源路径、写操作重放和动态渲染边界，避免路径穿越、重复提交与不受信内容注入。
+
+### 验证 / Verification
+
+- 本地核验完成：`pytest` 2531 passed / 75 skipped / 0 failed，Ruff clean，变更的 production Pyright 0，全树 Pyright 491 errors / 21 warnings（较记录的 530 / 21 已下降且 warning 未增加），Node syntax clean，`docker build .` successful，独立 code、Python、TypeScript、安全和 root reviews 的 findings 已全部清零。
+- 这些结果对应最终落地的单一 canonical Dashboard、bounded/nonblocking Buckets、transactional config/Gateway、verified backup tickets、Ying Reflection/profile/insights parity，以及 Amy identity fix。
+- staging 与 production 仍然 pending；此处不记录任何尚未实际完成的部署结果。
+
+### 版本 / Version
+
+- 根目录 `VERSION` 与热更新优先读取的 `src/VERSION` 同步更新为 `2.8.0`。
+
 ## 2.7.7
 
 ### 修复 / Fixed

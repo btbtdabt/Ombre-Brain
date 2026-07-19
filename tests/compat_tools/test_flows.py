@@ -73,6 +73,7 @@ async def test_bucket_comment_trace_and_light_read_flow(current_runtime):
     light = await current.list_buckets_light()
     item = next(item for item in light["buckets"] if item["id"] == bucket_id)
     assert "content" not in item
+    assert "content_preview" not in item
     assert item["name"] == "茉莉花茶"
 
 

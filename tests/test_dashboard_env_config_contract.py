@@ -1,8 +1,11 @@
 from pathlib import Path
 
+from web import config_api
+
 
 ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD = ROOT / "frontend" / "dashboard.html"
+MODELS_DATA = ROOT / "frontend" / "dashboard-assets" / "models-data.js"
 
 
 def _quick_save_source() -> str:
@@ -69,35 +72,60 @@ def test_main_env_save_flow_is_left_intact():
     assert "已保存：" in source
 
 
-def test_embedding_quick_save_submits_one_complete_provider_tuple():
+def test_models_data_mounts_one_canonical_embedding_editor():
     html = DASHBOARD.read_text(encoding="utf-8")
-    start = html.index("async function saveEmbedKey()")
-    end = html.index("async function saveConfig(", start)
-    source = html[start:end]
+    source = MODELS_DATA.read_text(encoding="utf-8")
 
-    assert "'OMBRE_EMBED_BASE_URL': base" in source
-    assert "'OMBRE_EMBED_MODEL': model" in source
-    assert "'OMBRE_EMBED_FORMAT': format" in source
-    assert "if (key) { updates['OMBRE_EMBED_API_KEY'] = key" in source
-    assert source.count("await _saveEnvKeys(") == 1
+    assert html.count('data-canonical-editor-resource="embedding-settings"') == 1
+    assert html.count('data-canonical-editor-panel="models-embeddings"') == 1
+    assert 'data-canonical-editor-mounted="false" hidden' in html
+    assert (
+        "'[data-canonical-editor-resource=\"embedding-settings\"]"
+        "[data-canonical-editor-panel=\"models-embeddings\"]'"
+    ) in source
+    assert "host.appendChild(editor);" in source
+    assert source.count("id: 'models-embeddings'") == 1
+    assert "mount: mountEmbeddings" in source
+    assert "activate: activateEmbeddings" in source
 
 
-def test_embedding_migration_submits_current_provider_tuple():
+def test_models_data_embedding_contract_keeps_provider_tuple_and_secret_write_only():
+    source = MODELS_DATA.read_text(encoding="utf-8")
+
+    for population_contract in (
+        "setValue('cfg-emb-enabled', embedding.enabled ? 'true' : 'false')",
+        "setValue('cfg-emb-model', embedding.model || '')",
+        "setValue('cfg-emb-base-url', embedding.base_url || '')",
+        "setValue('cfg-emb-format', embedding.api_format || 'openai_compat')",
+        "setValue('cfg-emb-backend', embedding.backend || 'api')",
+    ):
+        assert population_contract in source
+
+    assert "return getJson('/api/config'" in source
+    assert "key.value = '';" in source
+    assert "embedding.api_key_masked" in source
+    assert config_api._LEGACY_SECTION_FIELDS["embedding"] >= {
+        "enabled",
+        "model",
+        "base_url",
+        "api_key",
+        "api_format",
+        "backend",
+    }
+    assert (
+        config_api._CURRENT_SECRET_ENV_FIELDS[("embedding", "api_key")]
+        == "OMBRE_EMBED_API_KEY"
+    )
+    assert "api_key" in config_api._GATEWAY_ENV_ONLY_FIELDS["embedding"]
+
+
+def test_models_data_embedding_migration_uses_the_canonical_provider_controls():
     html = DASHBOARD.read_text(encoding="utf-8")
-    start = html.index("var migrationPayload = {")
-    end = html.index("fetch(BASE + '/api/embedding/migrate'", start)
-    source = html[start:end]
 
-    assert "target_backend: targetBackend" in source
-    assert "cfg-emb-format" in source
-    assert "cfg-emb-base-url" in source
-    assert "cfg-emb-model" in source
-
-
-def test_main_config_save_also_keeps_embedding_base_url_with_model():
-    html = DASHBOARD.read_text(encoding="utf-8")
-    start = html.index("async function saveConfig(")
-    end = html.index("checkAuth().then", start)
-    source = html[start:end]
-
-    assert "base_url: document.getElementById('cfg-emb-base-url').value" in source
+    assert 'id="emb-migrate-btn"' in html
+    assert "target_backend: targetBackend" in html
+    assert "api_format: (document.getElementById('cfg-emb-format')" in html
+    assert "base_url: (document.getElementById('cfg-emb-base-url')" in html
+    assert "model: (document.getElementById('cfg-emb-model')" in html
+    assert "authFetch(BASE + '/api/embedding/migrate'" in html
+    assert "fetch(BASE + '/api/embedding/migrate'" not in html

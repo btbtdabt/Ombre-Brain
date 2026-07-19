@@ -118,6 +118,42 @@ def effective_config_report(
         if not isinstance(upstream, dict):
             continue
         key_env = str(upstream.get("api_key_env") or "").strip()
+        raw_key_envs = upstream.get("api_key_envs", key_env)
+        if isinstance(raw_key_envs, str):
+            key_envs = [item.strip() for item in raw_key_envs.split(",") if item.strip()]
+        elif isinstance(raw_key_envs, list):
+            key_envs = [
+                str(item or "").strip()
+                for item in raw_key_envs
+                if str(item or "").strip()
+            ]
+        else:
+            key_envs = []
+        raw_direct_keys = upstream.get("api_keys", [])
+        direct_key_count = 0
+        if str(upstream.get("api_key") or "").strip():
+            direct_key_count += 1
+        if isinstance(raw_direct_keys, str):
+            direct_key_count += len(
+                [item for item in raw_direct_keys.split(",") if item.strip()]
+            )
+        elif isinstance(raw_direct_keys, list):
+            direct_key_count += len(
+                [
+                    item
+                    for item in raw_direct_keys
+                    if (
+                        isinstance(item, dict)
+                        and str(item.get("api_key") or item.get("key") or "").strip()
+                    )
+                    or (not isinstance(item, dict) and str(item or "").strip())
+                ]
+            )
+        env_names = list(dict.fromkeys(key_envs))
+        env_key_count = sum(
+            bool(str(env.get(env_name) or "").strip()) for env_name in env_names
+        )
+        key_count = env_key_count + direct_key_count
         upstreams.append(
             {
                 "name": str(upstream.get("name") or ""),
@@ -125,7 +161,11 @@ def effective_config_report(
                 "default_model": str(upstream.get("default_model") or ""),
                 "models": list(upstream.get("models") or []),
                 "api_key_env": key_env,
-                "api_key_set": bool(key_env and str(env.get(key_env) or "").strip()),
+                "api_key_envs": key_envs,
+                "api_key_set": key_count > 0,
+                "has_direct_api_key": direct_key_count > 0,
+                "direct_api_key_count": direct_key_count,
+                "key_count": key_count,
             }
         )
 

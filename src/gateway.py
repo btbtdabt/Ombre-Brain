@@ -13,7 +13,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from inspect import isawaitable
 from typing import Any, Awaitable, Callable, Literal, Protocol, overload
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -511,6 +511,7 @@ class GatewayService:
         http_client: httpx.AsyncClient | None = None,
     ):
         self.config = config
+        self._admin_config_lock = asyncio.Lock()
         self.debug_trace = DebugTraceLogger(config)
         self.identity = identity_names(config)
         self.gateway_cfg = config.get("gateway", {})
@@ -1184,6 +1185,8 @@ class GatewayService:
                     "prompt_cache_retention": upstream.get("prompt_cache_retention", ""),
                     "anthropic_version": upstream.get("anthropic_version", ""),
                     "anthropic_beta": upstream.get("anthropic_beta", ""),
+                    "gemini_base_url": upstream.get("gemini_base_url", ""),
+                    "gemini_auth": upstream.get("gemini_auth", ""),
                     "models": self._safe_upstream_models_payload(upstream),
                 }
             )
@@ -1245,6 +1248,28 @@ class GatewayService:
                 models.append(public_model)
         return models
 
+    def _sanitize_gateway_http_url(self, raw_value: Any, field: str) -> str:
+        value = str(raw_value or "").strip().rstrip("/")
+        if not value:
+            return ""
+        if len(value) > 2048 or any(ord(char) < 32 for char in value):
+            raise ValueError(f"{field} must be a valid http(s) URL")
+        try:
+            parsed = urlsplit(value)
+            _ = parsed.port
+        except ValueError as exc:
+            raise ValueError(f"{field} must be a valid http(s) URL") from exc
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(f"{field} must be a valid http(s) URL")
+        return value
+
     def _sanitize_gateway_upstreams_config(self, raw_upstreams: Any) -> list[dict[str, Any]]:
         if not isinstance(raw_upstreams, list):
             raise ValueError("gateway.upstreams must be a list")
@@ -1267,8 +1292,31 @@ class GatewayService:
                 "protocol": self._normalize_upstream_protocol(
                     raw.get("protocol") or raw.get("api_format") or raw.get("type")
                 ),
-                "base_url": str(raw.get("base_url") or "").strip().rstrip("/"),
+                "base_url": self._sanitize_gateway_http_url(
+                    raw.get("base_url"), "gateway.upstreams.base_url"
+                ),
             }
+            gemini_base_url = self._sanitize_gateway_http_url(
+                raw.get("gemini_base_url")
+                or raw.get("native_base_url")
+                or raw.get("gemini_native_base_url"),
+                "gateway.upstreams.gemini_base_url",
+            )
+            if gemini_base_url:
+                sanitized["gemini_base_url"] = gemini_base_url
+            gemini_auth = str(raw.get("gemini_auth") or "").strip().lower()
+            if gemini_auth not in {
+                "",
+                "bearer",
+                "google",
+                "x-goog-api-key",
+                "api-key",
+                "api_key",
+                "both",
+            }:
+                raise ValueError("gateway.upstreams.gemini_auth is invalid")
+            if gemini_auth:
+                sanitized["gemini_auth"] = gemini_auth
             env_names = self._sanitize_env_names(raw.get("api_key_envs", raw.get("api_key_env", [])))
             if env_names:
                 sanitized["api_key_envs"] = env_names
@@ -1793,6 +1841,79 @@ class GatewayService:
             self.dream_engine = DreamEngine(self.config)
         return updated
 
+    def _snapshot_admin_config_state(self) -> dict[str, Any]:
+        dehydrator_state = None
+        try:
+            dehydrator_state = dict(vars(self.dehydrator))
+        except (AttributeError, TypeError):
+            pass
+        mutable_state: dict[str, dict[Any, Any]] = {}
+        for name in ("upstream_key_cooldowns", "_bucket_list_cache"):
+            value = getattr(self, name, None)
+            if isinstance(value, dict):
+                mutable_state[name] = deepcopy(value)
+        env_names = (
+            "OMBRE_RERANKER_ENABLED",
+            "OMBRE_RERANKER_API_KEY",
+            "OMBRE_RERANKER_BASE_URL",
+            "OMBRE_RERANKER_MODEL",
+            "OMBRE_PERSONA_API_KEY",
+            "OMBRE_PERSONA_BASE_URL",
+            "OMBRE_PERSONA_MODEL",
+        )
+        return {
+            "attributes": dict(self.__dict__),
+            "config": deepcopy(self.config),
+            "dehydrator_state": dehydrator_state,
+            "mutable_state": mutable_state,
+            "environment": {name: os.environ.get(name) for name in env_names},
+        }
+
+    def _restore_admin_config_state(self, snapshot: dict[str, Any]) -> None:
+        attributes = snapshot["attributes"]
+        self.__dict__.clear()
+        self.__dict__.update(attributes)
+
+        restored_config = deepcopy(snapshot["config"])
+        self.config.clear()
+        self.config.update(restored_config)
+        self.gateway_cfg = (
+            self.config.get("gateway", {})
+            if isinstance(self.config.get("gateway", {}), dict)
+            else {}
+        )
+        self.self_anchor_cfg = (
+            self.config.get("self_anchor", {})
+            if isinstance(self.config.get("self_anchor", {}), dict)
+            else {}
+        )
+        self.embedding_cfg = (
+            self.config.get("embedding", {})
+            if isinstance(self.config.get("embedding", {}), dict)
+            else {}
+        )
+        self.dream_cfg = (
+            self.config.get("dream", {})
+            if isinstance(self.config.get("dream", {}), dict)
+            else {}
+        )
+
+        dehydrator_state = snapshot.get("dehydrator_state")
+        if isinstance(dehydrator_state, dict):
+            current_state = vars(self.dehydrator)
+            current_state.clear()
+            current_state.update(dehydrator_state)
+        for name, value in snapshot.get("mutable_state", {}).items():
+            target = getattr(self, name, None)
+            if isinstance(target, dict) and isinstance(value, dict):
+                target.clear()
+                target.update(value)
+        for name, value in snapshot.get("environment", {}).items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
     async def handle_config(self, request: Request) -> JSONResponse:
         auth_result = self._authorize(request.headers.get("Authorization", ""))
         if auth_result is not None:
@@ -1842,19 +1963,48 @@ class GatewayService:
         if dream_payload is not None and not isinstance(dream_payload, dict):
             return JSONResponse({"error": "invalid dream config"}, status_code=400)
 
-        updated = []
-        if dehydration_payload is not None:
-            updated.extend(self._apply_dehydration_config(dehydration_payload))
-        if gateway_payload is not None:
-            updated.extend(self._apply_gateway_memory_config(gateway_payload))
-        if diffusion_payload is not None:
-            updated.extend(self._apply_memory_diffusion_config(diffusion_payload))
-        if reranker_payload is not None:
-            updated.extend(self._apply_reranker_config(reranker_payload))
-        if persona_payload is not None:
-            updated.extend(self._apply_persona_config(persona_payload))
-        if dream_payload is not None:
-            updated.extend(self._apply_dream_config(dream_payload))
+        config_lock = getattr(self, "_admin_config_lock", None)
+        if config_lock is None:
+            config_lock = asyncio.Lock()
+            self._admin_config_lock = config_lock
+        async with config_lock:
+            try:
+                snapshot = self._snapshot_admin_config_state()
+            except Exception:
+                return JSONResponse({"error": "config apply failed"}, status_code=500)
+            updated = []
+            try:
+                if dehydration_payload is not None:
+                    updated.extend(self._apply_dehydration_config(dehydration_payload))
+                if gateway_payload is not None:
+                    updated.extend(self._apply_gateway_memory_config(gateway_payload))
+                if diffusion_payload is not None:
+                    updated.extend(self._apply_memory_diffusion_config(diffusion_payload))
+                if reranker_payload is not None:
+                    updated.extend(self._apply_reranker_config(reranker_payload))
+                if persona_payload is not None:
+                    updated.extend(self._apply_persona_config(persona_payload))
+                if dream_payload is not None:
+                    updated.extend(self._apply_dream_config(dream_payload))
+            except Exception as exc:
+                try:
+                    self._restore_admin_config_state(snapshot)
+                except Exception:
+                    return JSONResponse(
+                        {"error": "config apply and rollback failed"},
+                        status_code=500,
+                    )
+                status_code = 400 if isinstance(exc, (TypeError, ValueError)) else 500
+                return JSONResponse(
+                    {
+                        "error": (
+                            "invalid config"
+                            if status_code == 400
+                            else "config apply failed"
+                        )
+                    },
+                    status_code=status_code,
+                )
         return JSONResponse({
             "ok": True,
             "updated": updated,

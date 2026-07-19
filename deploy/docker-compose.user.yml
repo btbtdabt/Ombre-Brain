@@ -36,6 +36,10 @@ services:
       # config 放进数据卷（./buckets），而不是单文件挂载 —— 见文件顶部说明。
       # 首启自动生成，Dashboard 改动持久化到这里，重启不丢。
       - OMBRE_CONFIG_PATH=/app/buckets/config.yaml
+      # Dashboard-managed keys share the persistent vault bind. The runtime
+      # loads this file literally (without shell or ${...} interpolation).
+      - OMBRE_ENV_PATH=/app/buckets/.ombre-managed.env
+      - OMBRE_MANAGED_ENV_OVERRIDE=1
       - OMBRE_COMPRESS_API_KEY=${OMBRE_COMPRESS_API_KEY}
       - OMBRE_COMPRESS_BASE_URL=${OMBRE_COMPRESS_BASE_URL:-}
       - OMBRE_COMPRESS_MODEL=${OMBRE_COMPRESS_MODEL:-}

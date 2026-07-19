@@ -408,8 +408,17 @@ def register(mcp) -> None:
         value = raw.strip()
 
         # Reject characters that would break .env / shell parsing
-        if "\n" in value or "\r" in value or '"' in value or "'" in value:
-            return JSONResponse({"error": "value must not contain quotes or newlines"}, status_code=400)
+        if (
+            "\0" in value
+            or "\n" in value
+            or "\r" in value
+            or '"' in value
+            or "'" in value
+        ):
+            return JSONResponse(
+                {"error": "value must not contain NUL, quotes, or newlines"},
+                status_code=400,
+            )
 
         try:
             sh._write_env_var("OMBRE_HOST_VAULT_DIR", value)

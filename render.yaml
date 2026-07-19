@@ -35,6 +35,13 @@ services:
         value: /opt/render/project/src/buckets
       - key: OMBRE_CONFIG_PATH
         value: /opt/render/project/src/buckets/config.yaml
+      # Keep Dashboard-owned values on the persistent disk. utils.py imports
+      # only its narrow allowlist; deployment auth and service-control values
+      # stay owned by Render.
+      - key: OMBRE_ENV_PATH
+        value: /opt/render/project/src/buckets/.ombre-managed.env
+      - key: OMBRE_MANAGED_ENV_OVERRIDE
+        value: "1"
     disk:
       name: ombre-buckets
       mountPath: /opt/render/project/src/buckets

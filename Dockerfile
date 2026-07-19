@@ -82,6 +82,12 @@ ENV OMBRE_BUCKETS_DIR=/app/buckets
 # 又让 Dashboard 改的 key 落在卷上、重启/重部署不丢。VPS（deploy/docker-compose.yml）显式覆盖回
 # /app/config.yaml 保持原有文件挂载不变。
 ENV OMBRE_CONFIG_PATH=/app/buckets/config.yaml
+# Dashboard-managed settings and provider keys live beside config.yaml on the
+# persistent bucket volume. Keep this separate from the launcher/operator env
+# source: Dashboard saves touch only this file, and utils.py loads only its
+# narrow Dashboard-owned allowlist.
+ENV OMBRE_ENV_PATH=/app/buckets/.ombre-managed.env
+ENV OMBRE_MANAGED_ENV_OVERRIDE=1
 # Embedding 使用 API 后端（Gemini）
 # 必须通过运行时 -e 或 docker-compose environment 传入 OMBRE_EMBED_API_KEY
 ENV OMBRE_EMBED_BACKEND=api

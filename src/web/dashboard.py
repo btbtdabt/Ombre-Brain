@@ -10,7 +10,7 @@ web/dashboard.py — 仪表板页面 + 静态资源 + 健康检查
 ========================================
 """
 
-import os
+from pathlib import Path, PurePosixPath
 
 from starlette.requests import Request
 from starlette.responses import Response
@@ -18,16 +18,65 @@ from starlette.responses import Response
 from . import _shared as sh
 
 
+_DASHBOARD_ASSET_MEDIA_TYPES = {
+    ".css": "text/css",
+    ".js": "application/javascript",
+    ".json": "application/json",
+    ".png": "image/png",
+    ".svg": "image/svg+xml",
+    ".webp": "image/webp",
+    ".woff2": "font/woff2",
+}
+
+
+def _frontend_root() -> Path:
+    """Resolve the packaged frontend root for both runtime and test harnesses."""
+    if sh.repo_root:
+        return (Path(sh.repo_root) / "frontend").resolve()
+    return Path(__file__).resolve().parents[2] / "frontend"
+
+
+def _safe_dashboard_asset(relative_path: str) -> tuple[Path, str] | None:
+    """Resolve a packaged Dashboard asset without allowing path traversal.
+
+    The one-segment P0 route uses this helper directly.  The current-runtime
+    compatibility layer owns the later ``{path:path}`` fallback for nested
+    assets and applies the same resolved-root containment rule.  Keeping the
+    routes separate preserves their established registration order while
+    allowing modules such as ``core/path.js`` to be served safely.
+    """
+    if not relative_path or "\\" in relative_path or "\x00" in relative_path:
+        return None
+
+    relative = PurePosixPath(relative_path)
+    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+        return None
+
+    media_type = _DASHBOARD_ASSET_MEDIA_TYPES.get(relative.suffix.lower())
+    if media_type is None:
+        return None
+
+    root = (_frontend_root() / "dashboard-assets").resolve()
+    target = (root / Path(*relative.parts)).resolve()
+    if not target.is_relative_to(root) or not target.is_file():
+        return None
+    return target, media_type
+
+
 def register(mcp) -> None:
 
     def dashboard_response(filename: str):
         from starlette.responses import HTMLResponse
 
-        dashboard_path = os.path.join(sh.repo_root, "frontend", filename)
+        dashboard_path = _frontend_root() / filename
         try:
-            with open(dashboard_path, "r", encoding="utf-8") as f:
+            with dashboard_path.open("r", encoding="utf-8") as f:
                 html = f.read()
-            for asset in ("/static/icon.svg", "/static/favicon.svg"):
+            for asset in (
+                "./static/icon.svg",
+                "./static/favicon.svg",
+                "./static/manifest.json",
+            ):
                 html = html.replace(asset, f"{asset}?v={sh.version}")
             return HTMLResponse(
                 html,
@@ -53,8 +102,8 @@ def register(mcp) -> None:
 
     @mcp.custom_route("/memory-dashboard", methods=["GET"])
     async def memory_dashboard(request: Request) -> Response:
-        """Serve the current-production memory/Gateway/persona dashboard."""
-        return dashboard_response("memory-dashboard.html")
+        """Serve the canonical shell; pathname selects its Memory boot mode."""
+        return dashboard_response("dashboard.html")
 
     # iter 1.7 §C/§H: serve frontend static assets (icon.svg, favicon.svg, manifest.json)
     # 安全要点：必须白名单过滤文件名，绝不能让 request 直接拼路径，
@@ -71,9 +120,9 @@ def register(mcp) -> None:
         }
         if name not in allowed:
             return JSONResponse({"error": "not found"}, status_code=404)
-        path = os.path.join(sh.repo_root, "frontend", name)
+        path = _frontend_root() / name
         try:
-            with open(path, "rb") as f:
+            with path.open("rb") as f:
                 return _Resp(f.read(), media_type=allowed[name])
         except FileNotFoundError:
             return JSONResponse({"error": "not found"}, status_code=404)
@@ -83,18 +132,15 @@ def register(mcp) -> None:
         from starlette.responses import JSONResponse, Response as _Resp
 
         name = request.path_params.get("name", "")
-        if name != "chat-memory.js":
+        resolved = _safe_dashboard_asset(name)
+        if resolved is None:
             return JSONResponse({"error": "not found"}, status_code=404)
-        path = os.path.join(sh.repo_root, "frontend", "dashboard-assets", name)
-        try:
-            with open(path, "rb") as f:
-                return _Resp(
-                    f.read(),
-                    media_type="application/javascript",
-                    headers={"Cache-Control": "no-cache"},
-                )
-        except FileNotFoundError:
-            return JSONResponse({"error": "not found"}, status_code=404)
+        path, media_type = resolved
+        return _Resp(
+            path.read_bytes(),
+            media_type=media_type,
+            headers={"Cache-Control": "no-cache"},
+        )
 
     # 浏览器打开任意页都会自动请求 /favicon.ico，301 永久重定向到 SVG 版本。
     @mcp.custom_route("/favicon.ico", methods=["GET"])

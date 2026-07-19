@@ -13,6 +13,7 @@
 
 import os
 import pytest
+from memory_metadata import normalize_domain_key
 
 # Skip all tests if no API key
 pytestmark = pytest.mark.skipif(
@@ -76,7 +77,12 @@ class TestLLMQuality:
         # Domain is non-empty list of strings
         assert isinstance(result["domain"], list)
         assert len(result["domain"]) >= 1
-        assert set(expected_domains).intersection(result["domain"])
+        expected_canonical = {
+            normalized
+            for normalized in (normalize_domain_key(item) for item in expected_domains)
+            if normalized
+        }
+        assert expected_canonical.intersection(result["domain"])
         assert all(isinstance(d, str) for d in result["domain"])
 
         # Valence and arousal in range
@@ -98,7 +104,12 @@ class TestLLMQuality:
         domains = set(result["domain"])
         # Should contain something life/pet related
         life_related = {"生活", "宠物", "家庭", "日常", "动物"}
-        assert domains & life_related, f"Expected life-related domain, got {domains}"
+        life_related_canonical = {
+            normalized
+            for normalized in (normalize_domain_key(item) for item in life_related)
+            if normalized
+        }
+        assert domains & life_related_canonical, f"Expected life-related domain, got {domains}"
 
     @pytest.mark.asyncio
     async def test_analyze_empty_content(self, dehydrator):

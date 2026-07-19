@@ -46,6 +46,27 @@ def _can_surface_search(bucket: dict) -> bool:
     return _SURFACE_POLICY.evaluate_bucket(bucket, mode="search").allowed
 
 
+def _query_resurface_enabled() -> bool:
+    config = rt.config if isinstance(getattr(rt, "config", None), dict) else {}
+    recall = config.get("recall", {})
+    return bool(recall.get("query_resurface_enabled", False)) if isinstance(recall, dict) else False
+
+
+def _bucket_matches_resurface_filters(
+    bucket: dict,
+    *,
+    domain_filter: list[str] | None,
+    tag_filter: list[str],
+) -> bool:
+    meta = bucket.get("metadata", {}) if isinstance(bucket, dict) else {}
+    bucket_domains = {
+        str(item).strip() for item in meta.get("domain", []) or [] if str(item).strip()
+    }
+    if domain_filter and not bucket_domains.intersection(domain_filter):
+        return False
+    return bucket_has_tags(meta, tag_filter)
+
+
 async def _semantic_scores(query: str, top_k: int) -> tuple[dict[str, float], str]:
     """Run the vector query once and return scores plus an optional notice."""
     engine = rt.embedding_engine
@@ -167,15 +188,26 @@ async def surface_search(
     if touched_ids:
         asyncio.create_task(rt.bucket_mgr.touch_many(touched_ids, ripple=False))
 
-    # --- 检索结果 < 3 时 40% 概率随机浮现 ---
-    if not budget_blocked and len(matches) < min(3, max_results) and random.random() < 0.4:
+    # --- 检索结果 < 3 时按配置追加低权重旧桶 ---
+    if (
+        not budget_blocked
+        and _query_resurface_enabled()
+        and len(matches) < min(3, max_results)
+        and random.random() < 0.4
+    ):
         try:
             all_buckets = await rt.bucket_mgr.list_all(include_archive=False)
             matched_ids = {b["id"] for b in matches}
             low_weight = [
                 b for b in all_buckets
                 if b["id"] not in matched_ids
+                and _can_surface_search(b)
                 and b["metadata"].get("type") not in ("feel", "plan", "letter")
+                and _bucket_matches_resurface_filters(
+                    b,
+                    domain_filter=domain_filter,
+                    tag_filter=tag_filter,
+                )
                 and rt.decay_engine.calculate_score(b["metadata"]) < 2.0
             ]
             if low_weight:
@@ -188,7 +220,7 @@ async def surface_search(
                 for b in drifted:
                     rendered, entry_tokens = render_stored_bucket(
                         b,
-                        f"[surface_type: random] [bucket_id:{b['id']}]",
+                        f"[surface_type: resurface] [bucket_id:{b['id']}]",
                     )
                     if token_used + entry_tokens > max_tokens:
                         budget_blocked = True

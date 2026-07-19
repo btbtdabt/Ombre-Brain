@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import math
 import re
 from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime
@@ -18,7 +19,7 @@ from runtime_values import (
     valid_memory_id as _valid_memory_id,
 )
 from self_anchor import is_self_anchor_bucket
-from utils import bucket_text_for_embedding, strip_wikilinks
+from utils import bucket_text_for_embedding, parse_iso_datetime, strip_wikilinks
 
 from .. import _runtime as rt
 
@@ -227,10 +228,33 @@ def _metadata_text(value: Any) -> str:
     return str(value)
 
 
-def bucket_light_payload(bucket: dict) -> dict:
+def _metadata_epoch_ms(value: Any) -> int | None:
+    try:
+        return round(parse_iso_datetime(value).timestamp() * 1000)
+    except (OSError, OverflowError, TypeError, ValueError):
+        return None
+
+
+def bucket_light_payload(
+    bucket: dict,
+    *,
+    include_content_preview: bool = False,
+) -> dict:
+    """Serialize a light bucket, keeping MCP callers metadata-only by default."""
     meta = bucket.get("metadata", {}) if isinstance(bucket, dict) else {}
     metadata_view = normalize_memory_metadata(bucket)
-    return {
+    raw_score = bucket.get("score") if isinstance(bucket, dict) else None
+    try:
+        score = float(raw_score) if raw_score is not None else score_bucket(bucket)
+    except (OverflowError, TypeError, ValueError):
+        score = 0.0
+    if not math.isfinite(score):
+        score = 0.0
+    created = _metadata_text(meta.get("created"))
+    last_active = _metadata_text(meta.get("last_active"))
+    provenance = meta.get("provenance")
+    payload = {
+        **metadata_view,
         "id": bucket.get("id", ""),
         "bucket_id": bucket.get("id", ""),
         "name": meta.get("name", bucket.get("id", "")),
@@ -239,20 +263,53 @@ def bucket_light_payload(bucket: dict) -> dict:
         "tags": meta.get("tags", []),
         "facets": meta.get("facets", []),
         "source": meta.get("source", ""),
+        "source_tool": meta.get("source_tool", ""),
+        "grow_batch_id": meta.get("grow_batch_id", ""),
+        "triggered_by": meta.get("triggered_by", ""),
         "importance": meta.get("importance", 5),
         "confidence": meta.get("confidence", 0.5),
-        "created": _metadata_text(meta.get("created")),
+        "valence": meta.get("valence", 0.5),
+        "arousal": meta.get("arousal", 0.3),
+        "model_valence": meta.get("model_valence"),
+        "created": created,
+        "created_epoch_ms": bucket.get("created_epoch_ms")
+        if "created_epoch_ms" in bucket
+        else _metadata_epoch_ms(created),
         "updated_at": _metadata_text(meta.get("updated_at")),
-        "last_active": _metadata_text(meta.get("last_active")),
+        "last_active": last_active,
+        "last_active_epoch_ms": bucket.get("last_active_epoch_ms")
+        if "last_active_epoch_ms" in bucket
+        else _metadata_epoch_ms(last_active),
+        "date": _metadata_text(meta.get("date")),
+        "event_date": _metadata_text(meta.get("event_date")),
         "resolved": bool(meta.get("resolved", False)),
         "digested": bool(meta.get("digested", False)),
         "pinned": bool(meta.get("pinned", False)),
         "protected": bool(meta.get("protected", False)),
         "anchor": bool(meta.get("anchor", False)),
+        "dont_surface": bool(meta.get("dont_surface", False)),
+        "first_of_kind": bool(meta.get("first_of_kind", False)),
+        "activation_count": meta.get("activation_count", 0),
+        "why_remembered": meta.get("why_remembered", ""),
+        "weight": meta.get("weight"),
+        "status": meta.get("status", ""),
+        "profile_kind": meta.get("profile_kind", ""),
+        "subject": meta.get("subject", ""),
+        "predicate": meta.get("predicate", ""),
+        "object": meta.get("object", ""),
+        "provenance": provenance,
+        "erasable_test_data": bool(
+            isinstance(provenance, dict)
+            and provenance.get("kind") == "test"
+            and provenance.get("erasable") is True
+        ),
         "self_anchor": is_self_anchor_bucket(bucket),
+        "score": score,
         "metadata_view": metadata_view,
-        **metadata_view,
     }
+    if include_content_preview:
+        payload["content_preview"] = strip_wikilinks(bucket.get("content", ""))[:200]
+    return payload
 
 
 def bucket_text(bucket: dict) -> str:

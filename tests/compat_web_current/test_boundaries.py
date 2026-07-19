@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import os
+import threading
 from types import SimpleNamespace
 from pathlib import Path
 from typing import Any
@@ -22,6 +25,30 @@ def register_with(**kwargs):
     deps = CurrentWebDependencies(config={}, **kwargs)
     register_current_routes(mcp, deps)
     return mcp.routes
+
+
+async def _consume_file_response(response, *, headers=None, fail_send=False):
+    messages = []
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        if fail_send:
+            raise ConnectionError("client disconnected")
+        messages.append(message)
+
+    await response(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/backup/export",
+            "headers": headers or [],
+        },
+        receive,
+        send,
+    )
+    return messages
 
 
 @pytest.mark.asyncio
@@ -264,6 +291,314 @@ async def test_nested_dashboard_asset_is_served_and_traversal_is_rejected(tmp_pa
     assert response.status_code == 200
     assert Path(response.path) == expected
     assert blocked.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_backup_export_builds_archive_without_blocking_request_loop(tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+    archive_path = tmp_path / "responsive-export.zip"
+
+    class BackupManager:
+        def create_archive(self):
+            archive_path.write_bytes(b"responsive archive")
+            entered.set()
+            release.wait(timeout=1)
+            return str(archive_path), {"file_count": 0}
+
+    routes = register_with(
+        auth_guard=lambda _request: None,
+        backup_manager=BackupManager(),
+    )
+    timer = threading.Timer(0.8, release.set)
+    timer.start()
+    heartbeat = threading.Event()
+    task = asyncio.create_task(
+        routes[("GET", "/api/backup/export")](
+            request_for("GET", "/api/backup/export")
+        )
+    )
+
+    async def pulse_event_loop():
+        await asyncio.sleep(0)
+        heartbeat.set()
+
+    pulse = asyncio.create_task(pulse_event_loop())
+    try:
+        assert await asyncio.to_thread(heartbeat.wait, 0.3)
+        assert await asyncio.to_thread(entered.wait, 0.5)
+        release.set()
+        await pulse
+        response = await asyncio.wait_for(task, timeout=1.5)
+        await _consume_file_response(response)
+    finally:
+        release.set()
+        timer.cancel()
+
+
+@pytest.mark.asyncio
+async def test_backup_export_prepare_observes_errors_and_streams_by_one_time_ticket(
+    tmp_path,
+):
+    archive_path = tmp_path / "prepared-export.zip"
+
+    class BackupManager:
+        def create_archive(self):
+            archive_path.write_bytes(b"prepared archive")
+            return str(archive_path), {"file_count": 1}
+
+    routes = register_with(
+        auth_guard=lambda _request: None,
+        backup_manager=BackupManager(),
+    )
+    prepare = routes[("POST", "/api/backup/export/prepare")]
+    status = routes[("GET", "/api/backup/export/status")]
+    export = routes[("GET", "/api/backup/export")]
+
+    prepared = await prepare(request_for("POST", "/api/backup/export/prepare"))
+    payload = response_json(prepared)
+    busy = response_json(
+        await status(request_for("GET", "/api/backup/export/status"))
+    )
+    download = await export(
+        request_for(
+            "GET",
+            "/api/backup/export",
+            query_string=f"ticket={payload['ticket']}",
+        )
+    )
+
+    assert prepared.status_code == 200
+    assert payload["ok"] is True
+    assert payload["ticket"]
+    assert busy == {"ok": True, "active": True}
+    assert download.status_code == 200
+    await _consume_file_response(download)
+    assert response_json(
+        await status(request_for("GET", "/api/backup/export/status"))
+    ) == {"ok": True, "active": False}
+    reused = await export(
+        request_for(
+            "GET",
+            "/api/backup/export",
+            query_string=f"ticket={payload['ticket']}",
+        )
+    )
+    assert reused.status_code == 410
+
+
+@pytest.mark.asyncio
+async def test_backup_export_prepare_reports_auth_busy_and_archive_failures(tmp_path):
+    called = False
+
+    class NeverManager:
+        def create_archive(self):
+            nonlocal called
+            called = True
+            return str(tmp_path / "never.zip"), {}
+
+    unauthorized_routes = register_with(
+        auth_guard=lambda _request: JSONResponse({"error": "login"}, status_code=401),
+        backup_manager=NeverManager(),
+    )
+    unauthorized = await unauthorized_routes[
+        ("POST", "/api/backup/export/prepare")
+    ](request_for("POST", "/api/backup/export/prepare"))
+    assert unauthorized.status_code == 401
+    assert called is False
+
+    release = threading.Event()
+    entered = threading.Event()
+
+    class BlockingManager:
+        def create_archive(self):
+            path = tmp_path / "blocking.zip"
+            path.write_bytes(b"blocking")
+            entered.set()
+            release.wait(timeout=2)
+            return str(path), {}
+
+    busy_routes = register_with(
+        auth_guard=lambda _request: None,
+        backup_manager=BlockingManager(),
+    )
+    export_task = asyncio.create_task(
+        busy_routes[("GET", "/api/backup/export")](
+            request_for("GET", "/api/backup/export")
+        )
+    )
+    assert await asyncio.to_thread(entered.wait, 1)
+    busy = await busy_routes[("POST", "/api/backup/export/prepare")](
+        request_for("POST", "/api/backup/export/prepare")
+    )
+    assert busy.status_code == 409
+    release.set()
+    await _consume_file_response(await export_task)
+
+    class FailingManager:
+        def create_archive(self):
+            raise OSError("archive creation failed")
+
+    failing_routes = register_with(
+        auth_guard=lambda _request: None,
+        backup_manager=FailingManager(),
+    )
+    failed = await failing_routes[("POST", "/api/backup/export/prepare")](
+        request_for("POST", "/api/backup/export/prepare")
+    )
+    assert failed.status_code == 500
+    assert "archive creation failed" in response_json(failed)["error"]
+    assert response_json(
+        await failing_routes[("GET", "/api/backup/export/status")](
+            request_for("GET", "/api/backup/export/status")
+        )
+    ) == {"ok": True, "active": False}
+
+
+@pytest.mark.asyncio
+async def test_backup_restore_runs_blocking_archive_work_off_request_loop():
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BackupManager:
+        async def restore_archive(self, _archive_path, *, mode):
+            assert mode == "overwrite"
+            entered.set()
+            release.wait(timeout=1)
+            return {
+                "status": "restored",
+                "restored_ids": [],
+                "embedding_snapshot": "restored",
+            }
+
+    routes = register_with(
+        auth_guard=lambda _request: None,
+        backup_manager=BackupManager(),
+        services=CurrentWebServices(
+            refresh_restore_indexes=lambda _bucket_ids: {
+                "refreshed": 0,
+                "errors": [],
+            }
+        ),
+    )
+    timer = threading.Timer(0.8, release.set)
+    timer.start()
+    heartbeat = threading.Event()
+    task = asyncio.create_task(
+        routes[("POST", "/api/backup/restore")](
+            request_for(
+                "POST",
+                "/api/backup/restore",
+                raw_body=b"backup",
+                query_string="mode=overwrite",
+                headers={"content-type": "application/zip"},
+            )
+        )
+    )
+
+    async def pulse_event_loop():
+        await asyncio.sleep(0)
+        heartbeat.set()
+
+    pulse = asyncio.create_task(pulse_event_loop())
+    try:
+        assert await asyncio.to_thread(heartbeat.wait, 0.3)
+        assert await asyncio.to_thread(entered.wait, 0.5)
+        release.set()
+        await pulse
+        response = await asyncio.wait_for(task, timeout=1.5)
+        assert response.status_code == 200
+    finally:
+        release.set()
+        timer.cancel()
+
+
+@pytest.mark.asyncio
+async def test_backup_vault_admission_is_shared_and_cross_loop_safe(tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+    archive_path = tmp_path / "held-export.zip"
+
+    class BackupManager:
+        def create_archive(self):
+            archive_path.write_bytes(b"held archive")
+            entered.set()
+            release.wait(timeout=2)
+            return str(archive_path), {"file_count": 0}
+
+        async def restore_archive(self, *_args, **_kwargs):
+            pytest.fail("concurrent restore must not reach the manager")
+
+    routes = register_with(
+        auth_guard=lambda _request: None,
+        backup_manager=BackupManager(),
+    )
+    export = routes[("GET", "/api/backup/export")]
+    restore = routes[("POST", "/api/backup/restore")]
+    first_task = asyncio.create_task(
+        export(request_for("GET", "/api/backup/export"))
+    )
+    assert await asyncio.to_thread(entered.wait, 1)
+
+    def invoke_restore_on_another_loop():
+        return asyncio.run(
+            restore(
+                request_for(
+                    "POST",
+                    "/api/backup/restore",
+                    raw_body=b"must-not-be-read",
+                    query_string="mode=overwrite",
+                    headers={"content-type": "application/zip"},
+                )
+            )
+        )
+
+    try:
+        rejected = await asyncio.to_thread(invoke_restore_on_another_loop)
+        assert rejected.status_code == 409
+        assert "backup operation" in response_json(rejected)["error"].lower()
+    finally:
+        release.set()
+    first = await asyncio.wait_for(first_task, timeout=1)
+    await _consume_file_response(first)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_mode", ["range", "disconnect"])
+async def test_backup_export_always_cleans_archive_and_releases_reservation(
+    tmp_path,
+    failure_mode,
+):
+    created = []
+
+    class BackupManager:
+        def create_archive(self):
+            archive_path = tmp_path / f"export-{len(created)}.zip"
+            archive_path.write_bytes(b"verified archive")
+            created.append(archive_path)
+            return str(archive_path), {"file_count": 0}
+
+    routes = register_with(
+        auth_guard=lambda _request: None,
+        backup_manager=BackupManager(),
+    )
+    handler = routes[("GET", "/api/backup/export")]
+    response = await handler(request_for("GET", "/api/backup/export"))
+    archive_path = Path(response.path)
+
+    if failure_mode == "range":
+        await _consume_file_response(
+            response,
+            headers=[(b"range", b"bytes=999999999-")],
+        )
+    else:
+        with pytest.raises(ConnectionError, match="client disconnected"):
+            await _consume_file_response(response, fail_send=True)
+
+    assert not os.path.exists(archive_path)
+    retry = await handler(request_for("GET", "/api/backup/export"))
+    assert retry.status_code == 200
+    await _consume_file_response(retry)
 
 
 @pytest.mark.asyncio

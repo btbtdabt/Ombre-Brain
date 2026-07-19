@@ -100,11 +100,38 @@ fixed access token remains a resource-bound compatibility credential.
 
 ## Integration Batch Ledger
 
-### 2026-07-18 dashboard parity repair
+### 2026-07-18 unified Dashboard integration
 
 | Source range | Disposition | Evidence |
 | --- | --- | --- |
-| Local fork `main` | Preserving current-side dashboard parity | `/` remains the P0/system Dashboard, `/memory-dashboard` stays the current/Ying memory Dashboard with `/dashboard` redirect compatibility, assets/API resolve from the application mount without treating the dashboard route as a prefix, authenticated `/auth/status` returns minimal identity only, `human` consistently honors the explicit override or validated identity fallback, and bucket loading is bounded with retry affordances. Covered by the new dual-dashboard regression tests and the updated web/auth/buckets contract. |
+| Local fork `main` unified-Dashboard batch | P0luz remains the canonical shell and runtime | `frontend/dashboard.html` is the single Dashboard shell over the modular P0luz `src/` runtime. The historical repository-root runtime remains excluded. The former standalone current/Ying `frontend/memory-dashboard.html` application is superseded by feature modules mounted in the canonical shell: retained memory-care and inspection behavior lives in the **Memory** workspace, while model, provider, tuning, backup, and migration behavior lives in **Models & Data**. Shared and System functions continue to use their P0-owned implementations. |
+| Current/Ying Dashboard feature and HTTP surface | Ported without collapsing distinct behavior | The parity manifest maps every retained current route family (`discovery`, `memory`, `profile`, and `operations`) to a unified-shell destination while the existing modular API handlers retain ownership and request/response semantics. Memory reminders, reflection/daily-impression history, chat memory, dreams, darkroom, Persona state, portrait, profile facts and proposals, anchor proposals, Word Map, identity semantics, moment/recall/diffusion diagnostics, and Gateway injection inspection remain separate panels rather than being merged into look-alike controls. |
+| Shared resources and configuration controls | Superseded by one canonical editor per resource | Buckets, Search, base Breath, Network, and Import are each exposed once as shared P0 capabilities. Buckets stay bounded and nonblocking at the API boundary, with exact `type`/`tags` filtering and selected-page-only previews. Each editable configuration resource has one canonical editor. The Embeddings editor is physically mounted in, and canonically owned by, **Models & Data**; System retains only a link and read-only diagnostics, not a second embedding writer. Compatibility export, GitHub backup, and migration actions continue to delegate to their established guarded controls instead of duplicating mutation code. |
+| Dashboard identity and bounded bucket reads | Retained in the unified shell | Authenticated `/auth/status` continues to return only the minimal display identity; `human` consistently uses an explicit override or validated identity fallback, including the Amy/Aki display-name fix. `/api/buckets/light` uses the server-side `BucketManager.list_light` path with bounded `limit`/`offset`, a capped retained prefix, and selected-page-only previews rather than materializing full bucket bodies. Optional `type` is an exact match and `tags` requires exact inclusion of every requested tag; malformed filters and excessive offsets fail at the HTTP boundary. Dashboard assets and APIs resolve from the application root rather than from an entry-route prefix. |
+| Managed environment persistence | Implemented as one durable transaction | `OMBRE_ENV_PATH` identifies the absolute, non-symlink Dashboard-managed source shared by the active services. Supported deployments place `.ombre-managed.env` inside an already-persistent directory, separate from the operator/Compose `.env`, so atomic replacement remains available and shell parsing never touches Dashboard-written secrets. Configuration routes validate persistence before mutation, serialize all environment writers through the shared lock, and preserve unrelated lines. Runtime/provider rebuilds, YAML persistence, and environment persistence form one failure boundary: a failed later commit restores runtime state and any earlier YAML change without publishing staged secrets. |
+| Dashboard entry points and legacy navigation | Compatibility retained | `/` serves the canonical shell in the Shared/Buckets state. `/memory-dashboard` serves the same shell in the Memory/Reminders state. `/dashboard` retains its `302` compatibility redirect to `/memory-dashboard`. On the production host these compatibility URLs are `https://brain.btombre.men/`, `https://brain.btombre.men/memory-dashboard`, and `https://brain.btombre.men/dashboard`; their post-deployment reachability is part of the pending verification below. Legacy P0/current hashes and tab names map to stable workspace/panel destinations. |
+
+Verification status for this batch:
+
+- Dashboard unification and the implementation dispositions above: **complete in
+  the current working tree**.
+- Final local verification gates: **complete**.
+  - `pytest`: **2531 passed / 75 skipped / 0 failed**.
+  - Ruff: **clean**.
+  - Changed production Python files: **0 Pyright errors**.
+  - Whole-tree Pyright audit: **491 errors / 21 warnings**, improved from the
+    recorded **530 errors / 21 warnings** without any increase in warning count.
+  - Node syntax: **clean**.
+  - `docker build .`: **successful**.
+  - Independent code, Python, TypeScript, security, and root reviews: **all
+    findings resolved**.
+- Staging browser, route/API parity, authentication, and persisted-data verification:
+  **pending**.
+- Production deployment and public production-alignment verification: **pending**.
+
+This entry records a completed implementation with verification and deployment
+still in progress. It does not advance an upstream baseline or claim final-suite,
+staging, or production completion.
 
 ### 2026-07-16 P0luz-base migration
 

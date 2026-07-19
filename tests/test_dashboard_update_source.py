@@ -21,9 +21,10 @@ def test_dashboard_hot_update_surfaces_csrf_proxy_guidance():
     block = html[html.index("window.doHotUpdate = async function()") :]
     block = block[: block.index("window.checkGitHubVersion = async function()")]
 
-    assert "fetch(BASE + '/api/do-update'" in block
-    assert "authFetch(BASE + '/api/do-update'" not in block
-    assert "热更新不是可重试写操作" in block
+    assert "authFetch(BASE + '/api/do-update'" in block
+    assert "await fetch(BASE + '/api/do-update'" not in block
+    assert "authFetch 只重试 GET/HEAD" in block
+    assert "热更新 POST 不会因瞬时网关错误被重放" in block
     assert "failure.error === 'Cross-origin request rejected'" in block
     assert "这不是 CORS 缺失" in block
     assert "OMBRE_TRUSTED_PROXY_CIDRS" in block

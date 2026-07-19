@@ -42,5 +42,13 @@ def test_profile_registry_can_find_profiles_by_file_path() -> None:
 
     assert registry.profile_for_path("src/tools/breath/__init__.py").module == "tools.*"
     assert registry.profile_for_path("frontend/dashboard.html").module == "frontend.dashboard"
+    assert (
+        registry.profile_for_path("frontend/memory-dashboard.html").module
+        == "frontend.dashboard"
+    )
+    assert (
+        registry.profile_for_path("frontend/dashboard-assets/core/router.js").module
+        == "frontend.dashboard"
+    )
     assert registry.profile_for_path("deploy/docker-compose.yml").module == "deploy.*"
 

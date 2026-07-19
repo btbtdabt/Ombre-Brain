@@ -108,8 +108,8 @@ class PersonaStateEngine:
         self.enabled = bool(self.persona_cfg.get("enabled", True))
         self.profile_id = self.persona_cfg.get("profile_id", "haven_xiaoyu")
         self.mode = self.persona_cfg.get("mode", "llm")
-        self.base_url = self.persona_cfg.get("base_url", "https://api.deepseek.com/v1")
-        self.model = self.persona_cfg.get("model", "deepseek-chat")
+        self.base_url = self.persona_cfg.get("base_url") or "https://api.deepseek.com/v1"
+        self.model = self.persona_cfg.get("model") or "deepseek-chat"
         self.thinking_mode = normalize_thinking_mode(self.persona_cfg.get("thinking_mode", ""))
         self.temperature = float(self.persona_cfg.get("temperature", 0.1))
         self.max_tokens = int(self.persona_cfg.get("max_tokens", 500))

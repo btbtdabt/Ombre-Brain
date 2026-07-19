@@ -39,6 +39,9 @@ from .current_contract import (
 )
 
 
+_LIGHT_FILTER_TOKEN_RE = re.compile(r"^[\w.:-]{1,128}$", re.UNICODE)
+
+
 def _identity(dependencies: CurrentWebDependencies) -> dict[str, str]:
     return identity_names(dict(dependencies.config))
 
@@ -88,6 +91,47 @@ def _unique_clean_list(value: Any, *, limit: int = 40) -> list[str]:
         if len(result) >= limit:
             break
     return result
+
+
+def _bucket_light_filters(params: Any) -> tuple[str, tuple[str, ...]]:
+    """Validate optional exact type/all-tags filters at the HTTP boundary."""
+    type_values = params.getlist("type") if "type" in params else []
+    tag_values = params.getlist("tags") if "tags" in params else []
+    if len(type_values) > 1 or len(tag_values) > 1:
+        raise ValueError("duplicate filter parameter")
+
+    bucket_type = str(type_values[0] if type_values else "").strip()
+    if bucket_type and (
+        len(bucket_type) > 64
+        or not _LIGHT_FILTER_TOKEN_RE.fullmatch(bucket_type)
+    ):
+        raise ValueError("invalid type filter")
+    if type_values and not bucket_type:
+        raise ValueError("empty type filter")
+
+    tags: list[str] = []
+    if tag_values:
+        raw_tags = str(tag_values[0]).strip()
+        parts = [part.strip() for part in raw_tags.split(",")]
+        if not raw_tags or len(parts) > 16 or any(not part for part in parts):
+            raise ValueError("invalid tags filter")
+        for tag in parts:
+            if not _LIGHT_FILTER_TOKEN_RE.fullmatch(tag):
+                raise ValueError("invalid tags filter")
+            if tag not in tags:
+                tags.append(tag)
+    return bucket_type, tuple(tags)
+
+
+def _query_integer(params: Any, name: str, *, default: int) -> int:
+    """Parse an optional integer query parameter without silently defaulting."""
+    raw_value = params.get(name)
+    if raw_value is None:
+        return default
+    try:
+        return int(raw_value)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be an integer") from exc
 
 
 def _merge_metadata_list(
@@ -429,19 +473,96 @@ def register(mcp: Any, dependencies: CurrentWebDependencies) -> None:
         try:
             manager = require_dependency(dependencies, "bucket_mgr")
             include_archive = bool_value(request.query_params.get("include_archive"), False)
-            limit = int_between(request.query_params.get("limit"), 500, 1, 2000)
-            offset = int_between(request.query_params.get("offset"), 0, 0, 2**31 - 1)
-            buckets = await manager.list_all(include_archive=include_archive)
-            items = [bucket_light_payload(bucket) for bucket in buckets]
-            items.sort(key=lambda item: str(item.get("created") or ""), reverse=True)
+            archive_only = bool_value(request.query_params.get("archive_only"), False)
+            max_offset = int(getattr(manager, "light_max_offset", 100_000))
+            try:
+                limit = _query_integer(request.query_params, "limit", default=500)
+                requested_offset = _query_integer(
+                    request.query_params,
+                    "offset",
+                    default=0,
+                )
+            except ValueError as exc:
+                return JSONResponse(
+                    {"error": str(exc)},
+                    status_code=400,
+                    headers={"Cache-Control": "no-store"},
+                )
+            if not 1 <= limit <= 2000:
+                return JSONResponse(
+                    {"error": "limit must be between 1 and 2000"},
+                    status_code=400,
+                    headers={"Cache-Control": "no-store"},
+                )
+            if requested_offset < 0:
+                return JSONResponse(
+                    {
+                        "error": f"offset must be between 0 and {max_offset}",
+                    },
+                    status_code=400,
+                    headers={"Cache-Control": "no-store"},
+                )
+            try:
+                bucket_type, required_tags = _bucket_light_filters(
+                    request.query_params
+                )
+            except ValueError:
+                return JSONResponse(
+                    {"error": "invalid light-list filter"},
+                    status_code=400,
+                    headers={"Cache-Control": "no-store"},
+                )
+            if requested_offset > max_offset:
+                return JSONResponse(
+                    {
+                        "error": "offset exceeds maximum",
+                        "max_offset": max_offset,
+                    },
+                    status_code=400,
+                    headers={"Cache-Control": "no-store"},
+                )
+            offset = requested_offset
+            sort_mode = str(
+                request.query_params.get("sort", "created_desc") or "created_desc"
+            ).strip()
+            allowed_sort_modes = {"score", "created_desc", "created_asc"}
+            if sort_mode not in allowed_sort_modes:
+                return JSONResponse(
+                    {
+                        "error": "invalid sort mode",
+                        "allowed": sorted(allowed_sort_modes),
+                    },
+                    status_code=400,
+                    headers={"Cache-Control": "no-store"},
+                )
+            score_calculator = getattr(
+                dependencies.decay_engine,
+                "calculate_score",
+                None,
+            )
+            buckets, count = await manager.list_light(
+                include_archive=include_archive,
+                archive_only=archive_only,
+                limit=limit,
+                offset=offset,
+                sort=sort_mode,
+                score_calculator=score_calculator,
+                bucket_type=bucket_type,
+                required_tags=required_tags,
+            )
+            items = [
+                bucket_light_payload(bucket, include_content_preview=True)
+                for bucket in buckets
+            ]
             return JSONResponse(
                 {
-                    "buckets": items[offset : offset + limit],
-                    "count": len(items),
+                    "buckets": items,
+                    "count": count,
                     "include_archive": include_archive,
                     "limit": limit,
                     "offset": offset,
-                }
+                },
+                headers={"Cache-Control": "no-store"},
             )
         except Exception as exc:
             return exception_response(exc)

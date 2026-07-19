@@ -105,6 +105,8 @@ class FakeGithubSync:
 
 @pytest.mark.asyncio
 async def test_system_diagnostics_reports_missing_ai_configuration(monkeypatch, tmp_path):
+    monkeypatch.delenv("OMBRE_COMPRESS_API_KEY", raising=False)
+    monkeypatch.delenv("OMBRE_EMBED_API_KEY", raising=False)
     buckets_dir = tmp_path / "buckets"
     buckets_dir.mkdir()
     server_src = tmp_path / "src"

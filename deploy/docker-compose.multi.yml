@@ -13,6 +13,8 @@
 
 x-common-env: &common-env
   OMBRE_TRANSPORT: streamable-http
+  OMBRE_ENV_PATH: /app/buckets/.ombre-managed.env
+  OMBRE_MANAGED_ENV_OVERRIDE: "1"
   OMBRE_OWNER_COUNT: "2"          # ← 总人数；加人时所有 service 一起改
   OMBRE_COMPRESS_API_KEY: ${OMBRE_COMPRESS_API_KEY:-}
   OMBRE_COMPRESS_BASE_URL: ${OMBRE_COMPRESS_BASE_URL:-}

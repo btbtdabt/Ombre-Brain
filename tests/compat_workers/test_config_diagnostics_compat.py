@@ -59,3 +59,63 @@ def test_effective_config_report_tracks_sources_without_disclosing_secrets(tmp_p
     serialized = json.dumps(report)
     for secret in ("yaml-secret", "env-secret", "embed-secret", "gateway-secret"):
         assert secret not in serialized
+
+
+def test_effective_config_report_tracks_gateway_multi_env_and_direct_keys(tmp_path):
+    report = effective_config_report(
+        {
+            "gateway": {
+                "upstreams": [
+                    {
+                        "name": "provider",
+                        "base_url": "https://models.example/v1",
+                        "default_model": "model-a",
+                        "api_key_env": "UPSTREAM_KEY_LEGACY",
+                        "api_key_envs": [
+                            "UPSTREAM_KEY_PRIMARY",
+                            "UPSTREAM_KEY_SECONDARY",
+                        ],
+                        "api_key": "direct-primary-secret",
+                        "api_keys": [
+                            "direct-secondary-secret",
+                            "",
+                            "direct-tertiary-secret",
+                        ],
+                    }
+                ]
+            }
+        },
+        config_path=str(tmp_path / "missing-config.yaml"),
+        runtime_config_path=str(tmp_path / "missing-runtime.yaml"),
+        environ={
+            "UPSTREAM_KEY_LEGACY": "legacy-secret",
+            "UPSTREAM_KEY_PRIMARY": "primary-secret",
+            "UPSTREAM_KEY_SECONDARY": "",
+        },
+    )
+
+    assert report["gateway_upstreams"] == [
+        {
+            "name": "provider",
+            "base_url": "https://models.example/v1",
+            "default_model": "model-a",
+            "models": [],
+            "api_key_env": "UPSTREAM_KEY_LEGACY",
+            "api_key_envs": ["UPSTREAM_KEY_PRIMARY", "UPSTREAM_KEY_SECONDARY"],
+            "api_key_set": True,
+            "has_direct_api_key": True,
+            "direct_api_key_count": 3,
+            "key_count": 4,
+        }
+    ]
+    serialized = json.dumps(report)
+    for secret in (
+        "legacy-secret",
+        "primary-secret",
+        "direct-primary-secret",
+        "direct-secondary-secret",
+        "direct-tertiary-secret",
+    ):
+        assert secret not in serialized
+    assert "api_key" not in report["gateway_upstreams"][0]
+    assert "api_keys" not in report["gateway_upstreams"][0]

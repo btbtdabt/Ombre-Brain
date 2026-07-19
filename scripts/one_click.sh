@@ -686,6 +686,8 @@ services:
       OMBRE_STATE_DIR: /state
       OMBRE_CONFIG_PATH: /app/config.yaml
       OMBRE_CODE_DIR: /state/_brain_app
+      OMBRE_ENV_PATH: /state/.ombre-managed.env
+      OMBRE_MANAGED_ENV_OVERRIDE: 1
 EOF
   if [[ "${FEATURE_SCOPE}" == "full" ]]; then
     cat >> "${LOCAL_COMPOSE_FILE}" <<EOF
@@ -716,6 +718,8 @@ EOF
       OMBRE_BUCKETS_DIR: /data
       OMBRE_STATE_DIR: /state
       OMBRE_CONFIG_PATH: /app/config.yaml
+      OMBRE_ENV_PATH: /state/.ombre-managed.env
+      OMBRE_MANAGED_ENV_OVERRIDE: 1
     ports:
       - "${gateway_port}:8010"
     volumes:
@@ -796,6 +800,8 @@ load_python_direct_env() {
   fi
   export OMBRE_BUCKETS_DIR="${PWD}/buckets"
   export OMBRE_STATE_DIR="${PWD}/state"
+  export OMBRE_ENV_PATH="${PWD}/state/.ombre-managed.env"
+  export OMBRE_MANAGED_ENV_OVERRIDE=1
 }
 
 select_deploy_target_for_task() {
@@ -977,6 +983,8 @@ mkdir -p logs state buckets
 set -a
 source .env
 set +a
+export OMBRE_ENV_PATH="${PWD}/state/.ombre-managed.env"
+export OMBRE_MANAGED_ENV_OVERRIDE=1
 export OMBRE_TRANSPORT=streamable-http
 export OMBRE_PORT=8000
 export OMBRE_BUCKETS_DIR="${PWD}/buckets"
@@ -1029,7 +1037,19 @@ if (Test-Path ".env") {
     $idx = $line.IndexOf("=")
     if ($idx -le 0) { return }
     $name = $line.Substring(0, $idx).Trim()
-    $value = $line.Substring($idx + 1).Trim().Trim('"').Trim("'")
+    $rawValue = $line.Substring($idx + 1).Trim()
+    if ($rawValue.Length -ge 2 -and $rawValue.StartsWith("'") -and $rawValue.EndsWith("'")) {
+      # Dashboard writes native .env values as POSIX single-quoted strings.
+      # A literal apostrophe is represented by the standard five-character
+      # shell splice: '"'"'. Decode that exact marker without evaluating the
+      # file as PowerShell or expanding $, backticks, or command syntax.
+      $splice = [string][char]39 + [char]34 + [char]39 + [char]34 + [char]39
+      $value = $rawValue.Substring(1, $rawValue.Length - 2).Replace($splice, [string][char]39)
+    } elseif ($rawValue.Length -ge 2 -and $rawValue.StartsWith('"') -and $rawValue.EndsWith('"')) {
+      $value = $rawValue.Substring(1, $rawValue.Length - 2)
+    } else {
+      $value = $rawValue
+    }
     [Environment]::SetEnvironmentVariable($name, $value, "Process")
   }
 }
@@ -1038,6 +1058,8 @@ $env:OMBRE_TRANSPORT = "streamable-http"
 $env:OMBRE_PORT = "8000"
 $env:OMBRE_BUCKETS_DIR = Join-Path $Root "buckets"
 $env:OMBRE_STATE_DIR = Join-Path $Root "state"
+$env:OMBRE_ENV_PATH = Join-Path $Root "state/.ombre-managed.env"
+$env:OMBRE_MANAGED_ENV_OVERRIDE = "1"
 $env:OMBRE_CONFIG_PATH = Join-Path $Root "config.yaml"
 EOF
   if [[ "${FEATURE_SCOPE}" == "full" ]]; then
@@ -1510,7 +1532,7 @@ migration_review_path() {
 run_target_shell() {
   local script="$1"
   if [[ "${DEPLOY_TARGET}" == "python" ]]; then
-    bash -lc "set -euo pipefail; if [[ -f .env ]]; then set -a; source .env; set +a; fi; export OMBRE_BUCKETS_DIR=\"\${PWD}/buckets\"; export OMBRE_STATE_DIR=\"\${PWD}/state\"; ${script}"
+    bash -lc "set -euo pipefail; if [[ -f .env ]]; then set -a; source .env; set +a; fi; export OMBRE_BUCKETS_DIR=\"\${PWD}/buckets\"; export OMBRE_STATE_DIR=\"\${PWD}/state\"; export OMBRE_ENV_PATH=\"\${PWD}/state/.ombre-managed.env\"; export OMBRE_MANAGED_ENV_OVERRIDE=1; ${script}"
   else
     local service="${OMBRE_SERVICE:-ombre-brain}"
     ombre_compose -f "${COMPOSE_FILE}" exec -T "${service}" sh -lc "${script}"
@@ -1565,7 +1587,7 @@ backup_current_deployment() {
   else
     service="${OMBRE_SERVICE:-ombre-brain}"
     archive="/state/backups/${archive_name}"
-    run_target_shell "set -e; mkdir -p /state/backups; items=''; for item in /data /state /app/config.yaml /app/.env; do [ -e \"\$item\" ] && items=\"\$items \$item\"; done; if [ -z \"\$items\" ]; then echo '没有找到可备份的 /data /state /app/config.yaml /app/.env'; exit 1; fi; tar --exclude=/state/backups --exclude=state/backups -czf '/tmp/${archive_name}' \$items; cp '/tmp/${archive_name}' '${archive}'" || return 1
+    run_target_shell "set -e; mkdir -p /state/backups; items=''; for item in /data /state /app/config.yaml; do [ -e \"\$item\" ] && items=\"\$items \$item\"; done; if [ -z \"\$items\" ]; then echo '没有找到可备份的 /data /state /app/config.yaml'; exit 1; fi; tar --exclude=/state/backups --exclude=state/backups -czf '/tmp/${archive_name}' \$items; cp '/tmp/${archive_name}' '${archive}'" || return 1
     if env_bind_source="$(ombre_compose_bind_source "${COMPOSE_FILE}" "${service}" "/app/.env")"; then
       backup_file "${env_bind_source}"
     else

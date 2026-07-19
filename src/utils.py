@@ -34,6 +34,7 @@ import logging
 import math
 import tempfile
 import threading
+from collections.abc import MutableMapping
 from types import EllipsisType
 from pathlib import Path
 from datetime import date, datetime, timedelta
@@ -65,24 +66,152 @@ _BUCKET_NAME_MAX_LEN = 80
 _BOOL_TRUE = frozenset({"1", "true", "yes", "on"})
 _BOOL_FALSE = frozenset({"0", "false", "no", "off"})
 
+_MANAGED_ENV_FIXED_NAMES = frozenset(
+    {
+        "AI_NAME",
+        "OMBRE_COMPRESS_API_KEY",
+        "OMBRE_COMPRESS_BASE_URL",
+        "OMBRE_COMPRESS_MODEL",
+        "OMBRE_COMPRESS_FORMAT",
+        "OMBRE_COMPRESS_TIMEOUT_SECONDS",
+        "OMBRE_EMBED_API_KEY",
+        "OMBRE_EMBED_BASE_URL",
+        "OMBRE_EMBED_MODEL",
+        "OMBRE_EMBED_FORMAT",
+        "OMBRE_EMBED_TIMEOUT_SECONDS",
+        "OMBRE_HOOK_URL",
+        "OMBRE_HOOK_SKIP",
+        "OMBRE_HOST_VAULT_DIR",
+        "OMBRE_TRANSPORT",
+        "OMBRE_RERANKER_API_KEY",
+        "OMBRE_PERSONA_API_KEY",
+        "OMBRE_DREAM_API_KEY",
+        "OMBRE_REFLECTION_API_KEY",
+        "OMBRE_DOMAIN_SENTINEL_API_KEY",
+    }
+)
+_MANAGED_GATEWAY_PROVIDER_KEY = re.compile(
+    r"OMBRE_GATEWAY_[A-Z0-9]+(?:_[A-Z0-9]+)*_API_KEY(?:_[0-9]+)?"
+)
+_MANAGED_ENV_CONFIG_TOMBSTONE_NAMES = frozenset(
+    {
+        "OMBRE_COMPRESS_API_KEY",
+        "OMBRE_COMPRESS_BASE_URL",
+        "OMBRE_EMBED_API_KEY",
+        "OMBRE_EMBED_BASE_URL",
+        "OMBRE_RERANKER_API_KEY",
+    }
+)
+
+
+def _managed_env_name_allowed(name: str) -> bool:
+    """Limit override-capable values to fields the Dashboard actually owns."""
+    return name in _MANAGED_ENV_FIXED_NAMES or bool(
+        _MANAGED_GATEWAY_PROVIDER_KEY.fullmatch(name)
+    )
+
+
+def _decode_managed_env_value(raw: str) -> str:
+    value = raw.strip()
+    if len(value) < 2 or value[0] != value[-1] or value[0] not in {"'", '"'}:
+        return value
+    quote = value[0]
+    inner = value[1:-1]
+    if quote == "'":
+        if "'\"'\"'" in inner:
+            return inner.replace("'\"'\"'", "'")
+        return inner.replace("\\'", "'").replace("\\\\", "\\")
+    return inner.replace('\\"', '"').replace("\\\\", "\\")
+
+
+def _load_managed_env_file(
+    environ: MutableMapping[str, str], *, override: bool = False
+) -> frozenset[str]:
+    """Load an explicit Dashboard-managed env source without interpolation."""
+    raw_path = str(environ.get("OMBRE_ENV_PATH", "") or "").strip()
+    if raw_path:
+        if not os.path.isabs(raw_path):
+            return frozenset()
+        path = os.path.abspath(raw_path)
+    else:
+        # Match web._shared._project_env_path's native fallback so a plain
+        # ``python src/server.py`` restart can read keys saved by Dashboard.
+        path = os.path.abspath(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, ".env")
+        )
+    if os.path.islink(path) or not os.path.isfile(path):
+        return frozenset()
+
+    loaded: set[str] = set()
+    try:
+        with open(path, "r", encoding="utf-8") as source:
+            for raw_line in source:
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[7:].strip()
+                name, separator, raw_value = line.partition("=")
+                name = name.strip()
+                if (
+                    not separator
+                    or name == "OMBRE_ENV_PATH"
+                    or not _managed_env_name_allowed(name)
+                    or "\0" in raw_value
+                ):
+                    continue
+                if not override and str(environ.get(name, "") or "").strip():
+                    continue
+                environ[name] = _decode_managed_env_value(raw_value)
+                loaded.add(name)
+    except OSError:
+        return frozenset()
+    return frozenset(loaded)
+
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 
 _yaml_locks_guard = threading.Lock()
 _yaml_locks: dict[str, threading.RLock] = {}
 
-# 进程启动那一刻就被「真实 OS / 平台」注入的可配置环境变量名集合（值非空才算）。
-# 在任何 dashboard 保存动作 mutate os.environ 之前快照——这是「平台级 env」与
-# 「运行时被 dashboard 写进 os.environ 的值」唯一可靠的区分依据。
-# 用途：dashboard 据此提示「这些字段由平台环境变量提供，重启会覆盖你这里保存的值」，
-# 修复「config.yaml 存了 Gemini，但平台 OMBRE_COMPRESS_BASE_URL=DeepSeek 每次重启盖回」的坑。
-_boot_env_config = {
+# Capture the real process environment before loading the explicit persisted
+# source. Operator env wins by default; supported Dashboard-managed deployments
+# opt into file precedence with OMBRE_MANAGED_ENV_OVERRIDE=1.
+_external_boot_env_config = {
     key
     for key, value in os.environ.items()
     if (key.startswith("OMBRE_") or key == "AI_NAME") and str(value).strip()
 }
+_managed_env_override = (
+    str(os.environ.get("OMBRE_MANAGED_ENV_OVERRIDE", "") or "").strip().lower()
+    in _BOOL_TRUE
+)
+MANAGED_ENV_FILE_KEYS = _load_managed_env_file(
+    os.environ, override=_managed_env_override
+)
+_MANAGED_ENV_FILE_TOMBSTONES = frozenset(
+    name
+    for name in MANAGED_ENV_FILE_KEYS
+    if not str(os.environ.get(name, "") or "").strip()
+)
+
+
+def _managed_env_tombstoned(name: str) -> bool:
+    """Return whether Dashboard explicitly cleared an allowlisted provider field."""
+    return (
+        name in _MANAGED_ENV_CONFIG_TOMBSTONE_NAMES
+        and name in _MANAGED_ENV_FILE_TOMBSTONES
+    )
+
+# 进程启动那一刻就被「真实 OS / 平台」注入的可配置环境变量名集合（值非空才算）。
+# 在任何 dashboard 保存动作 mutate os.environ 之前快照——这是「平台级 env」与
+# 「运行时被 dashboard 写进 os.environ 的值」唯一可靠的区分依据。
+# 用途：dashboard 据此提示这些字段是否由平台环境变量提供，避免重启后
+# 平台值覆盖 Dashboard 保存值时给出错误的生效状态。
+_boot_env_config = _external_boot_env_config - set(MANAGED_ENV_FILE_KEYS)
 if (
     "OMBRE_EMBEDDING_API_KEY" in _boot_env_config
     and "OMBRE_EMBED_API_KEY" not in _boot_env_config
+    and not _managed_env_tombstoned("OMBRE_EMBED_API_KEY")
 ):
     _boot_env_config.add("OMBRE_EMBED_API_KEY")
 BOOT_ENV_CONFIG: frozenset[str] = frozenset(_boot_env_config)
@@ -749,12 +878,20 @@ def load_config(config_path: Optional[str] = None) -> dict:
     # v1.x 兼容：旧变量不得因重构而静默失效。新变量显式设置时始终优先。
     legacy_api_key = os.environ.get("OMBRE_API_KEY", "").strip()
     legacy_base_url = os.environ.get("OMBRE_BASE_URL", "").strip()
-    if legacy_api_key and not os.environ.get("OMBRE_COMPRESS_API_KEY", "").strip():
+    if (
+        legacy_api_key
+        and not os.environ.get("OMBRE_COMPRESS_API_KEY", "").strip()
+        and not _managed_env_tombstoned("OMBRE_COMPRESS_API_KEY")
+    ):
         config.setdefault("dehydration", {})["api_key"] = legacy_api_key
         logging.warning(
             "OMBRE_API_KEY 是兼容变量；请迁移到 OMBRE_COMPRESS_API_KEY，旧名仍会继续生效。"
         )
-    if legacy_base_url and not os.environ.get("OMBRE_COMPRESS_BASE_URL", "").strip():
+    if (
+        legacy_base_url
+        and not os.environ.get("OMBRE_COMPRESS_BASE_URL", "").strip()
+        and not _managed_env_tombstoned("OMBRE_COMPRESS_BASE_URL")
+    ):
         config.setdefault("dehydration", {})["base_url"] = legacy_base_url
         logging.warning(
             "OMBRE_BASE_URL 是兼容变量；请迁移到 OMBRE_COMPRESS_BASE_URL，旧名仍会继续生效。"
@@ -764,9 +901,11 @@ def load_config(config_path: Optional[str] = None) -> dict:
         "OMBRE_EMBEDDING_API_KEY", ""
     ).strip()
     ENV_ALIAS_PROVENANCE.pop("OMBRE_EMBED_API_KEY", None)
-    if legacy_embedding_api_key and not os.environ.get(
-        "OMBRE_EMBED_API_KEY", ""
-    ).strip():
+    if (
+        legacy_embedding_api_key
+        and not os.environ.get("OMBRE_EMBED_API_KEY", "").strip()
+        and not _managed_env_tombstoned("OMBRE_EMBED_API_KEY")
+    ):
         os.environ["OMBRE_EMBED_API_KEY"] = legacy_embedding_api_key
         ENV_ALIAS_PROVENANCE["OMBRE_EMBED_API_KEY"] = "OMBRE_EMBEDDING_API_KEY"
         config.setdefault("embedding", {})["api_key"] = legacy_embedding_api_key
@@ -942,7 +1081,7 @@ def _deep_merge(base: dict, override: dict) -> dict:
 
 
 def _apply_env_override(config: dict, env_name: str, *path: str) -> None:
-    """把单个环境变量按 path 写入嵌套 dict（仅当值非空）。
+    """把单个环境变量按 path 写入嵌套 dict。
 
     设计原因：load_config() 里曾有 6 段几乎一模一样的覆盖代码——
         env = os.environ.get("XXX", "")
@@ -950,7 +1089,8 @@ def _apply_env_override(config: dict, env_name: str, *path: str) -> None:
             config["a"]["b"] = env
     长度膨胀且新增一项就要再抄一遍。统一抽出后：
       * 新增覆盖只要写一行 `_apply_env_override(config, "OMBRE_FOO", "a", "b")`
-      * 行为一致：空字符串视为"未设置"，绝不覆盖默认值
+      * 行为一致：普通空字符串视为"未设置"；Dashboard 持久化的空值
+        是显式清除 tombstone，会覆盖 YAML 中的旧值
       * 自动 setdefault 中间层 dict，避免 KeyError
 
     参数：
@@ -961,11 +1101,11 @@ def _apply_env_override(config: dict, env_name: str, *path: str) -> None:
                    config["dehydration"]["api_key"]。
 
     边界（rule.md §⑨ 防御式编程）：
-      * 环境变量为空 / 未设置 → 直接 return，不动 config
+      * 环境变量为空 / 未设置，且不是 managed tombstone → 直接 return
       * path 为空 → 直接 return（调用方写错路径不应静默覆盖整个 config）
     """
     value = os.environ.get(env_name, "").strip()
-    if not value or not path:
+    if not path or (not value and not _managed_env_tombstoned(env_name)):
         return
     # 走到倒数第二层，逐层 setdefault 出嵌套 dict
     cursor = config

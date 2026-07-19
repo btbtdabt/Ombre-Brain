@@ -1,4 +1,5 @@
 import json
+from collections.abc import Callable
 from datetime import datetime
 
 import pytest
@@ -20,17 +21,64 @@ class FakeMCP:
 
 
 class ListRequest:
-    def __init__(self, sort_mode=None):
-        self.query_params = {} if sort_mode is None else {"sort": sort_mode}
+    def __init__(self, sort_mode=None, *, include_archive=None, limit=None):
+        self.query_params = {}
+        if sort_mode is not None:
+            self.query_params["sort"] = sort_mode
+        if include_archive is not None:
+            self.query_params["include_archive"] = include_archive
+        if limit is not None:
+            self.query_params["limit"] = limit
 
 
 class FakeBucketManager:
-    def __init__(self, buckets):
+    def __init__(self, buckets, *, expected_include_archive=True):
         self.buckets = buckets
+        self.expected_include_archive = expected_include_archive
 
     async def list_all(self, *, include_archive=False):
-        assert include_archive is True
+        assert include_archive is self.expected_include_archive
         return list(self.buckets)
+
+    async def list_light(
+        self,
+        *,
+        include_archive=False,
+        limit=500,
+        offset=0,
+        sort="created_desc",
+        score_calculator: Callable[[dict], float] | None = None,
+        exclude_deleted=False,
+    ):
+        assert include_archive is self.expected_include_archive
+        items = [
+            dict(bucket)
+            for bucket in self.buckets
+            if not exclude_deleted
+            or not bucket.get("metadata", {}).get("deleted_at")
+        ]
+        assert callable(score_calculator)
+        for item in items:
+            item["score"] = float(score_calculator(item.get("metadata", {})))
+        if sort == "score":
+            items.sort(key=lambda item: (-item["score"], str(item["id"])))
+        else:
+            descending = sort == "created_desc"
+
+            def created_key(item):
+                timestamp = buckets_web._datetime_epoch_ms(
+                    item.get("metadata", {}).get("created")
+                )
+                if timestamp is None:
+                    return (1, 0, str(item["id"]))
+                return (
+                    0,
+                    -timestamp if descending else timestamp,
+                    str(item["id"]),
+                )
+
+            items.sort(key=created_key)
+        return items[offset : offset + limit], len(items)
 
 
 class FakeDecayEngine:
@@ -50,8 +98,19 @@ def _bucket(bucket_id, *, created="", last_active="", score=0.0, deleted=False):
     return {"id": bucket_id, "metadata": metadata, "content": bucket_id}
 
 
-async def _list(monkeypatch, buckets, sort_mode=None):
-    manager = FakeBucketManager(buckets)
+async def _list(
+    monkeypatch,
+    buckets,
+    sort_mode=None,
+    *,
+    include_archive=None,
+    limit=None,
+    expected_include_archive=True,
+):
+    manager = FakeBucketManager(
+        buckets,
+        expected_include_archive=expected_include_archive,
+    )
     monkeypatch.setattr(buckets_web.sh, "_require_auth", lambda _request: None)
     monkeypatch.setattr(buckets_web.sh, "bucket_mgr", manager, raising=False)
     monkeypatch.setattr(
@@ -60,7 +119,13 @@ async def _list(monkeypatch, buckets, sort_mode=None):
     mcp = FakeMCP()
     buckets_web.register(mcp)
 
-    response = await mcp.routes[("GET", "/api/buckets")](ListRequest(sort_mode))
+    response = await mcp.routes[("GET", "/api/buckets")](
+        ListRequest(
+            sort_mode,
+            include_archive=include_archive,
+            limit=limit,
+        )
+    )
     payload = json.loads(response.body.decode("utf-8"))
     return response, payload
 
@@ -147,3 +212,79 @@ async def test_bucket_list_returns_server_normalized_display_instants(monkeypatc
     assert by_id["timed"]["last_active_epoch_ms"] == epoch + 2000
     assert by_id["invalid"]["created_epoch_ms"] is None
     assert by_id["invalid"]["last_active_epoch_ms"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("query_value", "expected_include_archive"),
+    [("0", False), ("1", True), ("false", False), ("true", True)],
+)
+async def test_bucket_list_honors_explicit_archive_filter(
+    monkeypatch,
+    query_value,
+    expected_include_archive,
+):
+    response, payload = await _list(
+        monkeypatch,
+        [_bucket("one")],
+        include_archive=query_value,
+        expected_include_archive=expected_include_archive,
+    )
+
+    assert response.status_code == 200
+    assert [item["id"] for item in payload] == ["one"]
+
+
+@pytest.mark.asyncio
+async def test_bucket_list_applies_bounded_optional_limit(monkeypatch):
+    response, payload = await _list(
+        monkeypatch,
+        [_bucket("three", score=3), _bucket("two", score=2), _bucket("one", score=1)],
+        limit="2",
+    )
+
+    assert response.status_code == 200
+    assert set(payload) == {
+        "buckets",
+        "count",
+        "include_archive",
+        "limit",
+        "offset",
+    }
+    assert payload["count"] == 3
+    assert payload["include_archive"] is True
+    assert payload["limit"] == 2
+    assert payload["offset"] == 0
+    assert [item["id"] for item in payload["buckets"]] == ["three", "two"]
+
+
+@pytest.mark.asyncio
+async def test_bucket_list_rejects_ambiguous_archive_filter(monkeypatch):
+    response, payload = await _list(
+        monkeypatch,
+        [_bucket("one")],
+        include_archive="sometimes",
+    )
+
+    assert response.status_code == 400
+    assert payload == {
+        "error": "invalid include_archive",
+        "allowed": ["0", "1", "false", "true"],
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", ["0", "201", "not-a-number"])
+async def test_bucket_list_rejects_out_of_bounds_limit(monkeypatch, limit):
+    response, payload = await _list(
+        monkeypatch,
+        [_bucket("one")],
+        limit=limit,
+    )
+
+    assert response.status_code == 400
+    assert payload == {
+        "error": "invalid limit",
+        "minimum": 1,
+        "maximum": 200,
+    }

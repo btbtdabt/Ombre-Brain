@@ -76,6 +76,8 @@ EXPECTED_CURRENT_ONLY_ROUTES = {
     ("GET", "/api/daily-chat-memory/pending"),
     ("POST", "/api/daily-chat-memory/confirm"),
     ("GET", "/api/config/effective"),
+    ("POST", "/api/backup/export/prepare"),
+    ("GET", "/api/backup/export/status"),
     ("GET", "/api/backup/export"),
     ("POST", "/api/backup/restore"),
 }
