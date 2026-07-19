@@ -1,6 +1,6 @@
 # Unified Dashboard on the P0luz Base — Ying/Current Parity Plan
 
-- **Status:** Implementation complete; local verification complete; staging and deployment in progress
+- **Status:** Implementation complete; local verification complete; isolated staging smoke complete; full staging parity and production remain pending
 - **Primary base:** P0luz modular runtime and Dashboard
 - **Secondary feature source:** Yinglianchun/current Dashboard behavior
 - **Goal:** One coherent Dashboard experience, every retained Ying/current function available, no repeated implementations, and clear boundaries between distinct functions.
@@ -23,8 +23,10 @@ The implemented result is not a concatenated page. It is one P0luz-based shell w
 ## Current Implementation State
 
 Implementation phases 1–8 are complete in the current working tree. Phase 9
-local verification is complete, but staging and production remain pending; this
-document does not claim staging success or production cutover for this batch.
+local verification is complete. Isolated staging smoke for the unified shell,
+route compatibility, identity display, and console cleanliness is complete, but
+full staging parity and production remain pending; this document does not claim
+production cutover for this batch.
 
 - `frontend/dashboard.html` is the single canonical shell served for `/` and
   `/memory-dashboard`; `/dashboard` remains a compatibility redirect into that
@@ -44,8 +46,8 @@ document does not claim staging success or production cutover for this batch.
   nonblocking Buckets reads, transactional config/Gateway persistence, verified
   backup tickets, Ying Reflection/profile/insights parity, and the Amy identity
   display-name fix.
-- Local verification gates are green: `pytest` 2531 passed / 75 skipped / 0
-  failed, Ruff clean, changed production Pyright 0, whole-tree Pyright 491
+- Local verification gates are green: `pytest` 2535 passed / 75 skipped / 0
+  failed, Ruff clean, changed production Pyright 0, whole-tree Pyright 469
   errors / 21 warnings (improved from the recorded 530 / 21 without any warning
   increase), Node syntax clean, `docker build .` successful, and independent
   code/Python/TypeScript/security/root reviews resolved all findings.

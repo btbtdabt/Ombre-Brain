@@ -116,17 +116,19 @@ Verification status for this batch:
 - Dashboard unification and the implementation dispositions above: **complete in
   the current working tree**.
 - Final local verification gates: **complete**.
-  - `pytest`: **2531 passed / 75 skipped / 0 failed**.
+  - `pytest`: **2535 passed / 75 skipped / 0 failed**.
   - Ruff: **clean**.
   - Changed production Python files: **0 Pyright errors**.
-  - Whole-tree Pyright audit: **491 errors / 21 warnings**, improved from the
+  - Whole-tree Pyright audit: **469 errors / 21 warnings**, improved from the
     recorded **530 errors / 21 warnings** without any increase in warning count.
   - Node syntax: **clean**.
   - `docker build .`: **successful**.
   - Independent code, Python, TypeScript, security, and root reviews: **all
     findings resolved**.
-- Staging browser, route/API parity, authentication, and persisted-data verification:
-  **pending**.
+- Staging browser smoke, route compatibility, authentication, identity display,
+  and console-cleanliness verification on isolated staging: **complete**.
+  Full manifest-family parity and persisted-data/browser matrix coverage remain
+  pending.
 - Production deployment and public production-alignment verification: **pending**.
 
 This entry records a completed implementation with verification and deployment

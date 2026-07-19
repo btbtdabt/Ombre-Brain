@@ -20,7 +20,7 @@ from backup_archive import (
     validate_sqlite_file,
 )
 from media_store import media_bucket_directory_name
-from utils import atomic_write_text, now_iso, same_path
+from utils import atomic_write_text, get_version, now_iso, same_path
 
 
 class VaultBackupManager:
@@ -37,12 +37,13 @@ class VaultBackupManager:
         ).resolve()
 
     def create_archive(self) -> tuple[str, dict[str, Any]]:
+        export_version = str(self.config.get("version") or "").strip() or get_version()
         args = (
             str(self.buckets_dir),
             str(getattr(self.embedding_engine, "db_path", "") or ""),
             {
                 "exported_at": now_iso(),
-                "version": str(self.config.get("version") or "current-runtime"),
+                "version": export_version,
                 "format": "verified-local-backup",
                 "scope": "memory-vault",
             },

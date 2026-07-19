@@ -24,8 +24,8 @@
 
 ### 验证 / Verification
 
-- 本地核验完成：`pytest` 2531 passed / 75 skipped / 0 failed，Ruff clean，变更的 production Pyright 0，全树 Pyright 491 errors / 21 warnings（较记录的 530 / 21 已下降且 warning 未增加），Node syntax clean，`docker build .` successful，独立 code、Python、TypeScript、安全和 root reviews 的 findings 已全部清零。
-- 这些结果对应最终落地的单一 canonical Dashboard、bounded/nonblocking Buckets、transactional config/Gateway、verified backup tickets、Ying Reflection/profile/insights parity，以及 Amy identity fix。
+- 本地核验完成：`pytest` 2535 passed / 75 skipped / 0 failed，Ruff clean，变更的 production Pyright 0，全树 Pyright 469 errors / 21 warnings（较记录的 530 / 21 已下降且 warning 未增加），Node syntax clean，`docker build .` successful，独立 code、Python、TypeScript、安全和 root reviews 的 findings 已全部清零。
+- 这些结果对应最终落地的单一 canonical Dashboard、bounded/nonblocking Buckets、transactional config/Gateway、verified backup tickets、备份清单 canonical 版本元数据、Ying Reflection/profile/insights parity，以及 Amy identity fix。
 - staging 与 production 仍然 pending；此处不记录任何尚未实际完成的部署结果。
 
 ### 版本 / Version

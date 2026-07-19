@@ -13,6 +13,7 @@ from backup_archive import (
 from backup_manager import VaultBackupManager
 from bucket_manager import BucketManager
 from embedding_engine import EmbeddingEngine
+from utils import get_version
 
 
 def _config(tmp_path):
@@ -132,6 +133,33 @@ def test_backup_contains_no_runtime_secrets(tmp_path):
     assert ".env" not in names
     assert "config.yaml" not in names
     assert b"secret-dehydration-key" not in combined
+
+
+def test_create_archive_uses_runtime_version_when_config_omits_version(tmp_path):
+    config = _config(tmp_path)
+    manager = BucketManager(config)
+    asyncio.run(manager.create(content="ordinary memory"))
+    backup = VaultBackupManager(config, manager, EmbeddingEngine(config))
+
+    archive_path, manifest = backup.create_archive()
+    try:
+        assert manifest["version"] == get_version()
+    finally:
+        Path(archive_path).unlink(missing_ok=True)
+
+
+def test_create_archive_prefers_explicit_config_version(tmp_path):
+    config = _config(tmp_path)
+    config["version"] = "custom-export-version"
+    manager = BucketManager(config)
+    asyncio.run(manager.create(content="ordinary memory"))
+    backup = VaultBackupManager(config, manager, EmbeddingEngine(config))
+
+    archive_path, manifest = backup.create_archive()
+    try:
+        assert manifest["version"] == "custom-export-version"
+    finally:
+        Path(archive_path).unlink(missing_ok=True)
 
 
 def test_restore_rejects_target_path_owned_by_a_different_bucket(tmp_path):
