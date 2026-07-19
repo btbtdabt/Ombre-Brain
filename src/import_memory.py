@@ -38,6 +38,8 @@ from typing import Any, Awaitable, Callable, cast
 import jieba
 from rapidfuzz import fuzz
 
+from identity import effective_human_name
+
 from runtime_values import (
     clamp_valence_arousal as _clamp_va,
     float_between as _float_between,
@@ -1345,7 +1347,7 @@ class ImportEngine:
                     "job_id": job_id,
                 }
 
-            _human = self.config.get("human", "用户")
+            _human = effective_human_name(self.config, default="用户")
             # source_hash 必须把 human_label 也算进去：chunk_turns() 把它拼进每一行
             # 再数 token，边界完全由它决定。只按 raw_content 算哈希的话，暂停期间
             # config.yaml 的 human 字段被改过，恢复时会重新切出一份不同的 chunk
@@ -2273,7 +2275,7 @@ class ImportEngine:
             raise RuntimeError("API not available")
 
         # 用 human 配置替换 prompt 里的「用户」称呼，让 LLM 输出更个人化。
-        _human = self.config.get("human", "用户")
+        _human = effective_human_name(self.config, default="用户")
         prompt = IMPORT_EXTRACT_PROMPT.replace("用户", _human) if _human != "用户" else IMPORT_EXTRACT_PROMPT
 
         trimmed_content = (

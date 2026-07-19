@@ -37,7 +37,12 @@ from typing import Any, Optional
 from openai import AsyncOpenAI
 
 from config_modes import normalize_thinking_mode
-from identity import generic_identity_names, identity_names, render_identity_template
+from identity import (
+    effective_human_name,
+    generic_identity_names,
+    identity_names,
+    render_identity_template,
+)
 from memory_layers import normalize_write_classification
 from runtime_values import clamp_valence_arousal
 from memory_metadata import domain_prompt_options_text, normalize_domain_key
@@ -468,11 +473,7 @@ class Dehydrator:
         # --- Human display name / 人类一方的称呼 ---
         # 注入脱水/合并的「视角铁律」：原文里人类那一方统一还原为这个名字，
         # 而不是被压成「双方/对方/用户」。与 config.human 同源（前端可改）。
-        self.human = (
-            config.get("human")
-            or self.identity.get("user_display_name")
-            or "用户"
-        )
+        self.human = effective_human_name(config, default="用户")
         identity_cfg = config.get("identity")
         if not isinstance(identity_cfg, dict) or not (
             identity_cfg.get("user_display_name") or identity_cfg.get("human_name")

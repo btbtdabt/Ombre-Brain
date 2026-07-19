@@ -139,7 +139,8 @@ Header: X-Ombre-Session-Id: main
 Dashboard:
 
 ```text
-https://brain.example.com/dashboard
+https://brain.example.com/
+https://brain.example.com/memory-dashboard
 ```
 
 MCP:

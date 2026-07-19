@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Callable, cast
 from starlette.requests import Request
 from starlette.responses import FileResponse, Response
 
+from identity import effective_human_name
 from . import _shared as sh
 from .upload_limits import (
     read_multipart_form_limited as _read_multipart_form_limited,
@@ -477,7 +478,7 @@ def register(mcp) -> None:
                     {"ok": False, "error": "Empty file"}, status_code=400
                 )
 
-            human_label = str((sh.config or {}).get("human") or "用户")
+            human_label = effective_human_name(sh.config, default="用户")
             tagging_enabled = (
                 bool(getattr(sh.import_engine, "operit_tagging_enabled", True))
                 if requested_tagging is None

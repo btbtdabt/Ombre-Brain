@@ -8,7 +8,15 @@ from favorite_tags import (
     has_favorite_reason,
     is_favorite_memory_tag,
 )
-from identity import generic_identity_names, identity_names, render_identity_template
+from identity import (
+    effective_ai_name,
+    effective_human_name,
+    generic_identity_names,
+    identity_human_name,
+    identity_names,
+    render_identity_template,
+    validate_human_name,
+)
 from query_prompts import QUERY_PLANNER_SYSTEM_PROMPT
 from query_terms import date_recall_shell_terms, identity_address_terms
 from query_understanding import query_intent_rules, query_intent_terms, query_intent_value
@@ -42,6 +50,35 @@ def test_identity_and_favorite_helpers_preserve_configured_names_and_aliases():
         "echo_favorite",
         "flavor_tender",
     ]
+
+
+def test_effective_identity_display_names_honor_override_and_fallback():
+    config = {
+        "human": "Ren Lei",
+        "identity": {
+            "user_display_name": "Amy",
+            "user_name": "Amy/艾米",
+            "ai_name": "Aki",
+        },
+    }
+
+    assert effective_human_name(config, default="人类") == "Ren Lei"
+    assert identity_human_name(config, default="人类") == "Amy"
+    assert effective_ai_name(config) == "Aki"
+
+    config.pop("human")
+    assert effective_human_name(config, default="人类") == "Amy"
+    assert effective_human_name({}, default="人类") == "人类"
+
+
+def test_human_name_validation_rejects_unsafe_or_oversized_values():
+    assert validate_human_name("  Amy  ") == "Amy"
+    assert validate_human_name("   ", allow_empty=True) == ""
+
+    with pytest.raises(ValueError, match="20"):
+        validate_human_name("A" * 21)
+    with pytest.raises(ValueError, match="control"):
+        validate_human_name("Amy\nAdmin")
 
 
 def test_favorite_reason_recognizes_heading_and_plain_language_markers():

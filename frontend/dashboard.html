@@ -760,8 +760,11 @@
     }
     .header-actions {
       order: 2;
+      width: 100%;
       margin-left: 0;
       gap: 6px;
+      flex-wrap: wrap;
+      justify-content: flex-start;
     }
     .header-actions button {
       padding: 5px 11px;
@@ -1894,6 +1897,7 @@
     <button onclick="doSearch()" title="搜索"><i data-lucide="search"></i></button>
   </div>
   <div class="header-actions">
+    <a href="./memory-dashboard" title="打开 Memory Dashboard" style="height:32px;padding:0 12px;gap:5px;display:inline-flex;align-items:center;white-space:nowrap;font-size:12px;border:1px solid var(--border);border-radius:999px;color:var(--text);text-decoration:none;background:var(--surface);"><i data-lucide="panel-right-open"></i> Memory Dashboard</a>
     <button id="btn-restart" onclick="restartService()" title="重启服务；红点表示有设置等待重启生效" style="height:32px;padding:0 12px;gap:5px;display:inline-flex;align-items:center;white-space:nowrap;font-size:12px;"><span class="restart-dot"></span><i data-lucide="power"></i> 重启</button>
     <button onclick="openFeedback()" title="给作者反馈 / Feedback" style="height:32px;padding:0 12px;gap:5px;display:inline-flex;align-items:center;white-space:nowrap;font-size:12px;"><i data-lucide="message-circle"></i> 反馈 Feedback</button>
     <button onclick="doLogout()" title="退出登录 / Log out" style="height:32px;padding:0 12px;gap:5px;display:inline-flex;align-items:center;white-space:nowrap;font-size:12px;"><i data-lucide="log-out"></i> 退出 Exit</button>
@@ -1963,6 +1967,8 @@
       <button class="developer-only" onclick="hardDeleteSelectedTests()" style="height:32px;padding:0 12px;font-size:12px;align-items:center;gap:5px;color:#b85c3c;"><i data-lucide="trash-2"></i> 永久删除测试桶</button>
     </div>
   </div>
+  <div id="bucket-load-status" style="display:none;font-size:12px;color:var(--text-dim);margin:8px 0 10px;"></div>
+  <button type="button" id="bucket-load-retry" onclick="loadBuckets()" style="display:none;margin-bottom:12px;">重试加载</button>
   <div class="bucket-list" id="bucket-list">
     <div class="loading">加载中… / Loading…</div>
   </div>
@@ -2379,12 +2385,12 @@
       <div style="margin-bottom:18px;">
         <div style="font-weight:600;font-size:13px;margin-bottom:6px;">称呼 / 昵称 <span class="en">Name</span></div>
         <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px;line-height:1.6;">
-          系统通知 + 记忆里对你的称呼（如你的名字或昵称）。留空 = 默认「人类」。<br>
+          系统通知 + 记忆里对你的称呼（如你的名字或昵称）。留空 = 沿用 identity 显示名；identity 未配置时才使用「人类」。<br>
           保存时会把已有记忆里的旧称呼一并换成新名（标题 / 正文 / 备注），新旧不再并存。
         </div>
         <div class="config-row">
           <label>称呼</label>
-          <input type="text" id="settings-human-name" placeholder="人类" maxlength="20" style="width:180px;" />
+          <input type="text" id="settings-human-name" placeholder="沿用 identity 显示名" maxlength="20" style="width:180px;" />
         </div>
         <div style="display:flex;gap:8px;align-items:center;margin-top:6px;">
           <button class="btn-primary" onclick="saveHumanName()" title="保存 / Save" style="padding:0 14px;height:36px;display:inline-flex;align-items:center;gap:5px;"><i data-lucide="check"></i> 保存 Save</button>
@@ -3272,24 +3278,56 @@ function setHwSwitch(cbId, state) {
 // Auth system / 认证系统
 // ========================================
 async function checkAuth() {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(function() { controller.abort(); }, 12000);
   try {
-    const resp = await fetch('/auth/status');
+    let resp = null;
+    let lastError = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        resp = await fetch('/auth/status', { signal: controller.signal });
+      } catch (e) {
+        if (controller.signal.aborted) throw e;
+        lastError = e;
+        resp = null;
+      }
+      if (resp && resp.ok) break;
+      const status = resp ? resp.status : 0;
+      const transient = !resp || status === 502 || status === 503 || status === 504;
+      if (!transient || attempt === 2) {
+        if (resp && !resp.ok) throw new Error('HTTP ' + resp.status);
+        throw lastError || new Error('HTTP ' + status);
+      }
+      await new Promise(function(r) { setTimeout(r, 600 * (attempt + 1)); });
+    }
+    if (!resp) throw lastError || new Error('认证状态读取失败');
     const data = await resp.json();
     if (data.setup_needed) {
+      document.getElementById('auth-overlay').style.display = 'flex';
       document.getElementById('auth-subtitle').textContent = '首次设置 / First-time setup';
       document.getElementById('auth-setup-form').style.display = 'block';
+      document.getElementById('auth-login-form').style.display = 'none';
       return false;
     } else if (data.authenticated) {
       document.getElementById('auth-overlay').style.display = 'none';
       return true;
     } else {
+      document.getElementById('auth-overlay').style.display = 'flex';
       document.getElementById('auth-subtitle').textContent = '请输入访问密码 / Enter access password';
+      document.getElementById('auth-setup-form').style.display = 'none';
       document.getElementById('auth-login-form').style.display = 'block';
       return false;
     }
-  } catch {
-    document.getElementById('auth-overlay').style.display = 'none';
-    return true;
+  } catch (e) {
+    document.getElementById('auth-overlay').style.display = 'flex';
+    document.getElementById('auth-subtitle').textContent = '认证状态读取失败 / Failed to verify identity';
+    document.getElementById('auth-setup-form').style.display = 'none';
+    document.getElementById('auth-login-form').style.display = 'block';
+    var detail = e.name === 'AbortError' ? '请求超时，请重试' : e.message;
+    showAuthError('认证状态读取失败: ' + detail);
+    return false;
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
@@ -3316,6 +3354,8 @@ async function doSetup() {
     await fetch('/auth/security-question', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({question: q, answer: a}) });
   }
   document.getElementById('auth-overlay').style.display = 'none';
+  loadBuckets();
+  loadStatusBanner();
 }
 
 function showLogin() {
@@ -3343,6 +3383,8 @@ async function doRecover() {
   const resp = await fetch('/auth/recover', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({answer, new_password: newPwd}) });
   if (resp.ok) {
     document.getElementById('auth-overlay').style.display = 'none';
+    loadBuckets();
+    loadStatusBanner();
   } else {
     const d = await resp.json().catch(() => ({}));
     showAuthError(d.error || '验证失败');
@@ -3354,9 +3396,11 @@ async function doLogin() {
   const resp = await fetch('/auth/login', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({password: pwd}) });
   if (resp.ok) {
     document.getElementById('auth-overlay').style.display = 'none';
+    loadBuckets();
+    loadStatusBanner();
   } else {
     const d = await resp.json().catch(() => ({}));
-    showAuthError(d.detail || '密码错误');
+    showAuthError(d.error || d.detail || '密码错误');
   }
 }
 
@@ -4195,10 +4239,12 @@ async function restartService() {
 
 // authFetch: wraps fetch, shows auth overlay on 401
 async function authFetch(url, options) {
+  const method = String((options && options.method) || 'GET').toUpperCase();
+  const retryableMethod = method === 'GET' || method === 'HEAD';
   let resp = await fetch(url, options);
   // 瞬时网关错误（多见于 Cloudflare 隧道刚重连的几秒窗口）：自动重试一次。
-  // 这些后端接口都是幂等的（读取 / upsert），重试安全，能让隧道抖动对用户隐形。
-  if (resp.status === 502 || resp.status === 503 || resp.status === 504) {
+  // 只重试幂等读取；写请求可能已经在上游成功，自动重放会产生重复副作用。
+  if (retryableMethod && (resp.status === 502 || resp.status === 503 || resp.status === 504)) {
     await new Promise(function (r) { setTimeout(r, 1200); });
     try { resp = await fetch(url, options); } catch (e) { /* 保留首个响应 */ }
   }
@@ -4417,12 +4463,30 @@ function doSearch() {
 async function loadBuckets() {
   var generation = ++bucketLoadGeneration;
   var requestedSort = bucketSort;
+  var statusEl = document.getElementById('bucket-load-status');
+  var retryEl = document.getElementById('bucket-load-retry');
   try {
+    if (statusEl) {
+      statusEl.style.display = 'none';
+      statusEl.textContent = '';
+    }
+    if (retryEl) retryEl.style.display = 'none';
     var sortQuery = requestedSort === 'score'
       ? ''
       : '?sort=' + encodeURIComponent(requestedSort);
-    const res = await fetch(BASE + '/api/buckets' + sortQuery);
-    const data = await res.json();
+    const controller = new AbortController();
+    const timeoutId = setTimeout(function() {
+      controller.abort();
+    }, 12000);
+    let res;
+    let data;
+    try {
+      res = await authFetch(BASE + '/api/buckets' + sortQuery, { signal: controller.signal });
+      if (!res) return;
+      data = await res.json();
+    } finally {
+      clearTimeout(timeoutId);
+    }
     if (!res.ok || !Array.isArray(data)) {
       throw new Error((data && data.error) ? data.error : `HTTP ${res.status}`);
     }
@@ -4443,7 +4507,13 @@ async function loadBuckets() {
     if (data.length === 0 && window.ObPet) window.ObPet.react('empty');
   } catch (e) {
     if (generation !== bucketLoadGeneration || requestedSort !== bucketSort) return;
-    document.getElementById('bucket-list').innerHTML = '<div class="loading">加载失败: ' + esc(e.message) + '</div>';
+    var detail = e.name === 'AbortError' ? '加载超时（12 秒），请重试' : e.message;
+    if (statusEl) {
+      statusEl.textContent = '桶列表加载失败: ' + detail;
+      statusEl.style.display = 'block';
+    }
+    if (retryEl) retryEl.style.display = 'inline-flex';
+    document.getElementById('bucket-list').innerHTML = '<div class="loading">加载失败: ' + esc(detail) + '</div>';
     if (window.ObPet) window.ObPet.react('connection_error');
   }
 }
@@ -9317,8 +9387,8 @@ function copyFeedback() {
 // ============================================================
 async function loadHumanName() {
   try {
-    var res = await fetch(BASE + '/api/settings/human');
-    if (res.ok) {
+    var res = await authFetch(BASE + '/api/settings/human');
+    if (res && res.ok) {
       var data = await res.json();
       var el = document.getElementById('settings-human-name');
       if (el) el.value = data.human || '';
@@ -9329,15 +9399,17 @@ async function loadHumanName() {
 async function saveHumanName() {
   var el = document.getElementById('settings-human-name');
   var msg = document.getElementById('settings-human-msg');
-  var name = (el ? el.value.trim() : '') || '人类';
+  var name = el ? el.value.trim() : '';
   try {
-    var res = await fetch(BASE + '/api/settings/human', {
+    var res = await authFetch(BASE + '/api/settings/human', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ human: name }),
     });
+    if (!res) return;
     var data = await res.json();
     if (!res.ok) throw new Error(data.error || res.statusText);
+    if (el) el.value = data.human || '';
     var changed = (data.renamed && data.renamed.buckets_changed) || 0;
     if (msg) {
       msg.textContent = changed > 0 ? ('已保存，并同步了 ' + changed + ' 条旧记忆') : '已保存';

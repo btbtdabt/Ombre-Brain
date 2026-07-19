@@ -83,10 +83,12 @@ def test_desktop_management_api_first_run_and_authenticated_flow():
         assert update_info.json()["version"] == version.json()["version"]
 
         auth_after = client.get("/auth/status")
-        assert auth_after.json() == {
-            "authenticated": True,
-            "setup_needed": False,
-        }
+        auth_after_payload = auth_after.json()
+        assert auth_after_payload["authenticated"] is True
+        assert auth_after_payload["setup_needed"] is False
+        assert set(auth_after_payload["identity"].keys()) == {"user_name", "ai_name"}
+        assert auth_after_payload["identity"]["user_name"]
+        assert auth_after_payload["identity"]["ai_name"]
 
         config = client.get("/api/config")
         assert config.status_code == 200

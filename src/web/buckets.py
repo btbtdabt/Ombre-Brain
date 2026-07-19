@@ -12,10 +12,12 @@ web/buckets.py — 记忆桶管理 + 设置 + 锚点 + 自我认知读取
 """
 
 from contextlib import AsyncExitStack
+from typing import Any, cast
 
 from starlette.requests import Request
 from starlette.responses import Response
 
+from identity import effective_human_name, identity_human_name, validate_human_name
 from memory_messages import resolved_hint
 from . import _shared as sh
 
@@ -162,7 +164,7 @@ def register(mcp) -> None:
                     return (0, ordered_timestamp, str(item["id"]))
 
                 result.sort(key=created_sort_key)
-            return JSONResponse(result)
+            return JSONResponse(result, headers={"Cache-Control": "no-store"})
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -196,7 +198,7 @@ def register(mcp) -> None:
             "display_content": strip_wikilinks(raw_content),
             "score": sh.decay_engine.calculate_score(meta),
             "triggered_feels": triggered_feels,  # iter 1.9 D
-        })
+        }, headers={"Cache-Control": "no-store"})
 
 
     # ---- Bucket-level mutation endpoints (iter 1.4) ----
@@ -324,7 +326,9 @@ def register(mcp) -> None:
                         if adjusted_importance != current_importance:
                             update_kwargs["importance"] = adjusted_importance
 
-                ok = await sh.bucket_mgr.update(bucket_id, **update_kwargs)
+                ok = await sh.bucket_mgr.update(
+                    bucket_id, **cast(Any, update_kwargs)
+                )
                 if not ok:
                     latest = await sh.bucket_mgr.get(bucket_id)
                     if _is_terminal_memory_metadata(
@@ -448,10 +452,15 @@ def register(mcp) -> None:
                             "requested": requested_importance,
                             "applied": applied_importance,
                         }
-                ok = await sh.bucket_mgr.update(bucket_id, **update_kwargs)
+                ok = await sh.bucket_mgr.update(
+                    bucket_id, **cast(Any, update_kwargs)
+                )
                 if not ok:
                     return JSONResponse({"error": "update failed"}, status_code=500)
-                payload = {"ok": True, "dont_surface": new_val}
+                payload: dict[str, object] = {
+                    "ok": True,
+                    "dont_surface": new_val,
+                }
                 if quota_adjustment:
                     payload["quota_adjustment"] = quota_adjustment
                 return JSONResponse(payload)
@@ -523,7 +532,9 @@ def register(mcp) -> None:
                                 "requested": requested_importance,
                                 "applied": applied_importance,
                             }
-                    ok = await sh.bucket_mgr.update(bid, **update_kwargs)
+                    ok = await sh.bucket_mgr.update(
+                        bid, **cast(Any, update_kwargs)
+                    )
                     if ok:
                         ok_ids.append(bid)
                         if quota_adjustment:
@@ -583,7 +594,8 @@ def register(mcp) -> None:
             except Exception as exc:
                 errors.append({"id": bucket_id, "error": str(exc)})
         return JSONResponse({"ok": not errors, "action": action,
-                             "updated": updated, "missing": missing, "errors": errors})
+                             "updated": updated, "missing": missing, "errors": errors},
+                            headers={"Cache-Control": "no-store"})
 
     @mcp.custom_route("/api/developer/buckets/hard-delete", methods=["POST"])
     async def api_developer_hard_delete(request: Request) -> Response:
@@ -617,7 +629,8 @@ def register(mcp) -> None:
                 errors.append({"id": bucket_id, "error": result.get("error")})
         status = 200 if deleted and not errors else (403 if refused and not deleted else 400)
         return JSONResponse({"ok": bool(deleted) and not errors, "deleted": deleted,
-                             "refused": refused, "errors": errors}, status_code=status)
+                             "refused": refused, "errors": errors}, status_code=status,
+                            headers={"Cache-Control": "no-store"})
 
 
     # ---- iter 1.9 B: dashboard 调 sampling 配置 / sampling control ----
@@ -701,29 +714,53 @@ def register(mcp) -> None:
         if err:
             return err
         if request.method == "GET":
-            return JSONResponse({"human": sh.config.get("human", "人类")})
+            return JSONResponse(
+                {"human": effective_human_name(sh.config, default="人类")},
+                headers={"Cache-Control": "no-store"},
+            )
         try:
             body = await sh._read_json_object(request)
         except Exception:
             return JSONResponse({"error": "invalid JSON body"}, status_code=400)
         human_raw = body.get("human", "")
-        if not isinstance(human_raw, str):
-            return JSONResponse({"error": "human name must be a string"}, status_code=400)
-        human = human_raw.strip()
-        if not human:
+        try:
+            requested_human = validate_human_name(human_raw, allow_empty=True)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+
+        identity_fallback = identity_human_name(sh.config, default="")
+        if requested_human:
+            human = requested_human
+            inherit_identity = False
+        elif identity_fallback:
+            try:
+                human = validate_human_name(identity_fallback)
+            except ValueError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+            inherit_identity = True
+        else:
+            # Preserve the historical Dashboard default explicitly.  Otherwise
+            # writers that use the older "用户" fallback would diverge after a
+            # restart once the top-level override had been removed.
             human = "人类"
-        if len(human) > 20:
-            return JSONResponse({"error": "human name must be ≤ 20 characters"}, status_code=400)
+            inherit_identity = False
+
         # Config read/write, live runtime update and the full-vault replacement
         # are one outer transaction.  Without it, concurrent A->B and B->C
         # requests can interleave their per-bucket writes and leave mixed names.
         async with sh.bucket_mgr.human_name_change_turn():
-            # 旧称呼（默认「用户」，与 dehydrator / import 的兜底同源）—— 用于把老桶里的旧词换成新名。
-            old_human = (sh.config.get("human") or "用户").strip() or "用户"
+            # Legacy writers used "用户" when neither an override nor identity
+            # existed, so a first rename must migrate that actual stored label.
+            old_human = effective_human_name(sh.config, default="用户")
             try:
-                atomic_update_config_yaml(
-                    lambda save_config: save_config.__setitem__("human", human)
-                )
+                if not inherit_identity:
+                    atomic_update_config_yaml(
+                        lambda save_config: save_config.__setitem__("human", human)
+                    )
+                else:
+                    atomic_update_config_yaml(
+                        lambda save_config: save_config.pop("human", None)
+                    )
             except Exception as e:
                 # Do not mutate live state unless persistence succeeded.
                 return JSONResponse(
@@ -731,7 +768,10 @@ def register(mcp) -> None:
                     status_code=500,
                 )
 
-            sh.config["human"] = human
+            if not inherit_identity:
+                sh.config["human"] = human
+            else:
+                sh.config.pop("human", None)
             # 同步活的 dehydrator.human：否则改名后、重启前，新记忆仍按旧称呼脱水。
             if getattr(sh, "dehydrator", None) is not None and hasattr(
                 sh.dehydrator, "human"
@@ -745,7 +785,10 @@ def register(mcp) -> None:
                     renamed = await rename_human_in_buckets(old_human, human)
                 except Exception as _re:
                     logger.warning(f"human rename batch failed: {_re}")
-        return JSONResponse({"ok": True, "human": human, "renamed": renamed})
+        return JSONResponse(
+            {"ok": True, "human": human, "renamed": renamed},
+            headers={"Cache-Control": "no-store"},
+        )
 
     # ---- 手动「同步旧记忆」：把指定旧称呼（默认「用户」）批量换成当前称呼 ----
     # 用于：已经改过昵称、但改名前就存在的老桶仍写着旧词，breath 里新旧名并存。
@@ -769,7 +812,7 @@ def register(mcp) -> None:
             return JSONResponse({"error": "缺少要替换的旧称呼"}, status_code=400)
         async with sh.bucket_mgr.human_name_change_turn():
             # Re-read inside the same reservation used by name-change requests.
-            cur = (sh.config.get("human") or "人类").strip() or "人类"
+            cur = effective_human_name(sh.config, default="人类")
             if from_term == cur:
                 return JSONResponse({
                     "ok": True, "from": from_term, "to": cur,
@@ -780,7 +823,10 @@ def register(mcp) -> None:
                 stats = await rename_human_in_buckets(from_term, cur)
             except Exception as e:
                 return JSONResponse({"error": str(e)}, status_code=500)
-        return JSONResponse({"ok": True, "from": from_term, "to": cur, "renamed": stats})
+        return JSONResponse(
+            {"ok": True, "from": from_term, "to": cur, "renamed": stats},
+            headers={"Cache-Control": "no-store"},
+        )
 
 
     # ---- iter 2.0: anchor 端点 / coordinate-system buckets ----
@@ -814,7 +860,7 @@ def register(mcp) -> None:
             "count": len(items),
             "limit": sh.bucket_mgr.ANCHOR_LIMIT,
             "anchors": items,
-        })
+        }, headers={"Cache-Control": "no-store"})
 
 
     @mcp.custom_route("/api/bucket/{bucket_id}/anchor", methods=["POST"])
@@ -847,7 +893,7 @@ def register(mcp) -> None:
             # Cap-reached errors → 409 Conflict; everything else → 500
             status = 409 if "上限" in result.get("error", "") or "limit" in result.get("error", "") else 500
             return JSONResponse(result, status_code=status)
-        return JSONResponse(result)
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
 
     @mcp.custom_route("/api/bucket/{bucket_id}", methods=["DELETE"])
@@ -918,7 +964,7 @@ def register(mcp) -> None:
                     "aspect": aspect,
                     "created": meta.get("created", ""),
                 })
-            return JSONResponse(result)
+            return JSONResponse(result, headers={"Cache-Control": "no-store"})
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 

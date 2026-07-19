@@ -2823,6 +2823,7 @@
   <div class="search-bar">
     <input type="search" id="search-input" name="ombre-memory-query" placeholder="搜索记忆…" autocomplete="off" spellcheck="false" />
   </div>
+  <a href="./" title="返回主 Dashboard" style="background:none;border:1px solid var(--border);color:var(--text-dim);border-radius:20px;padding:7px 14px;font-size:12px;cursor:pointer;text-decoration:none;">主 Dashboard</a>
   <button onclick="doLogout()" title="退出登录" style="background:none;border:1px solid var(--border);color:var(--text-dim);border-radius:20px;padding:7px 14px;font-size:12px;cursor:pointer;">退出</button>
 </div>
 
@@ -2864,6 +2865,8 @@
     <span class="bucket-bulk-status bulk-hidden" id="bucket-bulk-status">未选择</span>
   </div>
   <div class="bucket-bulk-message" id="bucket-bulk-message"></div>
+  <div id="bucket-load-status" style="display:none;font-size:12px;color:var(--text-dim);margin:8px 0 10px;"></div>
+  <button type="button" id="bucket-load-retry" onclick="loadBuckets()" style="display:none;margin-bottom:12px;">重试加载</button>
   <div class="bucket-list" id="bucket-list">
     <div class="loading">加载中…</div>
   </div>
@@ -3837,7 +3840,7 @@
 </div>
 
 <script>
-const PATH_PREFIX = location.pathname.replace(/\/dashboard\/?$/, '');
+const PATH_PREFIX = location.pathname.replace(/\/(?:memory-dashboard|dashboard)\/?$/, '');
 const BASE = location.origin + PATH_PREFIX;
 let allBuckets = [];
 let renderedBuckets = [];
@@ -3854,8 +3857,8 @@ let bucketSortMode = 'time';
 let bucketSortDescending = true;
 let bucketBulkMode = false;
 let selectedBucketIds = new Set();
-let dashboardCommentAuthor = 'Rain';
-let dashboardAiAuthor = 'Haven';
+let dashboardCommentAuthor = 'User';
+let dashboardAiAuthor = 'AI';
 let reflectionSelectedDate = formatLocalDate(new Date());
 let reflectionCurrentMonth = monthStart(new Date());
 let configSnapshot = null;
@@ -3869,7 +3872,31 @@ function authUrl(path) {
 }
 
 async function authFetch(url, options) {
-  const response = await fetch(url, options);
+  let response = null;
+  let lastError = null;
+  const method = String((options && options.method) || 'GET').toUpperCase();
+  const retryableMethod = method === 'GET' || method === 'HEAD';
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      response = await fetch(url, options);
+    } catch (e) {
+      if (e.name === 'AbortError' || (options && options.signal && options.signal.aborted)) {
+        throw e;
+      }
+      lastError = e;
+      response = null;
+    }
+    if (response && response.ok) break;
+    const status = response ? response.status : 0;
+    const transient = retryableMethod && (
+      !response || status === 502 || status === 503 || status === 504
+    );
+    if (!transient || attempt === 2) break;
+    await new Promise(function(r) { setTimeout(r, 600 * (attempt + 1)); });
+  }
+  if (!response) {
+    throw lastError || new Error('请求失败');
+  }
   if (response.status === 401) {
     showAuthOverlay(false);
     return null;
@@ -3909,8 +3936,29 @@ function clearAuthSensitiveFields(password) {
 }
 
 async function checkAuth() {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(function() { controller.abort(); }, 12000);
   try {
-    const response = await fetch(authUrl('/auth/status'));
+    let response = null;
+    let lastError = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        response = await fetch(authUrl('/auth/status'), { signal: controller.signal });
+      } catch (e) {
+        if (controller.signal.aborted) throw e;
+        lastError = e;
+        response = null;
+      }
+      if (response && response.ok) break;
+      const status = response ? response.status : 0;
+      const transient = !response || status === 502 || status === 503 || status === 504;
+      if (!transient || attempt === 2) {
+        if (response && !response.ok) throw new Error('HTTP ' + response.status);
+        throw lastError || new Error('HTTP ' + status);
+      }
+      await new Promise(function(r) { setTimeout(r, 600 * (attempt + 1)); });
+    }
+    if (!response) throw lastError || new Error('认证状态读取失败');
     const data = await response.json();
     if (data.identity) {
       if (data.identity.user_name) dashboardCommentAuthor = data.identity.user_name;
@@ -3923,9 +3971,15 @@ async function checkAuth() {
     showAuthOverlay(Boolean(data.setup_needed));
     return false;
   } catch (e) {
-    showAuthOverlay(false);
-    showAuthError('认证状态读取失败: ' + e.message);
+    document.getElementById('auth-overlay').style.display = 'flex';
+    document.getElementById('auth-subtitle').textContent = '认证状态读取失败 / Failed to verify identity';
+    document.getElementById('auth-setup-form').style.display = 'none';
+    document.getElementById('auth-login-form').style.display = 'block';
+    var detail = e.name === 'AbortError' ? '请求超时，请重试' : e.message;
+    showAuthError('认证状态读取失败: ' + detail);
     return false;
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
@@ -3940,9 +3994,8 @@ async function doSetup() {
     body: JSON.stringify({password: p1}),
   });
   if (response.ok) {
-    document.getElementById('auth-overlay').style.display = 'none';
     clearAuthSensitiveFields(p1);
-    loadBuckets();
+    if (await checkAuth()) loadBuckets();
     return;
   }
   const data = await response.json().catch(() => ({}));
@@ -3957,10 +4010,9 @@ async function doLogin() {
     body: JSON.stringify({password}),
   });
   if (response.ok) {
-    document.getElementById('auth-overlay').style.display = 'none';
     clearAuthSensitiveFields(password);
     setTimeout(function() { clearAuthSensitiveFields(password); }, 80);
-    loadBuckets();
+    if (await checkAuth()) loadBuckets();
     return;
   }
   showAuthError('密码错误');
@@ -4023,11 +4075,35 @@ document.getElementById('search-input').addEventListener('input', (e) => {
 
 async function loadBuckets(options) {
   options = options || {};
+  var statusEl = document.getElementById('bucket-load-status');
+  var retryEl = document.getElementById('bucket-load-retry');
   try {
-    if (!domainOptions.length) await loadDomainTaxonomy();
-    const res = await authFetch(BASE + '/api/buckets');
-    if (!res) return;
-    allBuckets = await res.json();
+    if (statusEl) {
+      statusEl.style.display = 'none';
+      statusEl.textContent = '';
+    }
+    if (retryEl) retryEl.style.display = 'none';
+    if (!domainOptions.length) {
+      renderBulkDomainOptions();
+      loadDomainTaxonomy();
+    }
+    const controller = new AbortController();
+    const timeoutId = setTimeout(function() {
+      controller.abort();
+    }, 12000);
+    let res;
+    let data;
+    try {
+      res = await authFetch(BASE + '/api/buckets', { signal: controller.signal });
+      if (!res) return;
+      data = await res.json();
+    } finally {
+      clearTimeout(timeoutId);
+    }
+    if (!res.ok || !Array.isArray(data)) {
+      throw new Error((data && data.error) ? data.error : 'HTTP ' + res.status);
+    }
+    allBuckets = data;
     updateStats();
     loadDarkroomDoor();
     buildFilters();
@@ -4047,7 +4123,13 @@ async function loadBuckets(options) {
     }
     if (getActiveTab() === 'word-map') loadWordMap();
   } catch (e) {
-    document.getElementById('bucket-list').innerHTML = '<div class="loading">加载失败: ' + esc(e.message) + '</div>';
+    var detail = e.name === 'AbortError' ? '加载超时（12 秒），请重试' : e.message;
+    if (statusEl) {
+      statusEl.textContent = '桶列表加载失败: ' + detail;
+      statusEl.style.display = 'block';
+    }
+    if (retryEl) retryEl.style.display = 'inline-flex';
+    document.getElementById('bucket-list').innerHTML = '<div class="loading">加载失败: ' + esc(detail) + '</div>';
   }
 }
 
@@ -4091,14 +4173,29 @@ async function loadTodos() {
 }
 
 async function loadDomainTaxonomy() {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(function() { controller.abort(); }, 8000);
   try {
-    var res = await authFetch(BASE + '/api/domain-taxonomy');
-    if (!res) return;
+    var res = await authFetch(
+      BASE + '/api/domain-taxonomy',
+      { signal: controller.signal }
+    );
+    if (!res) return false;
     var data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status);
     domainOptions = Array.isArray(data.domains) ? data.domains : [];
     renderBulkDomainOptions();
+    return true;
   } catch (e) {
+    if (e.name === 'AbortError') {
+      renderBulkDomainOptions();
+      return false;
+    }
     console.error('Domain taxonomy failed:', e);
+    renderBulkDomainOptions();
+    return false;
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
@@ -4775,7 +4872,7 @@ async function loadDreams() {
       return;
     }
     content.innerHTML = '<div class="dream-list">' + records.map(function(record) {
-      var aiName = record.ai_name || dashboardAiAuthor || 'Haven';
+      var aiName = record.ai_name || dashboardAiAuthor || 'AI';
       var title = formatDreamDate(record) + ' ' + esc(aiName) + ' 做了一个梦';
       if (!record.has_body) {
         return '<div class="dream-row"><div class="dream-row-static">' +

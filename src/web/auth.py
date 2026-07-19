@@ -21,6 +21,7 @@ from typing import cast
 from starlette.requests import Request
 from starlette.responses import Response
 
+from identity import effective_ai_name, effective_human_name
 from . import _shared as sh
 
 _MAX_PASSWORD_CHARS = 1024
@@ -229,10 +230,18 @@ def register(mcp) -> None:
     async def auth_status(request: Request) -> Response:
         """Return auth state (authenticated, setup_needed)."""
         from starlette.responses import JSONResponse
-        return JSONResponse({
-            "authenticated": sh._is_authenticated(request),
+        authenticated = sh._is_authenticated(request)
+        payload: dict[str, object] = {
+            "authenticated": authenticated,
             "setup_needed": sh._is_setup_needed(),
-        })
+        }
+        if authenticated:
+            config = getattr(sh, "config", None)
+            payload["identity"] = {
+                "user_name": effective_human_name(config, default="人类"),
+                "ai_name": effective_ai_name(config),
+            }
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
     @mcp.custom_route("/auth/setup", methods=["POST"])
     async def auth_setup_endpoint(request: Request) -> Response:

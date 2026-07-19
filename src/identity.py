@@ -2,6 +2,7 @@ DEFAULT_AI_NAME = "AI"
 DEFAULT_USER_NAME = "User"
 DEFAULT_USER_DISPLAY_NAME = "用户"
 DEFAULT_USER_ALIASES = ["对方"]
+HUMAN_NAME_MAX_LENGTH = 20
 
 GENERIC_AI_NAME = "AI"
 GENERIC_USER_NAME = "User"
@@ -45,6 +46,63 @@ def identity_names(config: dict | None = None) -> dict:
         "user_aliases_text": "、".join(aliases),
         "relationship_terms": relationship_terms,
     }
+
+
+def identity_human_name(
+    config: dict | None = None,
+    default: str = DEFAULT_USER_DISPLAY_NAME,
+) -> str:
+    """Resolve the human-facing name from identity fields only."""
+    identity_cfg = config.get("identity") if isinstance(config, dict) else None
+    if isinstance(identity_cfg, dict):
+        for key in ("user_display_name", "human_name", "user_name"):
+            value = str(identity_cfg.get(key) or "").strip()
+            if value:
+                return value
+    return default
+
+
+def effective_human_name(
+    config: dict | None = None,
+    default: str = DEFAULT_USER_DISPLAY_NAME,
+) -> str:
+    """Resolve an explicit human override, then fall back to identity."""
+    if isinstance(config, dict):
+        explicit = str(config.get("human") or "").strip()
+        if explicit:
+            return explicit
+    return identity_human_name(config, default=default)
+
+
+def effective_ai_name(
+    config: dict | None = None,
+    default: str = DEFAULT_AI_NAME,
+) -> str:
+    """Resolve the configured AI name without exposing unrelated identity data."""
+    identity_cfg = config.get("identity") if isinstance(config, dict) else None
+    if isinstance(identity_cfg, dict):
+        value = str(identity_cfg.get("ai_name") or "").strip()
+        if value:
+            return value
+    return default
+
+
+def validate_human_name(value: object, *, allow_empty: bool = False) -> str:
+    """Validate a dashboard-safe human display name and return it trimmed."""
+    if not isinstance(value, str):
+        raise ValueError("human name must be a string")
+    text = value.strip()
+    if not text:
+        if allow_empty:
+            return ""
+        raise ValueError("human name must not be empty")
+    if len(text) > HUMAN_NAME_MAX_LENGTH:
+        raise ValueError(
+            f"human name must be ≤ {HUMAN_NAME_MAX_LENGTH} characters"
+        )
+    if any(ord(character) < 32 or ord(character) == 127 for character in text):
+        raise ValueError("human name must not contain control characters")
+    return text
 
 
 def generic_identity_names() -> dict:

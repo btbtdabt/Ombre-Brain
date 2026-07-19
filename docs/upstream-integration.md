@@ -100,6 +100,12 @@ fixed access token remains a resource-bound compatibility credential.
 
 ## Integration Batch Ledger
 
+### 2026-07-18 dashboard parity repair
+
+| Source range | Disposition | Evidence |
+| --- | --- | --- |
+| Local fork `main` | Preserving current-side dashboard parity | `/` remains the P0/system Dashboard, `/memory-dashboard` stays the current/Ying memory Dashboard with `/dashboard` redirect compatibility, assets/API resolve from the application mount without treating the dashboard route as a prefix, authenticated `/auth/status` returns minimal identity only, `human` consistently honors the explicit override or validated identity fallback, and bucket loading is bounded with retry affordances. Covered by the new dual-dashboard regression tests and the updated web/auth/buckets contract. |
+
 ### 2026-07-16 P0luz-base migration
 
 | Source range | Disposition | Evidence |

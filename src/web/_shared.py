@@ -40,13 +40,18 @@ import threading
 from collections import OrderedDict, deque
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Iterator
+from typing import TYPE_CHECKING, Iterator, cast
 
 from starlette.requests import Request
 from starlette.responses import Response
 
 from ombrebrain.policy.update_policy import evaluate_update_manifest as _evaluate_update_manifest
 from operation_runtime import run_optional_operation
+
+if TYPE_CHECKING:
+    from bucket_manager import BucketManager
+    from decay_engine import DecayEngine
+    from dehydrator import Dehydrator
 
 logger = logging.getLogger("ombre_brain")
 
@@ -166,9 +171,9 @@ config: dict = {}
 # 这样所有模块下次读 sh.embedding_engine 都拿到新实例。
 version: str = ""
 repo_root: str = ""   # 仓库根目录（server.py 注入；用于定位 frontend/ 等，避免各模块各算 __file__）
-bucket_mgr = None
-dehydrator = None
-decay_engine = None
+bucket_mgr = cast("BucketManager", None)
+dehydrator = cast("Dehydrator", None)
+decay_engine = cast("DecayEngine", None)
 embedding_engine = None
 embedding_outbox = None
 import_engine = None

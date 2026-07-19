@@ -2,6 +2,20 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`p0luz/ombre-brain:<VERSION>`）。
 
+## 2.7.7
+
+### 修复 / Fixed
+
+- 修复双 Dashboard 入口的路径和身份契约：`/` 继续作为 P0 / system Dashboard，`/memory-dashboard` 与 `/dashboard` 继续指向 current / Ying 记忆 Dashboard，并补上两边的交叉跳转入口。
+- 修复 memory Dashboard 把自身路由误当作部署前缀、继而错误拼接 API 与静态资源路径的问题；同时保留反向代理使用真实路径前缀时的挂载兼容性。
+- `auth/status` 只在已认证时返回最小身份信息，避免前端误用旧的默认昵称；`/api/settings/human` 在 human 未显式设置时改为回退到 identity 里的展示名，而不是固定回退到 `人类`。
+- 身份称呼的脱水、导入、同步旧记忆与 Dashboard 展示统一使用同一套有效值规则，显式 human 覆盖 identity，清空时恢复经过验证的 identity 展示名；无 identity 的旧安装继续稳定沿用历史默认值并迁移旧的 `用户` 称呼。
+- 桶列表加载增加有界超时与可见重试状态，避免长时间卡在“加载中”；分类目录不再阻塞桶列表；认证状态读取失败不再假装已登录，登录成功后会立即启动数据加载。瞬时网关重试仅用于 GET/HEAD，避免重复提交写操作。
+
+### 维护 / Maintenance
+
+- 根目录 `VERSION` 与热更新优先读取的 `src/VERSION` 同步更新为 `2.7.7`。
+
 ## 2.7.6
 
 ### 修复 / Fixed
