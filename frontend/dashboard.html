@@ -3231,7 +3231,7 @@ window.OmbreDashboardPathEnv = window.OmbreDashboardCore.createPathEnv({ locatio
     </p>
     <div style="margin-top:18px;display:flex;gap:8px;justify-content:flex-end;">
       <button onclick="dismissOnboarding()" style="background:var(--surface);color:var(--text);padding:8px 18px;border-radius:8px;cursor:pointer;">稍后设置</button>
-      <button onclick="location.href=window.OmbreDashboardPathEnv.route('onboarding')" style="background:var(--accent);color:#fff;border:none;padding:8px 18px;border-radius:8px;cursor:pointer;">开始安全部署</button>
+      <button onclick="openOnboardingSetup()" style="background:var(--accent);color:#fff;border:none;padding:8px 18px;border-radius:8px;cursor:pointer;">开始安全部署</button>
     </div>
   </div>
 </div>
@@ -3327,10 +3327,22 @@ function setHwSwitch(cbId, state) {
 // ========================================
 // Auth system / 认证系统
 // ========================================
-const DASHBOARD_PATH = window.OmbreDashboardPathEnv;
-const DASHBOARD_FILE_MODE = DASHBOARD_PATH.isFilePreview === true;
+var DASHBOARD_PATH = window.DASHBOARD_PATH || window.OmbreDashboardPathEnv;
+if (!window.DASHBOARD_PATH) {
+  Object.defineProperty(window, 'DASHBOARD_PATH', {
+    value: DASHBOARD_PATH,
+    configurable: true,
+    enumerable: false,
+    writable: false,
+  });
+}
+var DASHBOARD_FILE_MODE = DASHBOARD_PATH.isFilePreview === true;
 const dashboardAuthenticatedTimers = new Set();
 let dashboardSessionResetPromise = null;
+
+function openOnboardingSetup() {
+  window.location.href = DASHBOARD_PATH.route('onboarding');
+}
 
 function whenDashboardAuthenticated(callback) {
   return Promise.resolve(window.OmbreDashboardAuthReady).then(function runWhenAuthenticated(authenticated) {

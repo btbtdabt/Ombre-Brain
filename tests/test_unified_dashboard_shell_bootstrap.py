@@ -226,9 +226,9 @@ def test_dashboard_file_preview_stops_before_auth_requests() -> None:
     html = _read(DASHBOARD)
 
     early_path_env_offset = html.index("window.OmbreDashboardPathEnv =")
-    path_env_offset = html.index("const DASHBOARD_PATH =")
+    path_env_offset = html.index("var DASHBOARD_PATH =")
     file_mode_offset = html.index(
-        "const DASHBOARD_FILE_MODE = DASHBOARD_PATH.isFilePreview === true"
+        "var DASHBOARD_FILE_MODE = DASHBOARD_PATH.isFilePreview === true"
     )
     check_auth_offset = html.index("async function checkAuth()")
     file_guard_offset = html.index(
