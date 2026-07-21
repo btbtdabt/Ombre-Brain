@@ -19,7 +19,10 @@
 <link rel="stylesheet" href="./dashboard-assets/memory-insights.css?v=20260718-unified-v1">
 <link rel="stylesheet" href="./dashboard-assets/models-data.css?v=20260718-unified-v1">
 <link rel="stylesheet" href="./dashboard-assets/shared-bucket-studio.css?v=20260718-unified-v1">
-<script src="./dashboard-assets/core/path.js?v=20260718-unified-v1"></script>
+<script src="./dashboard-assets/core/path.js?v=20260721-file-preview-v1"></script>
+<script>
+window.OmbreDashboardPathEnv = window.OmbreDashboardCore.createPathEnv({ location: window.location });
+</script>
 <style>
   :root {
     /* === 复古掌机 retro-handheld palette — warm cream plastic + pale LCD + gold === */
@@ -3228,7 +3231,7 @@
     </p>
     <div style="margin-top:18px;display:flex;gap:8px;justify-content:flex-end;">
       <button onclick="dismissOnboarding()" style="background:var(--surface);color:var(--text);padding:8px 18px;border-radius:8px;cursor:pointer;">稍后设置</button>
-      <button onclick="location.href=DASHBOARD_PATH.route('onboarding')" style="background:var(--accent);color:#fff;border:none;padding:8px 18px;border-radius:8px;cursor:pointer;">开始安全部署</button>
+      <button onclick="location.href=window.OmbreDashboardPathEnv.route('onboarding')" style="background:var(--accent);color:#fff;border:none;padding:8px 18px;border-radius:8px;cursor:pointer;">开始安全部署</button>
     </div>
   </div>
 </div>
@@ -3324,7 +3327,8 @@ function setHwSwitch(cbId, state) {
 // ========================================
 // Auth system / 认证系统
 // ========================================
-const DASHBOARD_PATH = window.OmbreDashboardCore.createPathEnv({ location: window.location });
+const DASHBOARD_PATH = window.OmbreDashboardPathEnv;
+const DASHBOARD_FILE_MODE = DASHBOARD_PATH.isFilePreview === true;
 const dashboardAuthenticatedTimers = new Set();
 let dashboardSessionResetPromise = null;
 
@@ -3419,7 +3423,38 @@ async function handleDashboardUnauthorized() {
 window.clearAuthenticatedDashboardState = clearAuthenticatedDashboardState;
 window.handleDashboardUnauthorized = handleDashboardUnauthorized;
 
+function showDashboardFilePreviewNotice() {
+  window.OmbreDashboardAuthenticated = false;
+  const overlay = document.getElementById('auth-overlay');
+  const subtitle = document.getElementById('auth-subtitle');
+  const setupForm = document.getElementById('auth-setup-form');
+  const loginForm = document.getElementById('auth-login-form');
+  const recoveryForm = document.getElementById('auth-recovery-form');
+  const error = document.getElementById('auth-error');
+  if (overlay) overlay.style.display = 'flex';
+  if (subtitle) subtitle.textContent = '请通过服务地址打开 / Open via server';
+  if (setupForm) setupForm.style.display = 'none';
+  if (loginForm) loginForm.style.display = 'none';
+  if (recoveryForm) recoveryForm.style.display = 'none';
+  if (!error) return;
+  error.style.display = 'block';
+  error.replaceChildren();
+  const message = document.createTextNode(
+    '不能直接打开 dashboard.html。请先启动 Ombre Brain，再访问 ',
+  );
+  const link = document.createElement('a');
+  link.href = DASHBOARD_PATH.url('/');
+  link.textContent = 'http://localhost:18001/';
+  link.style.color = 'inherit';
+  link.style.fontWeight = '700';
+  error.append(message, link);
+}
+
 async function checkAuth() {
+  if (DASHBOARD_FILE_MODE) {
+    showDashboardFilePreviewNotice();
+    return false;
+  }
   const controller = new AbortController();
   const timeoutId = setTimeout(function() { controller.abort(); }, 12000);
   try {

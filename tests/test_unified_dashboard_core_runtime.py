@@ -185,6 +185,52 @@ for (const name of ['path.js', 'api.js', 'router.js']) {{
     }
 
 
+def test_path_env_turns_direct_file_open_into_safe_preview_mode() -> None:
+    source = _source("path.js")
+    script = f"""
+const vm = require('vm');
+const window = {{
+  location: {{
+    protocol: 'file:',
+    origin: 'null',
+    pathname: '/C:/Users/Amy98/Projects/Ombre-Brain/frontend/dashboard.html',
+    search: '',
+    hash: '',
+  }},
+  URL,
+}};
+window.window = window;
+vm.createContext(window);
+vm.runInContext({json.dumps(source)}, window, {{ filename: 'path.js' }});
+
+const core = window.OmbreDashboardCore;
+const filePreview = core.createPathEnv({{ location: window.location }});
+let invalidExplicitOrigin = '';
+try {{
+  core.createPathEnv({{ pathname: '/', origin: 'file:///tmp/dashboard.html' }});
+}} catch (error) {{
+  invalidExplicitOrigin = error.name;
+}}
+
+process.stdout.write(JSON.stringify({{
+  isFilePreview: filePreview.isFilePreview,
+  origin: filePreview.origin,
+  basePath: filePreview.basePath,
+  authStatusUrl: filePreview.api('/auth/status'),
+  invalidExplicitOrigin,
+}}));
+"""
+    result = _run_node(script)
+
+    assert result == {
+        "isFilePreview": True,
+        "origin": "http://localhost:18001",
+        "basePath": "",
+        "authStatusUrl": "http://localhost:18001/auth/status",
+        "invalidExplicitOrigin": "TypeError",
+    }
+
+
 def test_api_client_scopes_unauthorized_handlers_per_request() -> None:
     sources = {name: _source(name) for name in ("path.js", "api.js")}
     script = f"""

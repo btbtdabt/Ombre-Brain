@@ -207,7 +207,8 @@ def test_bootstrap_uses_canonical_router_state_for_workspace_and_panel_tabs() ->
 def test_mounted_dashboard_keeps_legacy_auth_and_api_requests_under_core_prefix() -> None:
     html = _read(DASHBOARD)
 
-    assert "const DASHBOARD_PATH = window.OmbreDashboardCore.createPathEnv" in html
+    assert "window.OmbreDashboardPathEnv = window.OmbreDashboardCore.createPathEnv" in html
+    assert "const DASHBOARD_PATH = window.OmbreDashboardPathEnv" in html
     assert "const BASE = DASHBOARD_PATH.baseUrl" in html
     assert "const resolvedUrl = DASHBOARD_PATH.api(url);" in html
     assert "fetch('/auth" not in html
@@ -219,6 +220,35 @@ def test_mounted_dashboard_keeps_legacy_auth_and_api_requests_under_core_prefix(
     assert 'src="./static/icon.svg"' in html
     assert 'href="/static/' not in html
     assert 'src="/static/' not in html
+
+
+def test_dashboard_file_preview_stops_before_auth_requests() -> None:
+    html = _read(DASHBOARD)
+
+    early_path_env_offset = html.index("window.OmbreDashboardPathEnv =")
+    path_env_offset = html.index("const DASHBOARD_PATH =")
+    file_mode_offset = html.index(
+        "const DASHBOARD_FILE_MODE = DASHBOARD_PATH.isFilePreview === true"
+    )
+    check_auth_offset = html.index("async function checkAuth()")
+    file_guard_offset = html.index(
+        "if (DASHBOARD_FILE_MODE)", check_auth_offset
+    )
+    auth_request_offset = html.index(
+        "fetch(DASHBOARD_PATH.api('/auth/status')", check_auth_offset
+    )
+    onboarding_cta_offset = html.index(
+        "location.href=window.OmbreDashboardPathEnv.route('onboarding')"
+    )
+
+    assert early_path_env_offset < onboarding_cta_offset < path_env_offset
+    assert path_env_offset < file_mode_offset < check_auth_offset
+    assert check_auth_offset < file_guard_offset < auth_request_offset
+    assert "showDashboardFilePreviewNotice();" in html[
+        file_guard_offset:auth_request_offset
+    ]
+    assert "不能直接打开 dashboard.html" in html
+    assert "http://localhost:18001/" in html
 
 
 @pytest.mark.asyncio

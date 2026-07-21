@@ -4,6 +4,7 @@
   const core = global.OmbreDashboardCore = global.OmbreDashboardCore || {};
   const ENTRY_SUFFIXES = ["/memory-dashboard", "/dashboard", "/letters"];
   const BOOT_MODES = new Set(["shared", "memory", "models-data", "system"]);
+  const LOCAL_DASHBOARD_ORIGIN = "http://localhost:18001";
 
   function normalizePathname(pathname) {
     let value = typeof pathname === "string" ? pathname : "/";
@@ -56,14 +57,21 @@
   function createPathEnv(options) {
     const settings = options || {};
     const currentLocation = settings.location || global.location || {};
-    const pathname = normalizePathname(settings.pathname || currentLocation.pathname || "/");
+    const currentProtocol = String(currentLocation.protocol || "").toLowerCase();
+    const isFilePreview = settings.origin === undefined
+      && (currentProtocol === "file:" || currentLocation.origin === "null");
+    const pathname = normalizePathname(
+      isFilePreview ? "/" : settings.pathname || currentLocation.pathname || "/",
+    );
     const origin = safeOrigin(
-      settings.origin || currentLocation.origin,
+      isFilePreview ? LOCAL_DASHBOARD_ORIGIN : settings.origin || currentLocation.origin,
       "http://localhost",
     );
-    const basePath = settings.mountPrefix === undefined
-      ? mountPrefixForPath(pathname)
-      : normalizeMountPrefix(settings.mountPrefix);
+    const basePath = isFilePreview
+      ? ""
+      : settings.mountPrefix === undefined
+        ? mountPrefixForPath(pathname)
+        : normalizeMountPrefix(settings.mountPrefix);
     const entryRoute = entryForPath(pathname);
     const bootMode = bootModeFromPath(pathname, settings.defaultBootMode);
     const baseUrl = `${origin}${basePath}`;
@@ -120,6 +128,7 @@
       baseUrl,
       entryRoute,
       bootMode,
+      isFilePreview,
       path: pathFor,
       route: pathFor,
       api: urlFor,
