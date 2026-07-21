@@ -34,9 +34,6 @@ PANEL_IDS = {
     "models-surfacing",
     "models-effective-config",
     "models-full-vault",
-    "models-compat-export",
-    "models-github-backup",
-    "models-migration-tools",
 }
 
 
@@ -117,7 +114,7 @@ def test_models_data_module_registers_the_complete_workspace_without_ambient_glo
     assert not re.search(r"(?:^|[^A-Za-z0-9_])BASE(?:[^A-Za-z0-9_]|$)", source)
 
 
-def test_models_data_keeps_one_editor_per_resource_and_delegates_existing_p0_controls() -> None:
+def test_models_data_keeps_one_editor_per_resource_without_delegate_only_tabs() -> None:
     source = ASSET.read_text(encoding="utf-8")
 
     for builder in (
@@ -135,11 +132,20 @@ def test_models_data_keeps_one_editor_per_resource_and_delegates_existing_p0_con
     assert "CANONICAL_EDITOR_RESOURCES" in source
     assert "mountCanonicalEmbeddingEditor" in source
     assert "openLegacyPanel('settings', 'sec-engine')" not in source
-    assert "openLegacyPanel('settings', 'sec-github')" in source
-    assert source.count("openLegacyPanel('settings', 'sec-backup')") >= 2
-    # Export/GitHub/migration remain distinct P0 delegates. Embedding operations
-    # stay in the one mature editor that is physically mounted into Models/Data,
-    # so this feature module must not reimplement any of their write endpoints.
+    assert "openLegacyPanel('settings', 'sec-github')" not in source
+    assert "openLegacyPanel('settings', 'sec-backup')" not in source
+    for removed_panel in (
+        "models-compat-export",
+        "models-github-backup",
+        "models-migration-tools",
+        "mountCompatExport",
+        "mountGithubBackup",
+        "mountMigrationTools",
+    ):
+        assert removed_panel not in source
+    # Models/Data owns its own editors. Embedding operations stay in the one
+    # mature editor that is physically mounted into Models/Data, so this feature
+    # module must not reimplement unrelated legacy endpoints.
     for duplicate_endpoint in (
         "/api/export",
         "/api/github/config",
@@ -368,30 +374,13 @@ def test_models_data_runtime_registers_panels_delegates_and_builds_an_explicit_u
           ui: {{}},
         }};
         window.OmbreDashboardFeatureFactories[0](app);
-        if (registered.length !== 14) throw new Error('expected 14 panels');
-        if (new Set(registered.map((panel) => panel.id)).size !== 14) throw new Error('duplicate panel');
+        if (registered.length !== 11) throw new Error('expected 11 panels');
+        if (new Set(registered.map((panel) => panel.id)).size !== 11) throw new Error('duplicate panel');
         if (registered.some((panel) => panel.workspace !== 'models-data')) throw new Error('wrong workspace');
-
-        function rootForDelegation() {{
-          const listeners = {{}};
-          return {{
-            classList: {{ add() {{}} }},
-            innerHTML: '',
-            querySelector() {{ return null; }},
-            addEventListener(name, handler) {{ listeners[name] = handler; }},
-            trigger() {{ listeners.click({{ target: {{ closest() {{ return {{}}; }} }} }}); }},
-          }};
+        if (registered.some((panel) => ['models-compat-export', 'models-github-backup', 'models-migration-tools'].includes(panel.id))) {{
+          throw new Error('delegate-only panels should not be registered');
         }}
-        for (const id of ['models-compat-export', 'models-github-backup', 'models-migration-tools']) {{
-          const panel = registered.find((item) => item.id === id);
-          const root = rootForDelegation();
-          panel.mount(root);
-          root.trigger();
-        }}
-        const expectedDelegates = JSON.stringify([
-          ['settings', 'sec-backup'], ['settings', 'sec-github'], ['settings', 'sec-backup'],
-        ]);
-        if (JSON.stringify(legacyCalls) !== expectedDelegates) throw new Error('delegation mismatch');
+        if (legacyCalls.length) throw new Error('models/data should not delegate backup tabs back to system');
 
         let mountedEmbedding = null;
         const embeddingHost = {{ appendChild(editor) {{ mountedEmbedding = editor; }} }};

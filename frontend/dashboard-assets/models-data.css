@@ -256,17 +256,6 @@
   text-align: center;
 }
 
-.models-data-delegate {
-  display: grid;
-  justify-items: start;
-  gap: 10px;
-  max-width: 720px;
-}
-
-.models-data-delegate p {
-  margin: 0;
-}
-
 .models-data-json {
   overflow: auto;
   max-height: min(70vh, 900px);

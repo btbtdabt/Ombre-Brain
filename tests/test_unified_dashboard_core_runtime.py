@@ -944,7 +944,7 @@ def test_legacy_section_route_survives_reload_and_history_without_duplicate_load
     legacy_listener = dashboard_source[listener_start:listener_end]
     shell_source = UNIFIED_SHELL.read_text(encoding="utf-8").replace(
         "\n})(window);",
-        "\n  global.__unifiedShellTest = { registerLegacyPanels, configureApp };"
+        "\n  global.__unifiedShellTest = { registerLegacyPanels, registerPanelAliases, configureApp };"
         "\n})(window);",
     )
     sources = {
@@ -987,6 +987,7 @@ const viewIds = [
 ];
 const elements = Object.fromEntries(viewIds.map((id) => [id, element(id)]));
 elements['sec-service'] = element('sec-service', {{}}, 'advanced');
+elements['sec-me'] = element('sec-me', {{}}, 'basics');
 elements['sec-backup'] = element('sec-backup', {{}}, 'backup');
 elements['sec-github'] = element('sec-github', {{}}, 'backup');
 const document = {{
@@ -1066,6 +1067,7 @@ function createApp(router) {{
     }},
   }};
   window.__unifiedShellTest.registerLegacyPanels(app);
+  window.__unifiedShellTest.registerPanelAliases(app);
   window.__unifiedShellTest.configureApp(app);
   const activate = (next) => panels.get(next.panel).activate(
     Object.assign({{ state: next }}, next.params)
@@ -1099,15 +1101,30 @@ const afterRefreshedForward = {{ section: revealed.at(-1), requests: settingsReq
 
 location.search = '?workspace=system&panel=system-status&section=sec-me';
 window.dispatch('popstate');
-const afterMismatchedSection = {{ section: revealed.at(-1), requests: settingsRequests }};
+const afterMeSection = {{ section: revealed.at(-1), requests: settingsRequests }};
 
 app.commands.openLegacyPanel('settings', 'sec-not-real');
 const unknownSectionUrl = pushedUrls.at(-1);
 const afterUnknownSection = {{ section: revealed.at(-1), requests: settingsRequests }};
 
+location.search = '?workspace=models-data&panel=models-github-backup';
+window.dispatch('popstate');
+const afterGithubAlias = {{
+  workspace: router.current().workspace, panel: router.current().panel,
+  section: revealed.at(-1), search: location.search, requests: settingsRequests,
+}};
+
+location.search = '?workspace=system&panel=system-errors';
+window.dispatch('popstate');
+const afterErrorsAlias = {{
+  workspace: router.current().workspace, panel: router.current().panel,
+  search: location.search, requests: settingsRequests,
+}};
+
 process.stdout.write(JSON.stringify({{
   afterReload, githubUrl, afterGithub, afterBack, afterForward, afterRefreshedForward,
-  afterMismatchedSection, unknownSectionUrl, afterUnknownSection, groups,
+  afterMeSection, unknownSectionUrl, afterUnknownSection, afterGithubAlias,
+  afterErrorsAlias, groups,
 }}));
 """
 
@@ -1121,13 +1138,26 @@ process.stdout.write(JSON.stringify({{
         "section": "sec-github",
         "requests": 50,
     }
-    assert result["afterMismatchedSection"] == {
-        "section": "sec-service",
+    assert result["afterMeSection"] == {
+        "section": "sec-me",
         "requests": 60,
     }
     assert result["afterUnknownSection"] == {
-        "section": "sec-service",
+        "section": "sec-me",
         "requests": 70,
+    }
+    assert result["afterGithubAlias"] == {
+        "workspace": "system",
+        "panel": "system-status",
+        "section": "sec-github",
+        "search": "?section=sec-github&workspace=system&panel=system-status",
+        "requests": 80,
+    }
+    assert result["afterErrorsAlias"] == {
+        "workspace": "system",
+        "panel": "system-logs",
+        "search": "?workspace=system&panel=system-logs",
+        "requests": 80,
     }
     assert result["githubUrl"].startswith("/ombre/memory-dashboard?")
     assert "section=sec-github" in result["githubUrl"]
@@ -1138,6 +1168,6 @@ process.stdout.write(JSON.stringify({{
         "backup",
         "backup",
         "backup",
-        "advanced",
-        "advanced",
+        "basics",
+        "backup",
     ]

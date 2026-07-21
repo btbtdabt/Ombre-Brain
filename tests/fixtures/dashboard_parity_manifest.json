@@ -70,26 +70,12 @@
     {"id": "models-surfacing", "workspace": "models-data", "kind": "canonical"},
     {"id": "models-effective-config", "workspace": "models-data", "kind": "canonical"},
     {"id": "models-full-vault", "workspace": "models-data", "kind": "canonical"},
-    {"id": "models-compat-export", "workspace": "models-data", "kind": "canonical"},
-    {"id": "models-github-backup", "workspace": "models-data", "kind": "canonical"},
-    {"id": "models-migration-tools", "workspace": "models-data", "kind": "distinct"},
 
     {"id": "system-status", "workspace": "system", "kind": "distinct"},
     {"id": "system-plans", "workspace": "system", "kind": "distinct"},
     {"id": "system-letters", "workspace": "system", "kind": "distinct"},
     {"id": "system-anchors", "workspace": "system", "kind": "distinct"},
     {"id": "system-logs", "workspace": "system", "kind": "distinct"},
-    {"id": "system-errors", "workspace": "system", "kind": "distinct"},
-    {"id": "system-identity-settings", "workspace": "system", "kind": "distinct"},
-    {"id": "system-auth-settings", "workspace": "system", "kind": "distinct"},
-    {"id": "system-mcp-settings", "workspace": "system", "kind": "distinct"},
-    {"id": "system-transport-settings", "workspace": "system", "kind": "distinct"},
-    {"id": "system-env-settings", "workspace": "system", "kind": "distinct"},
-    {"id": "system-tunnel-settings", "workspace": "system", "kind": "distinct"},
-    {"id": "system-diagnostics", "workspace": "system", "kind": "distinct"},
-    {"id": "system-version-update", "workspace": "system", "kind": "distinct"},
-    {"id": "system-restart-controls", "workspace": "system", "kind": "distinct"},
-    {"id": "system-developer", "workspace": "system", "kind": "distinct"},
     {"id": "system-replay-debug", "workspace": "system", "kind": "distinct"},
     {"id": "system-about", "workspace": "system", "kind": "distinct"}
   ],
@@ -183,7 +169,7 @@
     }
   ],
   "current_route_family_coverage": {
-    "discovery": ["system-auth-settings", "system-mcp-settings"],
+    "discovery": ["system-status"],
     "memory": ["shared-buckets", "memory-reminders", "memory-darkroom", "memory-moment-diagnostics"],
     "profile": ["memory-portrait", "memory-profile-facts", "memory-profile-proposals", "memory-anchor-proposals", "memory-word-map", "memory-identity-semantics", "memory-persona-state", "memory-dreams"],
     "operations": ["memory-reflection", "memory-chat-memory", "memory-recall-diagnostics", "memory-diffusion-diagnostics", "memory-gateway-injections", "models-effective-config", "models-full-vault"]
@@ -224,14 +210,15 @@
     {"resource": "memory-surfacing-settings", "panel": "models-surfacing", "writer": "models-data-config", "marker": "models-surfacing"},
     {"resource": "effective-config", "panel": "models-effective-config"},
     {"resource": "full-vault-backup", "panel": "models-full-vault"},
-    {"resource": "compat-export", "panel": "models-compat-export"},
-    {"resource": "github-backup", "panel": "models-github-backup"},
-    {"resource": "identity-display-settings", "panel": "system-identity-settings"},
-    {"resource": "auth-session-settings", "panel": "system-auth-settings"},
-    {"resource": "mcp-auth-settings", "panel": "system-mcp-settings"},
-    {"resource": "transport-settings", "panel": "system-transport-settings"},
-    {"resource": "environment-settings", "panel": "system-env-settings"},
-    {"resource": "tunnel-settings", "panel": "system-tunnel-settings"}
+    {"resource": "compat-export", "panel": "system-status"},
+    {"resource": "github-backup", "panel": "system-status"},
+    {"resource": "migration-tools", "panel": "system-status"},
+    {"resource": "identity-display-settings", "panel": "system-status"},
+    {"resource": "auth-session-settings", "panel": "system-status"},
+    {"resource": "mcp-auth-settings", "panel": "system-status"},
+    {"resource": "transport-settings", "panel": "system-status"},
+    {"resource": "environment-settings", "panel": "system-status"},
+    {"resource": "tunnel-settings", "panel": "system-status"}
   ],
   "legacy_state_aliases": [
     {"kind": "hash", "state": "#letters", "panel": "system-letters"},
@@ -258,6 +245,22 @@
     {"kind": "tab", "state": "upstream-config", "panel": "models-upstream"},
     {"kind": "tab", "state": "model-config", "panel": "models-dehydration"},
     {"kind": "tab", "state": "memory-config", "panel": "models-surfacing"}
+  ],
+  "legacy_panel_aliases": [
+    {"state": "models-compat-export", "workspace": "models-data", "panel": "system-status", "section": "sec-backup"},
+    {"state": "models-github-backup", "workspace": "models-data", "panel": "system-status", "section": "sec-github"},
+    {"state": "models-migration-tools", "workspace": "models-data", "panel": "system-status", "section": "sec-backup"},
+    {"state": "system-errors", "workspace": "system", "panel": "system-logs"},
+    {"state": "system-identity-settings", "workspace": "system", "panel": "system-status", "section": "sec-me"},
+    {"state": "system-auth-settings", "workspace": "system", "panel": "system-status", "section": "sec-me"},
+    {"state": "system-mcp-settings", "workspace": "system", "panel": "system-status", "section": "sec-mcp"},
+    {"state": "system-transport-settings", "workspace": "system", "panel": "system-status", "section": "sec-mcp"},
+    {"state": "system-env-settings", "workspace": "system", "panel": "system-status", "section": "sec-env"},
+    {"state": "system-tunnel-settings", "workspace": "system", "panel": "system-status", "section": "sec-me"},
+    {"state": "system-diagnostics", "workspace": "system", "panel": "system-status", "section": "sec-service"},
+    {"state": "system-version-update", "workspace": "system", "panel": "system-status", "section": "sec-version"},
+    {"state": "system-restart-controls", "workspace": "system", "panel": "system-status", "section": "sec-service"},
+    {"state": "system-developer", "workspace": "system", "panel": "system-status", "section": "sec-dev-mode"}
   ],
   "shared_core_symbols": ["authFetch", "checkAuth", "loadBuckets"],
   "temporary_exclusions": []

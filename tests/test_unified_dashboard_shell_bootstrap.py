@@ -81,6 +81,12 @@ def test_bootstrap_adapts_ui_and_legacy_commands_before_feature_loading() -> Non
 
 def test_bootstrap_registers_every_existing_p0_panel_as_a_legacy_adapter() -> None:
     source = _read(BOOTSTRAP)
+    legacy_panels = source[
+        source.index("var LEGACY_PANELS") : source.index("var PANEL_ALIASES")
+    ]
+    panel_aliases = source[
+        source.index("var PANEL_ALIASES") : source.index("var SECTION_PANELS")
+    ]
     expected = {
         "shared-buckets": "list",
         "shared-search": "list",
@@ -91,15 +97,100 @@ def test_bootstrap_registers_every_existing_p0_panel_as_a_legacy_adapter() -> No
         "system-letters": "letters",
         "system-anchors": "anchors",
         "system-logs": "logs",
-        "system-errors": "logs",
         "system-status": "settings",
         "system-replay-debug": "v3-debug",
         "system-about": "about",
     }
 
     for panel, tab in expected.items():
-        assert f"'{panel}':" in source
-        assert f"tab: '{tab}'" in source
+        assert f"'{panel}':" in legacy_panels
+        assert f"tab: '{tab}'" in legacy_panels
+
+    aliases = {
+        "models-compat-export": ("system-status", "sec-backup"),
+        "models-github-backup": ("system-status", "sec-github"),
+        "models-migration-tools": ("system-status", "sec-backup"),
+        "system-errors": ("system-logs", None),
+        "system-identity-settings": ("system-status", "sec-me"),
+        "system-auth-settings": ("system-status", "sec-me"),
+        "system-mcp-settings": ("system-status", "sec-mcp"),
+        "system-transport-settings": ("system-status", "sec-mcp"),
+        "system-env-settings": ("system-status", "sec-env"),
+        "system-tunnel-settings": ("system-status", "sec-me"),
+        "system-diagnostics": ("system-status", "sec-service"),
+        "system-version-update": ("system-status", "sec-version"),
+        "system-restart-controls": ("system-status", "sec-service"),
+        "system-developer": ("system-status", "sec-dev-mode"),
+    }
+    for alias, (target, section) in aliases.items():
+        assert f"'{alias}':" not in legacy_panels
+        alias_start = panel_aliases.index(f"'{alias}':")
+        alias_end = panel_aliases.find("\n    },", alias_start)
+        alias_source = panel_aliases[alias_start:alias_end]
+        assert f"targetPanel: '{target}'" in alias_source
+        if section:
+            assert f"section: '{section}'" in alias_source
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is unavailable")
+def test_removed_panel_urls_replace_to_their_canonical_owner() -> None:
+    source = _read(BOOTSTRAP)
+    aliases_source = source[
+        source.index("var PANEL_ALIASES") : source.index("var SECTION_PANELS")
+    ]
+    register_source = source[
+        source.index("function registerPanelAliases") : source.index(
+            "function matchingPanelForTab"
+        )
+    ]
+    script = f"""
+{aliases_source}
+{register_source}
+const registrations = [];
+const replacements = [];
+const app = {{
+  registerPanel(definition) {{ registrations.push(definition); }},
+  router: {{ replace(workspace, panel, params) {{ replacements.push([workspace, panel, params]); }} }},
+}};
+registerPanelAliases(app);
+for (const definition of registrations) definition.activate();
+process.stdout.write(JSON.stringify({{
+  registrations: registrations.map((item) => [item.id, item.workspace, item.hiddenFromNav, item.requiresRoot]),
+  replacements,
+}}));
+"""
+    completed = subprocess.run(
+        _node_eval_args(script),
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    result = json.loads(completed.stdout)
+
+    assert len(result["registrations"]) == 14
+    assert all(item[2:] == [True, False] for item in result["registrations"])
+    replacement_by_alias = {
+        registered[0]: replacement
+        for registered, replacement in zip(
+            result["registrations"], result["replacements"], strict=True
+        )
+    }
+    assert replacement_by_alias["models-github-backup"] == [
+        "system",
+        "system-status",
+        {"section": "sec-github"},
+    ]
+    assert replacement_by_alias["models-compat-export"] == [
+        "system",
+        "system-status",
+        {"section": "sec-backup"},
+    ]
+    assert replacement_by_alias["system-errors"] == [
+        "system",
+        "system-logs",
+        {},
+    ]
 
 
 def test_bootstrap_uses_canonical_router_state_for_workspace_and_panel_tabs() -> None:

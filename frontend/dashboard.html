@@ -1449,7 +1449,7 @@
   }
   .embed-warn-btn:hover { background: rgba(184,151,98,0.18); }
 
-  /* ====== P1 常驻系统状态条 / persistent system status bar ====== */
+  /* ====== Settings health summary / compact until explicitly opened ====== */
   #status-banner {
     position: sticky; top: 56px; z-index: 40;
     font-size: 12.5px; color: var(--text);
@@ -1457,7 +1457,11 @@
     border-bottom: 1px solid var(--border);
   }
   #status-banner[data-state="hidden"] { display: none; }
-  .sb-bar { display: flex; align-items: center; gap: 10px; padding: 9px 20px; cursor: pointer; user-select: none; }
+  .sb-bar {
+    display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 20px;
+    cursor: pointer; user-select: none; border: 0; background: transparent;
+    color: inherit; font: inherit; text-align: left;
+  }
   .sb-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; background: var(--text-light); transition: background .25s; }
   #status-banner[data-state="ok"]    .sb-dot { background: var(--positive); }
   #status-banner[data-state="warn"]  .sb-dot { background: var(--warning); }
@@ -1946,17 +1950,6 @@
   <button class="embed-warn-btn" onclick="gotoEmbedLocal()">⬡ 本地向量化</button>
 </div>
 
-<!-- P1 常驻系统状态条：全绿收成一行；有问题才展开「需处理」卡片，按钮直达对应设置字段 -->
-<div id="status-banner" data-state="hidden">
-  <div class="sb-bar" onclick="toggleStatusBanner()">
-    <span class="sb-dot"></span>
-    <span class="sb-text" id="sb-text">体检中…</span>
-    <span class="sb-count" id="sb-count"></span>
-    <span class="sb-chevron">▾</span>
-  </div>
-  <div class="sb-body" id="sb-body"></div>
-</div>
-
 <div class="content" id="list-view">
   <div class="filters" id="filters"></div>
   <div class="bucket-viewbar">
@@ -2323,6 +2316,17 @@
 </div>
 
 <div class="content" id="settings-view" style="display:none" data-active-sgroup="basics">
+  <!-- System health belongs to the one canonical Settings surface. Keep the
+       summary compact until the user explicitly opens it. -->
+  <div id="status-banner" data-state="hidden">
+    <button type="button" class="sb-bar" onclick="toggleStatusBanner()" aria-expanded="false" aria-controls="sb-body">
+      <span class="sb-dot"></span>
+      <span class="sb-text" id="sb-text">体检中…</span>
+      <span class="sb-count" id="sb-count"></span>
+      <span class="sb-chevron">▾</span>
+    </button>
+    <div class="sb-body" id="sb-body"></div>
+  </div>
   <div style="max-width:680px;margin:0 auto;">
 
     <!-- 设置分组子 tab：常规 / 高级 / 备份与迁移 -->
@@ -4009,7 +4013,7 @@ async function loadSystemDiagnostics() {
   }
 }
 
-// ====== P1 常驻系统状态条 / persistent system status bar ======
+// ====== Settings health summary ======
 // 只有这几项对应用户能自己动手改的设置字段；其余（契约 / 开发类检查）一律「查看详情」跳到设置体检。
 const SB_ACTION_TARGETS = {
   embedding: { field: 'cfg-emb-api-key' },   // 向量化 Key
@@ -4066,6 +4070,8 @@ function toggleStatusBanner() {
   if (!b) return;
   if (b.getAttribute('data-state') === 'ok') { gotoDiagnostics(); return; }
   b.classList.toggle('open');
+  const trigger = b.querySelector('.sb-bar');
+  if (trigger) trigger.setAttribute('aria-expanded', b.classList.contains('open') ? 'true' : 'false');
 }
 
 function renderStatusBannerCard(check) {
@@ -4090,6 +4096,8 @@ async function loadStatusBanner() {
   const bodyEl = document.getElementById('sb-body');
   banner.setAttribute('data-state', 'loading');
   banner.classList.remove('open');
+  const trigger = banner.querySelector('.sb-bar');
+  if (trigger) trigger.setAttribute('aria-expanded', 'false');
   textEl.textContent = '体检中… / Checking…';
   countEl.textContent = '';
   bodyEl.innerHTML = '';
@@ -4113,7 +4121,6 @@ async function loadStatusBanner() {
     textEl.innerHTML = '<b>' + problems.length + ' 项需处理</b> · Action Needed';
     countEl.textContent = '其余 ' + (total - problems.length) + ' 项正常';
     bodyEl.innerHTML = problems.map(renderStatusBannerCard).join('');
-    banner.classList.add('open');
   } catch (e) {
     banner.setAttribute('data-state', 'hidden');
   }

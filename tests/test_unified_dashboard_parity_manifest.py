@@ -59,6 +59,7 @@ def test_dashboard_parity_manifest_is_internally_consistent() -> None:
     current_families = manifest["current_route_families"]
     canonical_editors = manifest["canonical_editors"]
     legacy_aliases = manifest["legacy_state_aliases"]
+    legacy_panel_aliases = manifest["legacy_panel_aliases"]
     shared_actions = manifest["shared_route_action_coverage"]
 
     workspace_ids = [workspace["id"] for workspace in workspaces]  # type: ignore[index]
@@ -79,6 +80,13 @@ def test_dashboard_parity_manifest_is_internally_consistent() -> None:
     for alias in legacy_aliases:  # type: ignore[assignment]
         assert alias["panel"] in panel_id_set
         assert alias["kind"] in {"hash", "route", "tab"}
+
+    panel_alias_states = [alias["state"] for alias in legacy_panel_aliases]
+    assert len(panel_alias_states) == len(set(panel_alias_states))
+    for alias in legacy_panel_aliases:  # type: ignore[assignment]
+        assert alias["state"] not in panel_id_set
+        assert alias["workspace"] in workspace_ids
+        assert alias["panel"] in panel_id_set
 
     resource_counter = Counter(
         editor["resource"] for editor in canonical_editors  # type: ignore[index]
@@ -228,6 +236,31 @@ def test_root_dashboard_declares_unified_workspace_navigation() -> None:
     for workspace in manifest["workspaces"]:  # type: ignore[assignment]
         marker = f'data-workspace="{workspace["id"]}"'
         assert marker in root_html
+
+
+def test_system_has_one_settings_tab_and_status_banner_is_not_global() -> None:
+    html = _read(ROOT_DASHBOARD_PATH)
+
+    assert html.count('id="dashboard-tab-system-status"') == 1
+    for removed_tab in (
+        'dashboard-tab-system-errors',
+        'dashboard-tab-system-identity-settings',
+        'dashboard-tab-system-auth-settings',
+        'dashboard-tab-system-mcp-settings',
+        'dashboard-tab-system-transport-settings',
+        'dashboard-tab-system-env-settings',
+        'dashboard-tab-system-tunnel-settings',
+        'dashboard-tab-system-diagnostics',
+        'dashboard-tab-system-version-update',
+        'dashboard-tab-system-restart-controls',
+        'dashboard-tab-system-developer',
+    ):
+        assert removed_tab not in html
+    settings_index = html.index('id="settings-view"')
+    banner_index = html.index('id="status-banner"')
+    first_settings_section = html.index('id="sec-version"', settings_index)
+    assert settings_index < banner_index < first_settings_section
+    assert "banner.classList.add('open')" not in html
 
 
 def test_memory_dashboard_is_not_a_second_full_application_after_cutover() -> None:

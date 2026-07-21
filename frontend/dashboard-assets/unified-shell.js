@@ -45,53 +45,9 @@
       workspace: 'system', tab: 'logs', label: '日志', order: 50,
       selector: '#logs-view',
     },
-    'system-errors': {
-      workspace: 'system', tab: 'logs', label: '错误', order: 51,
-      selector: '#logs-view',
-    },
     'system-status': {
-      workspace: 'system', tab: 'settings', label: '系统状态', order: 10,
-      selector: '#settings-view', section: 'sec-service',
-    },
-    'system-identity-settings': {
-      workspace: 'system', tab: 'settings', label: '身份与称呼', order: 60,
-      selector: '#settings-view', section: 'sec-me',
-    },
-    'system-auth-settings': {
-      workspace: 'system', tab: 'settings', label: '登录与安全', order: 61,
-      selector: '#settings-view', section: 'sec-me',
-    },
-    'system-mcp-settings': {
-      workspace: 'system', tab: 'settings', label: 'MCP', order: 70,
-      selector: '#settings-view', section: 'sec-mcp',
-    },
-    'system-transport-settings': {
-      workspace: 'system', tab: 'settings', label: '传输', order: 71,
-      selector: '#settings-view', section: 'sec-mcp',
-    },
-    'system-env-settings': {
-      workspace: 'system', tab: 'settings', label: '环境', order: 80,
-      selector: '#settings-view', section: 'sec-env',
-    },
-    'system-tunnel-settings': {
-      workspace: 'system', tab: 'settings', label: 'Tunnel', order: 81,
-      selector: '#settings-view', section: 'sec-me',
-    },
-    'system-diagnostics': {
-      workspace: 'system', tab: 'settings', label: '体检', order: 90,
-      selector: '#settings-view', section: 'sec-service',
-    },
-    'system-version-update': {
-      workspace: 'system', tab: 'settings', label: '版本更新', order: 100,
-      selector: '#settings-view', section: 'sec-version',
-    },
-    'system-restart-controls': {
-      workspace: 'system', tab: 'settings', label: '重启', order: 101,
-      selector: '#settings-view', section: 'sec-service',
-    },
-    'system-developer': {
-      workspace: 'system', tab: 'settings', label: '开发者', order: 110,
-      selector: '#settings-view', section: 'sec-dev-mode',
+      workspace: 'system', tab: 'settings', label: '设置', order: 10,
+      selector: '#settings-view',
     },
     'system-replay-debug': {
       workspace: 'system', tab: 'v3-debug', label: 'Replay', order: 120,
@@ -103,15 +59,65 @@
     },
   });
 
+  // Removed top-level tabs remain valid as bookmark/history aliases. They are
+  // registered without navigation or content and immediately replace their URL
+  // with the single canonical owner.
+  var PANEL_ALIASES = Object.freeze({
+    'models-compat-export': {
+      workspace: 'models-data', targetWorkspace: 'system', targetPanel: 'system-status', section: 'sec-backup',
+    },
+    'models-github-backup': {
+      workspace: 'models-data', targetWorkspace: 'system', targetPanel: 'system-status', section: 'sec-github',
+    },
+    'models-migration-tools': {
+      workspace: 'models-data', targetWorkspace: 'system', targetPanel: 'system-status', section: 'sec-backup',
+    },
+    'system-errors': {
+      workspace: 'system', targetWorkspace: 'system', targetPanel: 'system-logs',
+    },
+    'system-identity-settings': {
+      workspace: 'system', targetWorkspace: 'system', targetPanel: 'system-status', section: 'sec-me',
+    },
+    'system-auth-settings': {
+      workspace: 'system', targetWorkspace: 'system', targetPanel: 'system-status', section: 'sec-me',
+    },
+    'system-mcp-settings': {
+      workspace: 'system', targetWorkspace: 'system', targetPanel: 'system-status', section: 'sec-mcp',
+    },
+    'system-transport-settings': {
+      workspace: 'system', targetWorkspace: 'system', targetPanel: 'system-status', section: 'sec-mcp',
+    },
+    'system-env-settings': {
+      workspace: 'system', targetWorkspace: 'system', targetPanel: 'system-status', section: 'sec-env',
+    },
+    'system-tunnel-settings': {
+      workspace: 'system', targetWorkspace: 'system', targetPanel: 'system-status', section: 'sec-me',
+    },
+    'system-diagnostics': {
+      workspace: 'system', targetWorkspace: 'system', targetPanel: 'system-status', section: 'sec-service',
+    },
+    'system-version-update': {
+      workspace: 'system', targetWorkspace: 'system', targetPanel: 'system-status', section: 'sec-version',
+    },
+    'system-restart-controls': {
+      workspace: 'system', targetWorkspace: 'system', targetPanel: 'system-status', section: 'sec-service',
+    },
+    'system-developer': {
+      workspace: 'system', targetWorkspace: 'system', targetPanel: 'system-status', section: 'sec-dev-mode',
+    },
+  });
+
   var SECTION_PANELS = Object.freeze({
-    'sec-version': 'system-version-update',
-    'sec-me': 'system-identity-settings',
+    'sec-version': 'system-status',
+    'sec-me': 'system-status',
     'sec-service': 'system-status',
+    'sec-engine': 'system-status',
+    'sec-bucket': 'system-status',
     'sec-github': 'system-status',
     'sec-backup': 'system-status',
-    'sec-env': 'system-env-settings',
-    'sec-mcp': 'system-mcp-settings',
-    'sec-dev-mode': 'system-developer',
+    'sec-env': 'system-status',
+    'sec-mcp': 'system-status',
+    'sec-dev-mode': 'system-status',
   });
 
   function validatedLegacySection(panelId, sectionValue) {
@@ -185,6 +191,7 @@
   }
 
   function resolvePanelRoot(definition) {
+    if (definition && definition.requiresRoot === false) return null;
     var existing = definitionRoot(definition);
     if (existing) return existing;
 
@@ -220,6 +227,24 @@
         },
       };
       app.registerPanel(definition);
+    });
+  }
+
+  function registerPanelAliases(app) {
+    Object.keys(PANEL_ALIASES).forEach(function register(aliasId) {
+      var alias = PANEL_ALIASES[aliasId];
+      app.registerPanel({
+        id: aliasId,
+        workspace: alias.workspace,
+        label: aliasId,
+        order: 10000,
+        hiddenFromNav: true,
+        requiresRoot: false,
+        activate: function activateAlias() {
+          var params = alias.section ? { section: alias.section } : {};
+          return app.router.replace(alias.targetWorkspace, alias.targetPanel, params);
+        },
+      });
     });
   }
 
@@ -577,6 +602,7 @@
     currentApp = app;
     configureApp(app);
     registerLegacyPanels(app);
+    registerPanelAliases(app);
     await app.loadQueuedFeatures();
     buildPanelNavigation(app);
     if (typeof app.onPanelRegistered === 'function') {

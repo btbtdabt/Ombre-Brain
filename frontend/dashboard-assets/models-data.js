@@ -1036,36 +1036,6 @@
       });
     }
 
-    function mountCompatExport(root) {
-      state.roots['models-compat-export'] = root;
-      root.classList.add('models-data-panel');
-      root.innerHTML = '<header class="models-data-header"><div><h2>Compatibility export</h2><p>The lightweight P0 export remains available for older clients and simple transfers.</p></div></header>' +
-        '<section class="models-data-card models-data-delegate"><h3>Canonical System backup control</h3><p>Open the existing backup section to avoid two implementations writing the same export format.</p><button type="button" data-action="open-compat-export">Open compatibility export</button></section>';
-      root.addEventListener('click', function (event) {
-        if (event.target.closest('[data-action="open-compat-export"]')) app.commands.openLegacyPanel('settings', 'sec-backup');
-      });
-    }
-
-    function mountGithubBackup(root) {
-      state.roots['models-github-backup'] = root;
-      root.classList.add('models-data-panel');
-      root.innerHTML = '<header class="models-data-header"><div><h2>GitHub backup</h2><p>Repository credentials, sync status and manual backup live in the established System editor.</p></div></header>' +
-        '<section class="models-data-card models-data-delegate"><h3>Canonical GitHub control</h3><p>Open the existing settings without duplicating token handling.</p><button type="button" data-action="open-github">Open GitHub backup</button></section>';
-      root.addEventListener('click', function (event) {
-        if (event.target.closest('[data-action="open-github"]')) app.commands.openLegacyPanel('settings', 'sec-github');
-      });
-    }
-
-    function mountMigrationTools(root) {
-      state.roots['models-migration-tools'] = root;
-      root.classList.add('models-data-panel');
-      root.innerHTML = '<header class="models-data-header"><div><h2>Migration tools</h2><p>Legacy JSON, embedding and storage migration remain in one guarded System workflow.</p></div></header>' +
-        '<section class="models-data-card models-data-delegate"><h3>Canonical migration control</h3><p>Open the existing backup and migration section.</p><button type="button" data-action="open-migration">Open migration tools</button></section>';
-      root.addEventListener('click', function (event) {
-        if (event.target.closest('[data-action="open-migration"]')) app.commands.openLegacyPanel('settings', 'sec-backup');
-      });
-    }
-
     function mountDehydration(root) {
       mountConfigPanel(root, 'models-dehydration', 'Dehydration & tagging', 'Configure the canonical compression/tagging model and the domain sentinel used by the Gateway.', [
         dehydrationToolsMarkup(),
@@ -1206,30 +1176,6 @@
       label: 'Full Vault',
       order: 110,
       mount: mountFullVault,
-      activate: function () { return Promise.resolve(); },
-    });
-    app.registerPanel({
-      id: 'models-compat-export',
-      workspace: 'models-data',
-      label: 'Compatibility Export',
-      order: 120,
-      mount: mountCompatExport,
-      activate: function () { return Promise.resolve(); },
-    });
-    app.registerPanel({
-      id: 'models-github-backup',
-      workspace: 'models-data',
-      label: 'GitHub Backup',
-      order: 130,
-      mount: mountGithubBackup,
-      activate: function () { return Promise.resolve(); },
-    });
-    app.registerPanel({
-      id: 'models-migration-tools',
-      workspace: 'models-data',
-      label: 'Migration Tools',
-      order: 140,
-      mount: mountMigrationTools,
       activate: function () { return Promise.resolve(); },
     });
   });
