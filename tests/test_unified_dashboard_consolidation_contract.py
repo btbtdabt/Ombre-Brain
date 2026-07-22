@@ -78,9 +78,13 @@ def test_all_registered_panels_receive_the_final_p0_surface_contract() -> None:
     html = _read(DASHBOARD)
     shell = _read(SHELL)
 
-    stylesheet_hrefs = re.findall(
-        r'<link\s+rel="stylesheet"\s+href="([^"]+)"', html, re.IGNORECASE
-    )
+    stylesheet_hrefs = [
+        match.group(1)
+        for tag in re.findall(
+            r'<link\b[^>]*rel="stylesheet"[^>]*>', html, re.IGNORECASE
+        )
+        if (match := re.search(r'href="([^"]+)"', tag, re.IGNORECASE))
+    ]
     assert stylesheet_hrefs
     assert stylesheet_hrefs[-1].split("?", 1)[0].endswith(
         "dashboard-assets/p0-dashboard-contract.css"
@@ -107,3 +111,21 @@ def test_all_registered_panels_receive_the_final_p0_surface_contract() -> None:
         ".p0-panel-surface .config-section",
     ):
         assert selector in css
+
+
+def test_p0_contract_remains_last_after_feature_factories_append_styles() -> None:
+    html = _read(DASHBOARD)
+    shell = _read(SHELL)
+
+    assert 'id="p0-dashboard-contract-style"' in html
+    assert "function keepP0ContractLast" in shell
+    assert (
+        "document.addEventListener('ombre-dashboard-features-loaded', "
+        "keepP0ContractLast)"
+    ) in shell
+
+    helper_start = shell.index("function keepP0ContractLast")
+    helper_end = shell.index("function reportFatal", helper_start)
+    helper = shell[helper_start:helper_end]
+    assert "p0-dashboard-contract-style" in helper
+    assert "document.head.appendChild" in helper

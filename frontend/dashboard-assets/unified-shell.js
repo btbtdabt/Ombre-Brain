@@ -593,6 +593,14 @@
     });
   }
 
+  function keepP0ContractLast() {
+    var style = document.getElementById('p0-dashboard-contract-style');
+    if (!style || !document.head || style.parentNode !== document.head) return;
+    document.head.appendChild(style);
+  }
+
+  document.addEventListener('ombre-dashboard-features-loaded', keepP0ContractLast);
+
   function reportFatal(error) {
     var panel = document.createElement('div');
     panel.className = 'unified-shell-fatal';

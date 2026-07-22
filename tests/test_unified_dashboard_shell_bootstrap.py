@@ -221,6 +221,56 @@ def test_faq_alias_reveals_the_integrated_about_section_after_async_render() -> 
     assert "setTimeout" in source[source.index("function revealLegacySection") : source.index("function hydrateBucketDetail")]
 
 
+@pytest.mark.skipif(NODE is None, reason="Node.js is unavailable")
+def test_late_feature_styles_cannot_override_the_p0_contract_order() -> None:
+    script = f"""
+const vm = require('vm');
+const source = {json.dumps(_read(BOOTSTRAP))};
+const listeners = Object.create(null);
+const contract = {{ id: 'p0-dashboard-contract-style', parentNode: null }};
+const featureStyle = {{ id: 'late-feature-style', parentNode: null }};
+const head = {{
+  children: [],
+  appendChild(node) {{
+    this.children = this.children.filter((item) => item !== node);
+    this.children.push(node);
+    node.parentNode = this;
+    return node;
+  }},
+}};
+head.appendChild(contract);
+const document = {{
+  readyState: 'loading',
+  head,
+  getElementById(id) {{ return id === contract.id ? contract : null; }},
+  addEventListener(type, handler) {{ (listeners[type] ||= []).push(handler); }},
+}};
+const window = {{ document, console, setTimeout, clearTimeout }};
+window.window = window;
+vm.runInNewContext(source, window, {{ filename: 'unified-shell.js' }});
+
+head.appendChild(featureStyle);
+for (const handler of listeners['ombre-dashboard-features-loaded'] || []) {{
+  handler({{ type: 'ombre-dashboard-features-loaded' }});
+}}
+process.stdout.write(JSON.stringify({{
+  order: head.children.map((node) => node.id),
+  listenerCount: (listeners['ombre-dashboard-features-loaded'] || []).length,
+}}));
+"""
+    completed = subprocess.run(
+        _node_eval_args(script),
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+
+    assert result["listenerCount"] == 1
+    assert result["order"] == ["late-feature-style", "p0-dashboard-contract-style"]
+
+
 def test_bootstrap_uses_canonical_router_state_for_workspace_and_panel_tabs() -> None:
     source = _read(BOOTSTRAP)
 
