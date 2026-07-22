@@ -20,6 +20,7 @@
     settings: "system-status",
     "v3-debug": "system-replay-debug",
     about: "system-about",
+    faq: "system-about",
     todos: "memory-reminders",
     reflection: "memory-reflection",
     "chat-memory": "memory-chat-memory",
@@ -121,10 +122,14 @@
         return requested;
       }
 
-      const tabPanel = tabAliases[search.get("tab")];
+      const tabName = search.get("tab");
+      const tabPanel = tabAliases[tabName];
       const fromTab = validState(tabPanel);
       if (fromTab) {
         fromTab.params = paramsObject(search);
+        if (tabName === "faq" && !fromTab.params.section) {
+          fromTab.params.section = "faq-section";
+        }
         return fromTab;
       }
 
@@ -134,12 +139,16 @@
 
       if (hash.startsWith("#")) {
         const hashParams = new URLSearchParams(hash.slice(1));
+        const hashTabName = hashParams.get("tab");
         const fromHashParams = validState(
-          hashParams.get("panel") || tabAliases[hashParams.get("tab")],
+          hashParams.get("panel") || tabAliases[hashTabName],
           hashParams.get("workspace"),
         );
         if (fromHashParams) {
           fromHashParams.params = paramsObject(hashParams);
+          if (hashTabName === "faq" && !fromHashParams.params.section) {
+            fromHashParams.params.section = "faq-section";
+          }
           return fromHashParams;
         }
       }

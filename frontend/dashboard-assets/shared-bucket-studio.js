@@ -13,46 +13,98 @@
   var MAX_TOKEN_LENGTH = 4096;
 
   factories.push(function sharedBucketStudioFactory(app) {
-    if (!app || typeof app.registerPanel !== 'function' || !app.api) {
-      throw new Error('The unified Dashboard API and panel registry are required.');
+    if (!app || !app.api) {
+      throw new Error('The unified Dashboard API is required.');
     }
 
     ensureStyles(app);
-    var state = null;
+    var document = global.document;
+    var root = document && document.getElementById('bucket-advanced-mode');
+    if (!root) throw new Error('The canonical Buckets advanced-mode host is missing.');
 
-    app.registerPanel({
-      id: 'shared-bucket-studio',
-      workspace: 'shared',
-      label: 'Bucket Studio',
-      order: 15,
-      mount: function mount(root) {
-        if (!root) return;
-        state = createState(app, root);
-        root.classList.add('shared-bucket-studio');
-        root.setAttribute('data-panel', 'shared-bucket-studio');
-        root.innerHTML = panelMarkup();
-        bindEvents(state);
-        clearBucketDetailState(state);
+    var previousController = root.__ombreBucketStudioController;
+    if (previousController && typeof previousController.destroy === 'function') {
+      previousController.destroy();
+    }
+
+    var state = createState(app, root);
+    root.classList.add('shared-bucket-studio');
+    root.setAttribute('data-panel', 'shared-bucket-studio');
+    root.innerHTML = panelMarkup();
+    var unbindEvents = bindEvents(state);
+    clearBucketDetailState(state);
+
+    function deactivateAdvancedMode() {
+      state.active = false;
+      abortReadRequests(state);
+      invalidateRequests(state);
+    }
+
+    function activateAdvancedMode(context) {
+      state.active = true;
+      beginReadCycle(state, context && context.signal);
+      var params = context && context.state && context.state.params || context || {};
+      var bucketId = cleanText(params.bucket_id || params.bucketId, 160);
+      var jobs = [
+        loadBucketList(state, 'light'),
+        loadDomainTaxonomy(state),
+        loadEdges(state),
+      ];
+      if (bucketId) jobs.push(loadBucketDetail(state, bucketId));
+      return Promise.all(jobs);
+    }
+
+    function applyMode(requestedMode, options) {
+      var mode = requestedMode === 'advanced' ? 'advanced' : 'basic';
+      var basic = document.getElementById('bucket-basic-mode');
+      var listView = document.getElementById('list-view');
+      var advanced = mode === 'advanced';
+      if (basic) {
+        basic.hidden = advanced;
+        basic.style.display = advanced ? 'none' : '';
+      }
+      root.hidden = !advanced;
+      root.style.display = advanced ? '' : 'none';
+      if (listView) listView.dataset.bucketMode = mode;
+      Array.from(document.querySelectorAll('[data-bucket-mode]')).forEach(function updateModeButton(button) {
+        var selected = button.dataset.bucketMode === mode;
+        button.classList.toggle('active', selected);
+        button.setAttribute('aria-selected', selected ? 'true' : 'false');
+        button.setAttribute('tabindex', '0');
+      });
+      if (!advanced) {
+        deactivateAdvancedMode();
+        return undefined;
+      }
+      return activateAdvancedMode(options && options.context || {});
+    }
+
+    var setBucketWorkspaceMode = function setBucketWorkspaceMode(requestedMode, options) {
+      var mode = requestedMode === 'advanced' ? 'advanced' : 'basic';
+      var settings = options || {};
+      if (settings.navigate === false) return applyMode(mode, settings);
+      return app.router.go('shared', 'shared-buckets', mode === 'advanced' ? { mode: 'advanced' } : {});
+    };
+    global.setBucketWorkspaceMode = setBucketWorkspaceMode;
+    app.commands.setBucketMode = setBucketWorkspaceMode;
+
+    var controller = {
+      destroy: function destroyBucketStudio() {
+        deactivateAdvancedMode();
+        unbindEvents();
+        if (global.setBucketWorkspaceMode === setBucketWorkspaceMode) {
+          delete global.setBucketWorkspaceMode;
+        }
+        if (app.commands.setBucketMode === setBucketWorkspaceMode) {
+          delete app.commands.setBucketMode;
+        }
+        if (root.__ombreBucketStudioController === controller) {
+          delete root.__ombreBucketStudioController;
+        }
       },
-      activate: function activate(context) {
-        if (!state) return undefined;
-        state.active = true;
-        var params = context && context.state && context.state.params || {};
-        var bucketId = cleanText(params.bucket_id || params.bucketId, 160);
-        var jobs = [
-          loadBucketList(state, 'light'),
-          loadDomainTaxonomy(state),
-          loadEdges(state),
-        ];
-        if (bucketId) jobs.push(loadBucketDetail(state, bucketId));
-        return Promise.all(jobs);
-      },
-      deactivate: function deactivate() {
-        if (!state) return;
-        state.active = false;
-        invalidateRequests(state);
-      },
-    });
+    };
+    root.__ombreBucketStudioController = controller;
+    applyMode('basic', { navigate: false });
   });
 
   function ensureStyles(app) {
@@ -79,6 +131,8 @@
       detail: null,
       domains: [],
       requests: Object.create(null),
+      readController: null,
+      routeAbortCleanup: null,
       writes: new Set(),
     };
   }
@@ -87,10 +141,9 @@
     return '' +
       '<header class="shared-bucket-studio__hero">' +
         '<div><p class="shared-bucket-studio__eyebrow">Shared workspace · advanced operations</p>' +
-        '<h1>Bucket Studio</h1>' +
-        '<p>The canonical advanced surface for current/Ying bucket, raw-event, edge, and taxonomy operations. ' +
-        'The original Buckets panel remains the fast everyday view.</p></div>' +
-        '<button type="button" class="secondary" data-action="open-basic-buckets">Open basic Buckets</button>' +
+        '<h1>Advanced Buckets</h1>' +
+        '<p>Advanced current/Ying bucket, raw-event, edge, and taxonomy operations inside the canonical Buckets workspace.</p></div>' +
+        '<button type="button" class="secondary" data-action="open-basic-buckets">Back to Basic</button>' +
       '</header>' +
       '<div class="shared-bucket-studio__status" data-role="global-status" aria-live="polite"></div>' +
 
@@ -214,14 +267,14 @@
   }
 
   function bindEvents(state) {
-    state.root.addEventListener('click', function handleClick(event) {
+    function handleClick(event) {
       var control = event.target && event.target.closest
         ? event.target.closest('[data-action]')
         : null;
       if (!control || !state.root.contains(control)) return;
       var action = control.dataset.action;
       if (action === 'open-basic-buckets') {
-        state.app.router.go('shared', 'shared-buckets', {});
+        global.setBucketWorkspaceMode('basic');
       } else if (action === 'load-light') {
         loadBucketList(state, 'light');
       } else if (action === 'load-full') {
@@ -249,9 +302,9 @@
       } else if (action === 'refresh-taxonomy') {
         loadDomainTaxonomy(state);
       }
-    });
+    }
 
-    state.root.addEventListener('submit', function handleSubmit(event) {
+    function handleSubmit(event) {
       var form = event.target;
       if (!form || !form.matches || !form.matches('form[data-submit]')) return;
       event.preventDefault();
@@ -262,7 +315,14 @@
       else if (action === 'bulk-update') bulkUpdate(state, form);
       else if (action === 'add-comment') addComment(state, form);
       else if (action === 'ingest-raw') ingestRaw(state, form);
-    });
+    }
+
+    state.root.addEventListener('click', handleClick);
+    state.root.addEventListener('submit', handleSubmit);
+    return function unbindBucketStudioEvents() {
+      state.root.removeEventListener('click', handleClick);
+      state.root.removeEventListener('submit', handleSubmit);
+    };
   }
 
   function cleanText(value, maxLength) {
@@ -314,6 +374,9 @@
     var call = state.app.api[method];
     if (typeof call !== 'function') throw new Error('Dashboard API method unavailable: ' + method);
     var requestOptions = Object.assign({}, options || {});
+    if ((method === 'get' || method === 'head') && !requestOptions.signal && state.readController) {
+      requestOptions.signal = state.readController.signal;
+    }
     if (method !== 'get' && method !== 'head') requestOptions.retries = 0;
     var response = method === 'get' || method === 'head'
       ? await call.call(state.app.api, path, requestOptions)
@@ -340,6 +403,34 @@
     Object.keys(state.requests).forEach(function invalidate(key) {
       state.requests[key] += 1;
     });
+  }
+
+  function abortReadRequests(state) {
+    if (typeof state.routeAbortCleanup === 'function') state.routeAbortCleanup();
+    state.routeAbortCleanup = null;
+    var readController = state.readController;
+    state.readController = null;
+    if (readController && !readController.signal.aborted) readController.abort();
+  }
+
+  function beginReadCycle(state, routeSignal) {
+    abortReadRequests(state);
+    var readController = new AbortController();
+    state.readController = readController;
+    if (routeSignal && typeof routeSignal.addEventListener === 'function') {
+      var abortFromRoute = function abortFromRoute() {
+        if (!readController.signal.aborted) readController.abort();
+      };
+      if (routeSignal.aborted) {
+        abortFromRoute();
+      } else {
+        routeSignal.addEventListener('abort', abortFromRoute, { once: true });
+        state.routeAbortCleanup = function detachRouteAbort() {
+          routeSignal.removeEventListener('abort', abortFromRoute);
+        };
+      }
+    }
+    return readController.signal;
   }
 
   function beginWrite(state, key) {

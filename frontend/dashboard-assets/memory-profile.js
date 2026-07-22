@@ -1126,7 +1126,7 @@
     app.registerPanel({
       id: 'memory-persona-state',
       workspace: 'memory',
-      label: 'Persona',
+      label: 'Persona State',
       order: 50,
       mount: function (root) { mountPersona(root); },
       activate: function (context) {

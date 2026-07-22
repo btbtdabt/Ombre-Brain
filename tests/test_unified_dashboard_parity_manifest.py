@@ -87,6 +87,19 @@ def test_dashboard_parity_manifest_is_internally_consistent() -> None:
         assert alias["state"] not in panel_id_set
         assert alias["workspace"] in workspace_ids
         assert alias["panel"] in panel_id_set
+        if "mode" in alias:
+            assert alias["mode"] in {"basic", "advanced"}
+
+    assert next(
+        alias
+        for alias in legacy_panel_aliases
+        if alias["state"] == "shared-bucket-studio"
+    ) == {
+        "state": "shared-bucket-studio",
+        "workspace": "shared",
+        "panel": "shared-buckets",
+        "mode": "advanced",
+    }
 
     resource_counter = Counter(
         editor["resource"] for editor in canonical_editors  # type: ignore[index]
@@ -147,7 +160,7 @@ def test_dashboard_parity_manifest_is_internally_consistent() -> None:
     ]
     assert len(action_keys) == len(set(action_keys))
     for item in shared_actions:  # type: ignore[assignment]
-        assert item["panel"] == "shared-bucket-studio"
+        assert item["panel"] == "shared-buckets"
         assert item["panel"] in panel_id_set
         assert item["control"] in {"action", "submit"}
 

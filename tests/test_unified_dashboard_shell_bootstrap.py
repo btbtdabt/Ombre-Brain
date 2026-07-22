@@ -116,6 +116,7 @@ def test_bootstrap_registers_every_existing_p0_panel_as_a_legacy_adapter() -> No
         assert f"tab: '{tab}'" in legacy_panels
 
     aliases = {
+        "shared-bucket-studio": ("shared-buckets", None),
         "models-compat-export": ("system-status", "sec-backup"),
         "models-github-backup": ("system-status", "sec-github"),
         "models-migration-tools": ("system-status", "sec-backup"),
@@ -162,7 +163,12 @@ const app = {{
   router: {{ replace(workspace, panel, params) {{ replacements.push([workspace, panel, params]); }} }},
 }};
 registerPanelAliases(app);
-for (const definition of registrations) definition.activate();
+for (const definition of registrations) {{
+  const context = definition.id === 'shared-bucket-studio'
+    ? {{ state: {{ params: {{ bucket_id: 'memory-1', q: 'legacy query', mode: 'basic' }} }} }}
+    : {{ state: {{ params: {{}} }} }};
+  definition.activate(context);
+}}
 process.stdout.write(JSON.stringify({{
   registrations: registrations.map((item) => [item.id, item.workspace, item.hiddenFromNav, item.requiresRoot]),
   replacements,
@@ -177,7 +183,7 @@ process.stdout.write(JSON.stringify({{
     )
     result = json.loads(completed.stdout)
 
-    assert len(result["registrations"]) == 14
+    assert len(result["registrations"]) == 15
     assert all(item[2:] == [True, False] for item in result["registrations"])
     replacement_by_alias = {
         registered[0]: replacement
@@ -185,6 +191,11 @@ process.stdout.write(JSON.stringify({{
             result["registrations"], result["replacements"], strict=True
         )
     }
+    assert replacement_by_alias["shared-bucket-studio"] == [
+        "shared",
+        "shared-buckets",
+        {"bucket_id": "memory-1", "q": "legacy query", "mode": "advanced"},
+    ]
     assert replacement_by_alias["models-github-backup"] == [
         "system",
         "system-status",
@@ -200,6 +211,14 @@ process.stdout.write(JSON.stringify({{
         "system-logs",
         {},
     ]
+
+
+def test_faq_alias_reveals_the_integrated_about_section_after_async_render() -> None:
+    source = _read(BOOTSTRAP)
+
+    assert "'faq-section': 'system-about'" in source
+    assert "revealLegacySection(app, panelId, section)" in source
+    assert "setTimeout" in source[source.index("function revealLegacySection") : source.index("function hydrateBucketDetail")]
 
 
 def test_bootstrap_uses_canonical_router_state_for_workspace_and_panel_tabs() -> None:

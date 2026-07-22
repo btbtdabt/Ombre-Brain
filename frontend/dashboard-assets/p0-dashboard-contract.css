@@ -1,0 +1,433 @@
+/*
+ * Final visual contract for the unified Dashboard.
+ *
+ * P0luz's retro-handheld shell is the canonical language: warm injected
+ * plastic, raised mechanical controls, inset input wells, gold active states,
+ * mono UI labels and restrained serif body copy.  Feature styles load first;
+ * this file loads last and maps every registered panel back onto that system.
+ */
+
+.p0-panel-surface {
+  --p0-shell-shadow: 8px 8px 22px var(--shadow-dark-subtle),
+    -7px -7px 16px var(--shadow-light),
+    inset 0 1px 0 rgba(255, 255, 255, 0.55);
+  --p0-key-shadow: 4px 4px 10px var(--shadow-dark-subtle),
+    -4px -4px 9px var(--shadow-light);
+  --p0-inset-shadow: inset 3px 3px 7px var(--shadow-dark-subtle),
+    inset -3px -3px 6px var(--shadow-light);
+  width: 100%;
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 32px 40px 48px;
+  color: var(--text);
+}
+
+.p0-panel-surface .ob-memory-care,
+.p0-panel-surface .ob-memory-profile,
+.p0-panel-surface .memory-insights-panel,
+.p0-panel-surface .models-data-panel,
+.p0-panel-surface .shared-bucket-studio {
+  width: min(1180px, 100%);
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 0;
+}
+
+.bucket-mode-switch {
+  display: inline-flex;
+  align-items: stretch;
+  gap: 6px;
+  margin: 0 0 22px;
+  padding: 7px;
+  border-radius: 16px;
+  background: var(--surface-solid);
+  box-shadow: var(--p0-inset-shadow, inset 3px 3px 7px var(--shadow-dark-subtle), inset -3px -3px 6px var(--shadow-light));
+}
+
+.bucket-mode-switch__button {
+  display: inline-flex;
+  min-width: 118px;
+  min-height: 48px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  padding: 8px 18px !important;
+  border: 0 !important;
+  border-radius: 12px !important;
+  background: var(--surface) !important;
+  color: var(--text-dim) !important;
+  box-shadow: var(--p0-key-shadow, 4px 4px 10px var(--shadow-dark-subtle), -4px -4px 9px var(--shadow-light)) !important;
+  cursor: pointer;
+  transition: color 150ms ease, transform 120ms ease, box-shadow 150ms ease;
+}
+
+.bucket-mode-switch__button span {
+  font-family: 'Share Tech Mono', 'Noto Sans SC', sans-serif;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.bucket-mode-switch__button small {
+  color: var(--text-light);
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.bucket-mode-switch__button:hover {
+  color: var(--accent) !important;
+  transform: translateY(-1px);
+}
+
+.bucket-mode-switch__button.active,
+.bucket-mode-switch__button[aria-selected='true'] {
+  color: var(--accent) !important;
+  transform: translateY(-1px);
+  box-shadow: var(--p0-key-shadow, 4px 4px 10px var(--shadow-dark-subtle), -4px -4px 9px var(--shadow-light)),
+    0 0 0 2px var(--accent-glow),
+    inset 0 0 14px rgba(194, 152, 47, 0.1) !important;
+}
+
+.bucket-mode-switch__button.active small,
+.bucket-mode-switch__button[aria-selected='true'] small {
+  color: var(--accent);
+}
+
+.bucket-mode-panel[hidden] {
+  display: none !important;
+}
+
+.p0-panel-surface .ob-panel-header,
+.p0-panel-surface .ob-memory-care__header,
+.p0-panel-surface .memory-insights-header,
+.p0-panel-surface .models-data-header,
+.p0-panel-surface .unified-panel-heading,
+.p0-panel-surface .shared-bucket-studio__hero {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  margin: 0 0 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.p0-panel-surface .ob-panel-header h2,
+.p0-panel-surface .ob-memory-care__header h2,
+.p0-panel-surface .memory-insights-header h2,
+.p0-panel-surface .models-data-header h2,
+.p0-panel-surface .unified-panel-heading h2,
+.p0-panel-surface .shared-bucket-studio__hero h1 {
+  margin: 0;
+  color: var(--text);
+  font-family: 'Share Tech Mono', 'Noto Sans SC', sans-serif;
+  font-size: clamp(22px, 3vw, 30px);
+  font-weight: 500;
+  letter-spacing: 0.055em;
+  line-height: 1.18;
+}
+
+.p0-panel-surface .ob-panel-header p,
+.p0-panel-surface .ob-memory-care__header p:not(.ob-memory-care__eyebrow),
+.p0-panel-surface .memory-insights-header p,
+.p0-panel-surface .models-data-header p,
+.p0-panel-surface .unified-panel-heading p,
+.p0-panel-surface .shared-bucket-studio__hero p:not(.shared-bucket-studio__eyebrow) {
+  max-width: 760px;
+  margin: 6px 0 0;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.p0-panel-surface .ob-memory-care__eyebrow,
+.p0-panel-surface .shared-bucket-studio__eyebrow,
+.about-faq__eyebrow {
+  margin: 0 0 4px;
+  color: var(--accent) !important;
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.p0-panel-surface .config-section,
+.p0-panel-surface .unified-panel-card,
+.p0-panel-surface .models-data-card,
+.p0-panel-surface .models-data-canonical-host,
+.p0-panel-surface .ob-card,
+.p0-panel-surface .ob-memory-care__editor,
+.p0-panel-surface .ob-memory-care__run-card,
+.p0-panel-surface .ob-memory-care__calendar-card,
+.p0-panel-surface .ob-memory-care__day-card,
+.p0-panel-surface .ob-memory-care__card,
+.p0-panel-surface .ob-memory-care__darkroom-door,
+.p0-panel-surface .memory-insights-grid > section,
+.p0-panel-surface .memory-insights-subsection,
+.p0-panel-surface .memory-insights-query,
+.p0-panel-surface .shared-bucket-studio__section {
+  border: 0 !important;
+  border-radius: var(--shell-radius) !important;
+  background: var(--surface) !important;
+  box-shadow: var(--p0-shell-shadow) !important;
+}
+
+.p0-panel-surface .models-data-card,
+.p0-panel-surface .models-data-canonical-host,
+.p0-panel-surface .ob-card,
+.p0-panel-surface .ob-memory-care__editor,
+.p0-panel-surface .ob-memory-care__run-card,
+.p0-panel-surface .ob-memory-care__calendar-card,
+.p0-panel-surface .ob-memory-care__day-card,
+.p0-panel-surface .ob-memory-care__card,
+.p0-panel-surface .ob-memory-care__darkroom-door,
+.p0-panel-surface .memory-insights-grid > section,
+.p0-panel-surface .memory-insights-subsection,
+.p0-panel-surface .memory-insights-query,
+.p0-panel-surface .shared-bucket-studio__section {
+  padding: 22px 24px !important;
+}
+
+.p0-panel-surface .models-data-stack,
+.p0-panel-surface .ob-memory-profile,
+.p0-panel-surface .memory-insights-panel,
+.p0-panel-surface .ob-memory-care__list,
+.p0-panel-surface .shared-bucket-studio__stack {
+  gap: 18px;
+}
+
+.p0-panel-surface .memory-insights-card,
+.p0-panel-surface .memory-insights-state,
+.p0-panel-surface .models-data-field.is-toggle,
+.p0-panel-surface .models-data-empty,
+.p0-panel-surface .ob-persona-event,
+.p0-panel-surface .ob-stable-preview,
+.p0-panel-surface .ob-inline-form,
+.p0-panel-surface .ob-reset-confirm,
+.p0-panel-surface .ob-profile-edit,
+.p0-panel-surface .ob-loading,
+.p0-panel-surface .ob-empty,
+.p0-panel-surface .ob-error,
+.p0-panel-surface .shared-bucket-studio__bucket,
+.p0-panel-surface .shared-bucket-studio__summary div,
+.p0-panel-surface .shared-bucket-studio__card,
+.p0-panel-surface .shared-bucket-studio__empty {
+  border: 0 !important;
+  border-radius: var(--radius-control) !important;
+  background: var(--surface-solid) !important;
+  box-shadow: var(--p0-inset-shadow) !important;
+}
+
+.p0-panel-surface input[type='text'],
+.p0-panel-surface input[type='search'],
+.p0-panel-surface input[type='password'],
+.p0-panel-surface input[type='number'],
+.p0-panel-surface input[type='date'],
+.p0-panel-surface input[type='url'],
+.p0-panel-surface select,
+.p0-panel-surface textarea {
+  min-height: 38px;
+  border: 0 !important;
+  border-radius: var(--radius-control) !important;
+  background: var(--surface-solid) !important;
+  color: var(--text) !important;
+  box-shadow: var(--p0-inset-shadow) !important;
+  font: inherit;
+}
+
+.p0-panel-surface input:focus,
+.p0-panel-surface select:focus,
+.p0-panel-surface textarea:focus {
+  outline: none !important;
+  box-shadow: var(--p0-inset-shadow), 0 0 0 2px var(--accent-glow) !important;
+}
+
+.p0-panel-surface input[type='checkbox'],
+.p0-panel-surface input[type='radio'] {
+  accent-color: var(--accent);
+}
+
+.p0-panel-surface button:not(.bucket-mode-switch__button):not(.memory-insights-card):not(.shared-bucket-studio__bucket-open):not(.ob-memory-care__quiet) {
+  min-height: 36px;
+  border: 0 !important;
+  border-radius: 10px !important;
+  background: var(--surface-solid) !important;
+  color: var(--text-dim) !important;
+  box-shadow: 3px 3px 7px var(--shadow-dark-subtle), -3px -3px 6px var(--shadow-light) !important;
+  cursor: pointer;
+  font: inherit;
+  transition: color 140ms ease, transform 140ms ease, box-shadow 140ms ease;
+}
+
+.p0-panel-surface button:not(.bucket-mode-switch__button):not(.memory-insights-card):not(.shared-bucket-studio__bucket-open):not(.ob-memory-care__quiet):hover:not(:disabled) {
+  color: var(--accent) !important;
+  transform: translateY(-1px);
+}
+
+.p0-panel-surface button:not(.bucket-mode-switch__button):not(.memory-insights-card):not(.shared-bucket-studio__bucket-open):not(.ob-memory-care__quiet):active:not(:disabled) {
+  transform: translateY(1px);
+  box-shadow: inset 3px 3px 6px var(--shadow-dark-subtle), inset -2px -2px 5px var(--shadow-light) !important;
+}
+
+.p0-panel-surface button.primary,
+.p0-panel-surface button.btn-primary,
+.p0-panel-surface button.ob-memory-care__primary {
+  border: 0 !important;
+  border-radius: 13px !important;
+  background: linear-gradient(150deg, var(--accent-light), var(--accent)) !important;
+  color: #fffdf5 !important;
+  box-shadow: 5px 5px 13px var(--shadow-dark), -4px -4px 10px var(--shadow-light),
+    inset 0 1px 0 rgba(255, 255, 255, 0.35) !important;
+  text-shadow: 0 1px 1px rgba(120, 90, 20, 0.35);
+}
+
+.p0-panel-surface button.danger,
+.p0-panel-surface button.is-danger {
+  color: var(--negative) !important;
+}
+
+.p0-panel-surface .shared-bucket-studio__bucket-open,
+.p0-panel-surface .ob-memory-care__quiet {
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.p0-panel-surface .memory-insights-card {
+  color: var(--text) !important;
+  text-align: left;
+}
+
+.p0-panel-surface .memory-insights-card:hover,
+.p0-panel-surface .memory-insights-card[aria-pressed='true'] {
+  border: 0 !important;
+  color: var(--text) !important;
+  transform: none !important;
+  box-shadow: var(--p0-inset-shadow), 0 0 0 2px var(--accent-glow) !important;
+}
+
+.p0-panel-surface .models-data-writebar {
+  border: 0 !important;
+  border-radius: var(--radius-inner) !important;
+  background: color-mix(in srgb, var(--surface-solid) 94%, transparent) !important;
+  box-shadow: 6px 6px 16px var(--shadow-dark-subtle), -5px -5px 12px var(--shadow-light) !important;
+}
+
+.p0-panel-surface .models-data-json,
+.p0-panel-surface .shared-bucket-studio__raw,
+.p0-panel-surface .shared-bucket-studio__card pre {
+  border: 0 !important;
+  border-radius: var(--radius-control) !important;
+  background: var(--lcd) !important;
+  color: var(--lcd-text) !important;
+  box-shadow: var(--p0-inset-shadow) !important;
+  font-family: 'Share Tech Mono', 'SF Mono', Consolas, monospace;
+}
+
+.p0-panel-surface :is(.unified-status, .models-data-status, .ob-status, .ob-memory-care__toolbar-status, .ob-memory-care__operation-status, .shared-bucket-studio__status, .shared-bucket-studio__meta) {
+  color: var(--text-dim);
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.p0-panel-surface [data-tone='error'],
+.p0-panel-surface [data-state='error'] {
+  color: var(--negative) !important;
+}
+
+.p0-panel-surface [data-tone='success'],
+.p0-panel-surface [data-tone='ok'] {
+  color: var(--positive) !important;
+}
+
+.p0-panel-surface :is(.unified-empty, .models-data-empty, .ob-loading, .ob-empty, .ob-error, .shared-bucket-studio__empty, .memory-insights-state) {
+  min-height: 54px;
+  padding: 16px 18px !important;
+  color: var(--text-dim);
+  font-size: 12px;
+  text-align: center;
+}
+
+.about-faq {
+  margin-top: 28px;
+  text-align: left;
+}
+
+.about-faq h3 {
+  margin-bottom: 10px;
+}
+
+.about-faq__copy {
+  margin: 0 0 16px;
+  color: var(--text-dim);
+  font-family: 'Noto Serif SC', Georgia, serif;
+  font-size: 12px;
+  line-height: 1.8;
+}
+
+.about-faq__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 14px;
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 12px;
+  text-decoration: none;
+}
+
+@media (max-width: 760px) {
+  .p0-panel-surface {
+    padding: 18px 12px 32px;
+  }
+
+  .bucket-mode-switch {
+    display: flex;
+    width: 100%;
+  }
+
+  .bucket-mode-switch__button {
+    min-width: 0;
+    flex: 1 1 0;
+  }
+
+  .p0-panel-surface .ob-panel-header,
+  .p0-panel-surface .ob-memory-care__header,
+  .p0-panel-surface .memory-insights-header,
+  .p0-panel-surface .models-data-header,
+  .p0-panel-surface .unified-panel-heading,
+  .p0-panel-surface .shared-bucket-studio__hero {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .p0-panel-surface .models-data-card,
+  .p0-panel-surface .models-data-canonical-host,
+  .p0-panel-surface .ob-card,
+  .p0-panel-surface .ob-memory-care__editor,
+  .p0-panel-surface .ob-memory-care__run-card,
+  .p0-panel-surface .ob-memory-care__calendar-card,
+  .p0-panel-surface .ob-memory-care__day-card,
+  .p0-panel-surface .ob-memory-care__card,
+  .p0-panel-surface .ob-memory-care__darkroom-door,
+  .p0-panel-surface .memory-insights-grid > section,
+  .p0-panel-surface .memory-insights-subsection,
+  .p0-panel-surface .memory-insights-query,
+  .p0-panel-surface .shared-bucket-studio__section {
+    padding: 18px 16px !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .p0-panel-surface *,
+  .p0-panel-surface *::before,
+  .p0-panel-surface *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}

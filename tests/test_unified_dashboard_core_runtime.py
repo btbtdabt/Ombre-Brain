@@ -129,6 +129,12 @@ for (const name of ['path.js', 'api.js', 'router.js']) {{
     history: {{}},
     eventTarget: {{}},
   }}).current();
+  const faq = core.createRouter({{
+    pathEnv,
+    location: {{ pathname: '/', search: '?tab=faq', hash: '' }},
+    history: {{}},
+    eventTarget: {{}},
+  }}).current();
   const unknown = core.createRouter({{
     pathEnv,
     location: {{ pathname: '/', search: '?panel=memory-not-real', hash: '' }},
@@ -159,6 +165,7 @@ for (const name of ['path.js', 'api.js', 'router.js']) {{
     abortName,
     letters,
     reminders,
+    faq,
     unknown,
     mountedSearch,
   }}));
@@ -177,6 +184,8 @@ for (const name of ['path.js', 'api.js', 'router.js']) {{
     assert result["abortName"] == "AbortError"
     assert result["letters"]["panel"] == "system-letters"
     assert result["reminders"]["panel"] == "memory-reminders"
+    assert result["faq"]["panel"] == "system-about"
+    assert result["faq"]["params"] == {"section": "faq-section"}
     assert result["unknown"]["panel"] == "shared-buckets"
     assert result["mountedSearch"] == {
         "workspace": "shared",

@@ -19,6 +19,7 @@
 <link rel="stylesheet" href="./dashboard-assets/memory-insights.css?v=20260718-unified-v1">
 <link rel="stylesheet" href="./dashboard-assets/models-data.css?v=20260718-unified-v1">
 <link rel="stylesheet" href="./dashboard-assets/shared-bucket-studio.css?v=20260718-unified-v1">
+<link rel="stylesheet" href="./dashboard-assets/p0-dashboard-contract.css?v=20260722-dashboard-consolidation-v1">
 <script src="./dashboard-assets/core/path.js?v=20260721-file-preview-v1"></script>
 <script>
 window.OmbreDashboardPathEnv = window.OmbreDashboardCore.createPathEnv({ location: window.location });
@@ -1954,8 +1955,17 @@ window.OmbreDashboardPathEnv = window.OmbreDashboardCore.createPathEnv({ locatio
 </div>
 
 <div class="content" id="list-view">
-  <div class="filters" id="filters"></div>
-  <div class="bucket-viewbar">
+  <div class="bucket-mode-switch" role="tablist" aria-label="记忆桶模式 / Bucket mode">
+    <button type="button" class="bucket-mode-switch__button active" data-bucket-mode="basic" role="tab" aria-selected="true" aria-controls="bucket-basic-mode" onclick="setBucketWorkspaceMode('basic')">
+      <span>基础</span><small>Basic</small>
+    </button>
+    <button type="button" class="bucket-mode-switch__button" data-bucket-mode="advanced" role="tab" aria-selected="false" aria-controls="bucket-advanced-mode" onclick="setBucketWorkspaceMode('advanced')">
+      <span>高级</span><small>Advanced</small>
+    </button>
+  </div>
+  <section id="bucket-basic-mode" class="bucket-mode-panel" aria-label="基础记忆桶 / Basic Buckets">
+    <div class="filters" id="filters"></div>
+    <div class="bucket-viewbar">
     <label class="bucket-sort-control" for="bucket-sort">
       <i data-lucide="clock" style="width:14px;height:14px;"></i>
       时间顺序
@@ -1966,8 +1976,8 @@ window.OmbreDashboardPathEnv = window.OmbreDashboardCore.createPathEnv({ locatio
       </select>
     </label>
     <span class="bucket-sort-note" id="bucket-sort-note">按综合衰减分排列</span>
-  </div>
-  <div class="bucket-bulkbar">
+    </div>
+    <div class="bucket-bulkbar">
     <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-dim);height:32px;"><input id="bucket-select-all" type="checkbox" onchange="selectAllCurrentPage(this.checked)" style="accent-color:var(--accent);cursor:pointer;"> 全选当前页</label>
     <span id="bucket-selected-count" style="color:var(--text-dim);font-size:12px;">已选 0</span>
     <div class="bucket-bulkbar-actions">
@@ -1976,22 +1986,24 @@ window.OmbreDashboardPathEnv = window.OmbreDashboardCore.createPathEnv({ locatio
       <button onclick="runBucketBatch('archive')" style="height:32px;padding:0 12px;font-size:12px;display:inline-flex;align-items:center;gap:5px;"><i data-lucide="archive"></i> 归档</button>
       <button class="developer-only" onclick="hardDeleteSelectedTests()" style="height:32px;padding:0 12px;font-size:12px;align-items:center;gap:5px;color:#b85c3c;"><i data-lucide="trash-2"></i> 永久删除测试桶</button>
     </div>
-  </div>
-  <div id="bucket-load-status" role="status" aria-live="polite" style="display:none;font-size:12px;color:var(--text-dim);margin:8px 0 10px;"></div>
-  <button type="button" id="bucket-load-more" onclick="loadMoreBuckets()" style="display:none;margin:0 8px 12px 0;">加载更多记忆</button>
-  <button type="button" id="bucket-load-retry" onclick="loadBuckets()" style="display:none;margin-bottom:12px;">重试加载</button>
-  <div class="bucket-list" id="bucket-list">
-    <div class="loading">加载中… / Loading…</div>
-  </div>
-  <!-- iter 1.9 C: 已主动遗忘的桶折叠区 / collapsible voluntary-forgotten group -->
-  <details id="forgotten-group" style="margin-top:18px;display:none;">
-    <summary style="cursor:pointer;font-size:13px;color:var(--text-dim);padding:6px 0;">
-      <i data-lucide="eye-off" style="width:14px;height:14px;vertical-align:-2px;"></i>
-      已主动遗忘 <span id="forgotten-count">0</span> 条 <span class="en">Forgotten</span>
-      <button onclick="event.preventDefault(); bucketsForgetAllow();" title="全部允许浮现 / Allow all to surface" style="margin-left:12px;font-size:11px;padding:3px 8px;"><i data-lucide="eye"></i></button>
-    </summary>
-    <div id="forgotten-list" style="margin-top:10px;"></div>
-  </details>
+    </div>
+    <div id="bucket-load-status" role="status" aria-live="polite" style="display:none;font-size:12px;color:var(--text-dim);margin:8px 0 10px;"></div>
+    <button type="button" id="bucket-load-more" onclick="loadMoreBuckets()" style="display:none;margin:0 8px 12px 0;">加载更多记忆</button>
+    <button type="button" id="bucket-load-retry" onclick="loadBuckets()" style="display:none;margin-bottom:12px;">重试加载</button>
+    <div class="bucket-list" id="bucket-list">
+      <div class="loading">加载中… / Loading…</div>
+    </div>
+    <!-- iter 1.9 C: 已主动遗忘的桶折叠区 / collapsible voluntary-forgotten group -->
+    <details id="forgotten-group" style="margin-top:18px;display:none;">
+      <summary style="cursor:pointer;font-size:13px;color:var(--text-dim);padding:6px 0;">
+        <i data-lucide="eye-off" style="width:14px;height:14px;vertical-align:-2px;"></i>
+        已主动遗忘 <span id="forgotten-count">0</span> 条 <span class="en">Forgotten</span>
+        <button onclick="event.preventDefault(); bucketsForgetAllow();" title="全部允许浮现 / Allow all to surface" style="margin-left:12px;font-size:11px;padding:3px 8px;"><i data-lucide="eye"></i></button>
+      </summary>
+      <div id="forgotten-list" style="margin-top:10px;"></div>
+    </details>
+  </section>
+  <section id="bucket-advanced-mode" class="bucket-mode-panel" aria-label="高级记忆桶 / Advanced Buckets" hidden></section>
 </div>
 
 <div class="content" id="breath-view" style="display:none">
@@ -5944,6 +5956,15 @@ function escAttr(s) {
   });
 }
 
+function safeHttpsUrl(value) {
+  try {
+    var parsed = new URL(String(value || ''), window.location.href);
+    return parsed.protocol === 'https:' ? parsed.href : '';
+  } catch (error) {
+    return '';
+  }
+}
+
 // iter 1.9 A: plan weight 的中文档位锚点 / semantic anchors for plan weight
 //   <0.30 → 轻；<0.62 → 中；<0.88 → 重；其余 → 必须
 //   边界用插值锚点的中点，避免「拖到 0.50 显示中、0.51 突变成重」
@@ -8137,15 +8158,23 @@ async function loadAbout() {
       html += _divider;
       html += '<div style="white-space:pre-wrap;color:var(--text);line-height:2.0;font-family:\'Noto Serif SC\',Georgia,serif;text-align:center;">' + esc(d.support) + '</div>';
     }
-    if (d.ifdian) {
+    var supportUrl = safeHttpsUrl(d.ifdian);
+    if (supportUrl) {
       html += '<div style="margin-top:24px;padding:22px;background:var(--surface-solid);border-radius:14px;text-align:center;' +
         'box-shadow:inset 3px 3px 8px var(--shadow-dark-subtle), inset -3px -3px 6px var(--shadow-light);">' +
-        '<a href="' + escAttr(d.ifdian) + '" target="_blank" rel="noopener" style="display:inline-block;color:#fffdf5;text-decoration:none;font-size:14px;padding:11px 26px;border-radius:13px;' +
+        '<a href="' + escAttr(supportUrl) + '" target="_blank" rel="noopener" style="display:inline-block;color:#fffdf5;text-decoration:none;font-size:14px;padding:11px 26px;border-radius:13px;' +
         'background:linear-gradient(150deg, var(--accent-light), var(--accent));text-shadow:0 1px 1px rgba(120,90,20,0.35);' +
         'box-shadow:5px 5px 13px var(--shadow-dark), -4px -4px 10px var(--shadow-light), inset 0 1px 0 rgba(255,255,255,0.35);">' +
         _SV.coffee + ' 在爱发电支持我们 / Support on Afdian</a></div>';
     }
     html += '</div>';
+    html += '<section class="config-section about-faq" id="faq-section">' +
+      '<p class="about-faq__eyebrow">P0luz/Ombre-Brain · ORIGINAL GUIDE</p>' +
+      '<h3>使用须知与常见问题 <span class="sec-en">FAQ &amp; Usage Guide</span></h3>' +
+      '<p class="about-faq__copy">部署、持久盘、GitHub 备份、MCP/OAuth、API 与向量化的常见问题集中整理在原作者使用指南中。遇到连接失败、401、更新后记忆为空或向量化异常时，请先查看这里。</p>' +
+      '<a class="btn-secondary about-faq__link" href="https://docs.qq.com/doc/DRHp6UW9oYmd3QW5Z" target="_blank" rel="noopener noreferrer">' +
+        '<i data-lucide="book-open"></i> 打开 Ombre Brain 使用须知与 FAQ</a>' +
+      '</section>';
     el.innerHTML = html;
     if (window.lucide) lucide.createIcons();
   } catch(e) {
@@ -10023,14 +10052,14 @@ function renderSelfEntries() {
 </script>
 
 <script src="./dashboard-assets/core/api.js?v=20260718-unified-v1"></script>
-<script src="./dashboard-assets/core/router.js?v=20260718-unified-v1"></script>
+<script src="./dashboard-assets/core/router.js?v=20260722-dashboard-consolidation-v1"></script>
 <script src="./dashboard-assets/core/store.js?v=20260718-unified-v1"></script>
 <script src="./dashboard-assets/core/app-shell.js?v=20260718-unified-v1"></script>
 <script src="./dashboard-assets/memory-care.js?v=20260722-memory-candidate-fix-v1"></script>
-<script src="./dashboard-assets/memory-profile.js?v=20260718-unified-v1"></script>
+<script src="./dashboard-assets/memory-profile.js?v=20260722-dashboard-consolidation-v1"></script>
 <script src="./dashboard-assets/memory-insights.js?v=20260718-unified-v1"></script>
-<script src="./dashboard-assets/models-data.js?v=20260718-unified-v1"></script>
-<script src="./dashboard-assets/shared-bucket-studio.js?v=20260718-unified-v1"></script>
-<script src="./dashboard-assets/unified-shell.js?v=20260718-unified-v1"></script>
+<script src="./dashboard-assets/models-data.js?v=20260722-dashboard-consolidation-v1"></script>
+<script src="./dashboard-assets/shared-bucket-studio.js?v=20260722-dashboard-consolidation-v1"></script>
+<script src="./dashboard-assets/unified-shell.js?v=20260722-dashboard-consolidation-v1"></script>
 </body>
 </html>

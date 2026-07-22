@@ -1051,7 +1051,7 @@
     }
 
     function mountPersona(root) {
-      mountConfigPanel(root, 'models-persona', 'Persona model', 'Controls persona-state inference and event recording, without duplicating the Persona viewer.', [
+      mountConfigPanel(root, 'models-persona', 'Persona Settings', 'Controls persona-state inference and event recording, without duplicating the Persona State viewer.', [
         sectionMarkup('Persona inference', 'The API key is returned only as a masked readiness signal.', PERSONA_FIELDS),
       ]);
     }
@@ -1125,7 +1125,7 @@
     app.registerPanel({
       id: 'models-persona',
       workspace: 'models-data',
-      label: 'Persona',
+      label: 'Persona Settings',
       order: 50,
       mount: mountPersona,
       activate: configActivation('models-persona'),

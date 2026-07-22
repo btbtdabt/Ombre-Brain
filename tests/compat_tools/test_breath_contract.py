@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 import pytest
 
@@ -9,6 +10,7 @@ from recall_policy import RecallPolicy, RecallPolicyDecision
 from tools import _runtime as runtime
 from tools import current
 from tools.current import memory as current_memory
+from utils import LOCAL_TZ
 
 
 async def _bucket(
@@ -332,10 +334,13 @@ class _PortraitSpy:
 
 
 class _PersonaSpy:
+    def __init__(self, event_date: str):
+        self.event_date = event_date
+
     def _list_events(self, limit: int) -> list[dict]:
         return [
             {
-                "created_at": "2026-07-17T14:00:00Z",
+                "created_at": f"{self.event_date}T14:00:00Z",
                 "user_excerpt": "今天把迁移推进完",
                 "assistant_excerpt": "我继续核对兼容契约",
                 "salience": 0.9,
@@ -372,6 +377,7 @@ async def test_handoff_uses_session_portrait_persona_and_gateway_state(
     current_runtime,
     monkeypatch,
 ):
+    event_date = datetime.now(LOCAL_TZ).date().isoformat()
     await _bucket(
         current_runtime,
         "我是持续校验迁移边界的人。",
@@ -389,12 +395,12 @@ async def test_handoff_uses_session_portrait_persona_and_gateway_state(
         arousal=0.4,
         name="Daily impression",
         bucket_type="feel",
-        date="2026-07-17",
+        date=event_date,
     )
     gateway = _GatewayStateSpy()
     reminders = _ReminderSpy()
     monkeypatch.setattr(runtime, "portrait_engine", _PortraitSpy())
-    monkeypatch.setattr(runtime, "persona_engine", _PersonaSpy())
+    monkeypatch.setattr(runtime, "persona_engine", _PersonaSpy(event_date))
     monkeypatch.setattr(runtime, "gateway_state_store", gateway)
     monkeypatch.setattr(runtime, "reminder_store", reminders)
 

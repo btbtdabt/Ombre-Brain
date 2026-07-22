@@ -100,6 +100,39 @@ fixed access token remains a resource-bound compatibility credential.
 
 ## Integration Batch Ledger
 
+### 2026-07-21 Dashboard consolidation and P0 visual contract
+
+| Source range | Disposition | Evidence |
+| --- | --- | --- |
+| P0luz and current/Ying Dashboard inventories | One visible owner per function, with distinct behavior preserved | The parity manifest assigns every retained panel, route family, and action to one canonical destination. The former Bucket Studio tab is now the **Advanced** mode inside the canonical **Buckets** workspace, while its bulk editing, raw ingest/search, comments, moments, taxonomy, and edge tooling remain intact. The legacy `shared-bucket-studio` deep link opens that advanced mode. |
+| P0luz FAQ and About content | Consolidated without a duplicate top-level tab | P0luz's original usage guide is exposed inside **System / About**. Legacy `?tab=faq` state resolves to the same canonical About panel. |
+| Persona surfaces | Separate responsibilities with unambiguous labels | **Persona State** remains the read-only memory/identity view, while **Persona Settings** remains the model/configuration editor. Neither panel loses its original HTTP surface or controls. |
+| Unified visual surface | P0luz style is the canonical contract | Every registered panel receives the shared warm cream/gold, retro-handheld P0 surface contract: mono labels, inset fields and data screens, raised key controls, consistent cards, focus states, status states, spacing, and responsive behavior. Feature-specific layouts remain intact beneath that common contract. |
+
+The visible navigation therefore contains no duplicate Buckets, FAQ, Persona,
+backup, or migration owner. Compatibility aliases preserve bookmarks without
+reintroducing duplicate tabs.
+
+Local verification for this batch:
+
+- `pytest`: **2546 passed / 75 skipped / 0 failed**.
+- Ruff and all changed-file Node syntax checks: **clean**.
+- Changed Python files: **0 Pyright errors / 0 warnings**.
+- Whole-tree Pyright debt audit: **469 errors / 21 warnings**, unchanged from
+  the recorded baseline and confined to pre-existing dormant/compatibility
+  annotations.
+- Final Docker image build: **successful**.
+- Isolated browser staging: all **37 visible panels** opened successfully,
+  carried the P0 surface contract, used the same mono typography, had no
+  horizontal overflow, and produced no browser errors. The Basic/Advanced
+  Buckets modes, legacy Bucket Studio and FAQ deep links, and a 390 px mobile
+  viewport all passed.
+- Independent code and JavaScript reviews: **approved with no remaining
+  findings**.
+
+Production cutover remains pending until this exact commit is pushed, staged,
+and verified on the public deployment.
+
 ### 2026-07-18 unified Dashboard integration
 
 | Source range | Disposition | Evidence |

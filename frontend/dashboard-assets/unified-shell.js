@@ -63,6 +63,9 @@
   // registered without navigation or content and immediately replace their URL
   // with the single canonical owner.
   var PANEL_ALIASES = Object.freeze({
+    'shared-bucket-studio': {
+      workspace: 'shared', targetWorkspace: 'shared', targetPanel: 'shared-buckets', mode: 'advanced',
+    },
     'models-compat-export': {
       workspace: 'models-data', targetWorkspace: 'system', targetPanel: 'system-status', section: 'sec-backup',
     },
@@ -118,6 +121,7 @@
     'sec-env': 'system-status',
     'sec-mcp': 'system-status',
     'sec-dev-mode': 'system-status',
+    'faq-section': 'system-about',
   });
 
   function validatedLegacySection(panelId, sectionValue) {
@@ -193,10 +197,14 @@
   function resolvePanelRoot(definition) {
     if (definition && definition.requiresRoot === false) return null;
     var existing = definitionRoot(definition);
-    if (existing) return existing;
+    if (existing) {
+      existing.classList.add('p0-panel-surface');
+      existing.dataset.p0Surface = 'true';
+      return existing;
+    }
 
     var section = document.createElement('section');
-    section.className = 'content unified-panel';
+    section.className = 'content unified-panel p0-panel-surface';
     section.id = 'unified-panel-' + definition.id;
     section.dataset.panel = definition.id;
     section.dataset.workspace = definition.workspace;
@@ -240,8 +248,11 @@
         order: 10000,
         hiddenFromNav: true,
         requiresRoot: false,
-        activate: function activateAlias() {
-          var params = alias.section ? { section: alias.section } : {};
+        activate: function activateAlias(context) {
+          var routeParams = context && context.state && context.state.params;
+          var params = Object.assign({}, routeParams || {});
+          if (alias.section) params.section = alias.section;
+          if (alias.mode) params.mode = alias.mode;
           return app.router.replace(alias.targetWorkspace, alias.targetPanel, params);
         },
       });
@@ -255,15 +266,25 @@
     return panelId || 'system-status';
   }
 
-  function revealSettingsSection(sectionId) {
+  function revealLegacySection(app, panelId, sectionId, attempt) {
     if (!sectionId) return;
     var section = document.getElementById(sectionId);
-    if (!section) return;
+    if (!section) {
+      var retries = Number(attempt || 0);
+      if (retries < 60 && typeof global.setTimeout === 'function') {
+        global.setTimeout(function retrySectionReveal() {
+          revealLegacySection(app, panelId, sectionId, retries + 1);
+        }, 50);
+      }
+      return;
+    }
     var group = section.getAttribute('data-sgroup');
     if (group && typeof global.showSettingsGroup === 'function') {
       global.showSettingsGroup(group);
     }
     global.requestAnimationFrame(function scrollToSection() {
+      var current = app && app.router && app.router.current();
+      if (!current || current.panel !== panelId || section.isConnected === false) return;
       section.scrollIntoView({ block: 'start', behavior: 'smooth' });
     });
   }
@@ -310,7 +331,7 @@
     applyPanelTabState(panelId);
 
     var section = validatedLegacySection(panelId, context && context.section) || legacy.section;
-    if (section) revealSettingsSection(section);
+    if (section) revealLegacySection(app, panelId, section);
     if (panelId === 'shared-search') {
       var query = String(context && context.q || '').trim();
       var searchInput = document.getElementById('search-input');
@@ -325,7 +346,16 @@
       return undefined;
     }
     if (typeof global.cancelBucketSearch === 'function') global.cancelBucketSearch();
-    if (panelId === 'shared-buckets') return hydrateBucketDetail(context);
+    if (panelId === 'shared-buckets') {
+      var mode = context && context.mode === 'advanced' ? 'advanced' : 'basic';
+      var modeActivation = typeof global.setBucketWorkspaceMode === 'function'
+        ? global.setBucketWorkspaceMode(mode, { navigate: false, context: context || {} })
+        : undefined;
+      if (mode === 'advanced') return modeActivation;
+      var detailActivation = hydrateBucketDetail(context);
+      if (modeActivation && detailActivation) return Promise.all([modeActivation, detailActivation]);
+      return detailActivation || modeActivation;
+    }
     if (legacy.focus) {
       var focusTarget = document.querySelector(legacy.focus);
       if (focusTarget) focusTarget.focus();

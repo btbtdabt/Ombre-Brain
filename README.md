@@ -34,7 +34,7 @@ Ombre Brain gives it persistent memory — not cold key-value storage, but a sys
 - **写入不被向量服务绑架**：Markdown 原文先落盘，embedding 在耐久后台队列中生成；网络、限流或重启都不会让已写记忆回滚
 - **可验证备份与恢复**：本地导出使用 SQLite 一致性快照，并为每个文件写入 SHA-256 清单；导入前先检查路径、体积、重复项和完整性，损坏包不会部分恢复
 - **历史对话导入**：批量导入 Claude / ChatGPT / DeepSeek 历史对话，分块处理带断点续传
-- **Dashboard**：内置 Web 管理面板，密码保护，`/` 作为 P0/system 面板，`/memory-dashboard`（兼容 `/dashboard`）作为 current/Ying 记忆面板；两边彼此交叉跳转，覆盖桶列表 / 检索调试 / 记忆网络 / 配置管理
+- **Dashboard**：内置、密码保护的单一 Web 管理面板；P0luz 与 current/Ying 功能按 **常用 / 记忆 / 模型与数据 / 系统** 四个工作区整合展示，共用同一套 P0luz 视觉语言。`/`、`/memory-dashboard` 与兼容入口 `/dashboard` 进入同一个 Dashboard shell，只保留不同的默认落点
 - **Cloudflare Tunnel 一键管理**：Dashboard 内置 Tunnel 连接器，无需命令行即可开启公网访问
 - **OAuth 2.1 远程鉴权**：通过 HTTPS 连接时自动触发 OAuth 流程，Claude.ai 网页版和 Claude Code 均支持
 
@@ -184,7 +184,7 @@ curl http://localhost:18001/health
 
 浏览器打开 Dashboard：`http://localhost:18001`
 
-> 入口分工：`http://localhost:18001/` 是 P0/system Dashboard，`http://localhost:18001/memory-dashboard` 是 current/Ying 记忆 Dashboard，`/dashboard` 会跳到后者。
+> 三个入口共用同一个 Dashboard：`http://localhost:18001/` 默认打开常用 / 记忆桶，`/memory-dashboard` 默认打开记忆 / 提醒，兼容入口 `/dashboard` 会跳到后者。
 
 > 第一次访问会弹出密码设置向导，设好密码后所有 `/api/*` 端点都需要这个密码登录。
 
@@ -609,7 +609,7 @@ docker compose -f deploy/docker-compose.yml up -d
 
 ## Dashboard 功能概览
 
-启动后浏览器打开 `/`（根路径）进入 P0/system Dashboard，第一次会引导设置密码；同一站点的 current/Ying 记忆 Dashboard 在 `/memory-dashboard`，`/dashboard` 会重定向到它。
+启动后浏览器打开 `/`（根路径）进入统一 Dashboard，第一次会引导设置密码。`/memory-dashboard` 和 `/dashboard` 保留为兼容入口，并进入同一个 shell 的记忆工作区。
 
 | 标签页 | 功能 |
 |---|---|

@@ -16,17 +16,19 @@ STYLES = ROOT / "frontend" / "dashboard-assets" / "shared-bucket-studio.css"
 DASHBOARD = ROOT / "frontend" / "dashboard.html"
 
 
-def test_shared_bucket_studio_is_a_distinct_single_shared_panel() -> None:
+def test_shared_buckets_exposes_advanced_mode_without_a_second_visible_panel() -> None:
     source = ASSET.read_text(encoding="utf-8")
     dashboard = DASHBOARD.read_text(encoding="utf-8")
+    mode_surface = dashboard + "\n" + source
 
-    assert "id: 'shared-bucket-studio'" in source
-    assert "workspace: 'shared'" in source
-    assert source.count("app.registerPanel({") == 1
-    assert "open-basic-buckets" in source
-    assert "app.router.go('shared', 'shared-buckets'" in source
+    assert "id: 'shared-bucket-studio'" not in source
+    assert 'data-bucket-mode="basic"' in mode_surface
+    assert 'data-bucket-mode="advanced"' in mode_surface
+    assert 'data-panel-id="shared-bucket-studio"' not in dashboard
     assert "shared-bucket-studio.js" in dashboard
     assert "shared-bucket-studio.css" in dashboard
+    assert "button.setAttribute('tabindex', '0')" in source
+    assert "selected ? '0' : '-1'" not in source
 
 
 def test_shared_bucket_studio_covers_advanced_bucket_and_raw_workflows() -> None:
@@ -75,6 +77,9 @@ def test_shared_bucket_studio_bounds_data_and_uses_safe_write_boundaries() -> No
     assert "maxlength=\"100000\"" in source
     assert "maxlength=\"4000\"" in source
     assert "state.requests" in source
+    assert "state.readController" in source
+    assert "requestOptions.signal" in source
+    assert "readController.abort()" in source
     assert "state.writes" in source
     assert "beginWrite(state" in source
     assert "finishWrite(state" in source
@@ -112,7 +117,20 @@ def test_shared_bucket_studio_runtime_routes_reads_and_writes_without_retrying_w
         const source = fs.readFileSync(__ASSET__, 'utf8');
         const factories = [];
         const window = { OmbreDashboardFeatureFactories: factories, confirm: () => true };
-        const document = { head: null };
+        let advancedRoot;
+        let basicRoot;
+        const listView = { dataset: {} };
+        const document = {
+          head: null,
+          getElementById(id) {
+            if (id === 'bucket-advanced-mode') return advancedRoot;
+            if (id === 'bucket-basic-mode') return basicRoot;
+            if (id === 'list-view') return listView;
+            return null;
+          },
+          querySelectorAll() { return []; },
+        };
+        window.document = document;
         vm.runInNewContext(source, {
           window, document, console, Promise, URLSearchParams, AbortController,
           setTimeout, clearTimeout,
@@ -177,7 +195,7 @@ def test_shared_bucket_studio_runtime_routes_reads_and_writes_without_retrying_w
         class Element {
           constructor() {
             this.innerHTML = ''; this.textContent = ''; this.value = ''; this.checked = false;
-            this.disabled = false; this.hidden = false; this.dataset = {}; this.attrs = {};
+            this.disabled = false; this.hidden = false; this.dataset = {}; this.attrs = {}; this.style = {};
           }
           setAttribute(name, value) { this.attrs[name] = String(value); }
           removeAttribute(name) { delete this.attrs[name]; }
@@ -192,6 +210,9 @@ def test_shared_bucket_studio_runtime_routes_reads_and_writes_without_retrying_w
           }
           querySelectorAll() { return []; }
           addEventListener(type, listener) { (this.listeners[type] ||= []).push(listener); }
+          removeEventListener(type, listener) {
+            this.listeners[type] = (this.listeners[type] || []).filter((item) => item !== listener);
+          }
           contains() { return true; }
           emit(type, target) {
             for (const listener of this.listeners[type] || []) listener({ target, preventDefault() {} });
@@ -218,7 +239,6 @@ def test_shared_bucket_studio_runtime_routes_reads_and_writes_without_retrying_w
         function wait() { return new Promise((resolve) => setTimeout(resolve, 30)); }
 
         (async () => {
-          const panels = [];
           const routerCalls = [];
           const confirmations = [];
           const app = {
@@ -230,19 +250,27 @@ def test_shared_bucket_studio_runtime_routes_reads_and_writes_without_retrying_w
             },
             router: { go: (...args) => routerCalls.push(args) },
             commands: { refreshBuckets: () => {} },
-            registerPanel: (panel) => panels.push(panel),
           };
+          advancedRoot = new Root();
+          basicRoot = new Element();
           factories[0](app);
-          assert.strictEqual(panels.length, 1);
-          const panel = panels[0];
-          const root = new Root();
-          panel.mount(root);
-          panel.activate({ state: { params: {} } });
+          const root = advancedRoot;
+          factories[0](app);
+          assert.strictEqual(root.listeners.click.length, 1, 're-init must replace the old click listener');
+          assert.strictEqual(root.listeners.submit.length, 1, 're-init must replace the old submit listener');
+          app.commands.setBucketMode('advanced', { navigate: false, context: { state: { params: {} } } });
           await wait();
           assert(calls.some((call) => call.method === 'GET' && call.path.startsWith('/api/buckets/light?')));
           assert(calls.some((call) => call.path === '/api/domain-taxonomy'));
           assert(calls.some((call) => call.path === '/api/edges'));
+          const initialRead = calls.find((call) => call.method === 'GET');
+          assert(initialRead.options.signal instanceof AbortSignal, 'advanced reads must be abortable');
           assert(root.querySelector('[data-role="bucket-list"]').innerHTML.includes('&lt;unsafe&gt;'));
+
+          app.commands.setBucketMode('basic', { navigate: false });
+          assert.strictEqual(initialRead.options.signal.aborted, true, 'leaving advanced mode aborts reads');
+          app.commands.setBucketMode('advanced', { navigate: false, context: { state: { params: {} } } });
+          await wait();
 
           root.emit('click', button('load-full'));
           await wait();
@@ -360,8 +388,22 @@ def test_failed_bucket_detail_load_clears_stale_mutation_targets() -> None:
         const source = fs.readFileSync(__ASSET__, 'utf8');
         const factories = [];
         const window = { OmbreDashboardFeatureFactories: factories, confirm: () => true };
+        let advancedRoot;
+        let basicRoot;
+        const listView = { dataset: {} };
+        const document = {
+          head: null,
+          getElementById(id) {
+            if (id === 'bucket-advanced-mode') return advancedRoot;
+            if (id === 'bucket-basic-mode') return basicRoot;
+            if (id === 'list-view') return listView;
+            return null;
+          },
+          querySelectorAll() { return []; },
+        };
+        window.document = document;
         vm.runInNewContext(source, {
-          window, document: { head: null }, console, Promise, URLSearchParams, AbortController,
+          window, document, console, Promise, URLSearchParams, AbortController,
           setTimeout, clearTimeout,
         }, { filename: 'shared-bucket-studio.js' });
 
@@ -396,7 +438,7 @@ def test_failed_bucket_detail_load_clears_stale_mutation_targets() -> None:
         class Element {
           constructor() {
             this.innerHTML = ''; this.textContent = ''; this.value = ''; this.checked = false;
-            this.disabled = false; this.hidden = false; this.dataset = {}; this.attrs = {};
+            this.disabled = false; this.hidden = false; this.dataset = {}; this.attrs = {}; this.style = {};
           }
           setAttribute(name, value) { this.attrs[name] = String(value); }
           removeAttribute(name) { delete this.attrs[name]; }
@@ -441,7 +483,6 @@ def test_failed_bucket_detail_load_clears_stale_mutation_targets() -> None:
         function wait() { return new Promise((resolve) => setTimeout(resolve, 20)); }
 
         (async () => {
-          const panels = [];
           const app = {
             api,
             ui: {
@@ -449,15 +490,16 @@ def test_failed_bucket_detail_load_clears_stale_mutation_targets() -> None:
               setStatus: (element, message, tone) => { element.textContent = message; element.dataset.tone = tone; },
               confirm: async () => true,
             },
-            registerPanel: (panel) => panels.push(panel),
+            router: { go() {} },
+            commands: {},
           };
+          advancedRoot = new Root();
+          basicRoot = new Element();
           factories[0](app);
-          const panel = panels[0];
-          const root = new Root();
+          const root = advancedRoot;
           const editForm = root.querySelector('form[data-submit="edit-bucket"]');
           const commentForm = root.querySelector('form[data-submit="add-comment"]');
-          panel.mount(root);
-          await panel.activate({ state: { params: {} } });
+          await app.commands.setBucketMode('advanced', { navigate: false, context: { state: { params: {} } } });
 
           root.emit('click', button('open-bucket', 'memory-1'));
           await wait();
