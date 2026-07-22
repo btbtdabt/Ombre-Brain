@@ -154,7 +154,23 @@ const api = {
       });
     }
     if (path.startsWith('/api/bucket/')) return response({ content: 'Full paginated impression body' });
-    if (path.startsWith('/api/daily-chat-memory/pending')) return response({ items: [] });
+    if (path.startsWith('/api/daily-chat-memory/pending')) return response({
+      items: [{
+        id: 'candidate-live',
+        status: 'pending',
+        date: today,
+        candidate: {
+          id: 'candidate-live',
+          title: 'Live memory candidate',
+          kind: 'key_event',
+          content: 'A non-empty candidate must render its editable fields.',
+          domain: ['project'],
+          tags: ['dashboard'],
+          importance: 7,
+          confidence: 0.91,
+        },
+      }],
+    });
     if (path.startsWith('/api/dreams')) return response({ records: [] });
     if (path === '/api/darkroom/status') return response({ status: 'ok', count: 0, door: 'Darkroom Door' });
     throw new Error('unexpected GET ' + path);
@@ -789,7 +805,9 @@ process.stdout.write(JSON.stringify(result));
     ):
         assert 'data-state="error"' in oversized
         assert "超过" in oversized
-    assert 'data-state="empty"' in runtime["candidates"]
+    assert "Live memory candidate" in runtime["candidates"]
+    assert 'name="candidate_title"' in runtime["candidates"]
+    assert 'name="candidate_content"' in runtime["candidates"]
     assert 'data-state="empty"' in runtime["dreams"]
     assert "0 个 active 房间" in runtime["darkroom"]
 

@@ -754,6 +754,10 @@ const viewIds = [
   'anchors-view', 'about-view', 'mcp-local-origin',
 ];
 const elements = Object.fromEntries(viewIds.map((id) => [id, element(id)]));
+elements['network-canvas'] = Object.assign(element('network-canvas'), {{
+  offsetWidth: 1200,
+  offsetHeight: 720,
+}});
 const document = {{
   readyState: 'loading',
   body: element('body'),
@@ -854,6 +858,101 @@ process.stdout.write(JSON.stringify({{
         "settingsAfterProgrammaticRoute": 10,
         "routeCalls": 3,
     }
+
+
+def test_network_load_waits_until_the_unified_panel_is_visible() -> None:
+    dashboard_source = DASHBOARD.read_text(encoding="utf-8")
+    listener_start = dashboard_source.index(
+        "document.querySelectorAll('.tab').forEach(tab => {"
+    )
+    listener_end = dashboard_source.index("\nlet searchTimer;", listener_start)
+    legacy_listener = dashboard_source[listener_start:listener_end]
+    script = f"""
+const vm = require('vm');
+const legacyListener = {json.dumps(legacy_listener)};
+
+function classList() {{
+  const values = new Set();
+  return {{
+    add(name) {{ values.add(name); }},
+    remove(name) {{ values.delete(name); }},
+    contains(name) {{ return values.has(name); }},
+  }};
+}}
+
+function element(id, tabName) {{
+  const listeners = Object.create(null);
+  return {{
+    id,
+    dataset: tabName ? {{ tab: tabName }} : {{}},
+    classList: classList(),
+    style: {{}},
+    hidden: id === 'network-view',
+    addEventListener(type, handler) {{
+      (listeners[type] = listeners[type] || []).push(handler);
+    }},
+    click() {{
+      (listeners.click || []).slice().forEach((handler) => handler({{
+        target: this,
+        preventDefault() {{}},
+      }}));
+    }},
+  }};
+}}
+
+const networkTab = element('network-tab', 'network');
+const elements = Object.fromEntries([
+  'list-view', 'breath-view', 'network-view', 'plan-view', 'import-view',
+  'logs-view', 'v3-debug-view', 'settings-view', 'letters-view',
+  'anchors-view', 'about-view', 'mcp-local-origin', 'network-canvas',
+].map((id) => [id, element(id)]));
+Object.defineProperty(elements['network-view'], 'offsetWidth', {{
+  get() {{ return this.hidden ? 0 : 1200; }},
+}});
+Object.defineProperties(elements['network-canvas'], {{
+  offsetWidth: {{ get() {{ return elements['network-view'].hidden ? 0 : 1200; }} }},
+  offsetHeight: {{ get() {{ return elements['network-view'].hidden ? 0 : 720; }} }},
+}});
+
+const frames = [];
+const observedWidths = [];
+const document = {{
+  querySelectorAll(selector) {{ return selector === '.tab' ? [networkTab] : []; }},
+  getElementById(id) {{ return elements[id] || null; }},
+}};
+const window = {{
+  document,
+  requestAnimationFrame(callback) {{ frames.push(callback); return frames.length; }},
+  cancelAnimationFrame() {{}},
+  _netRAF: null,
+  loadNetwork() {{ observedWidths.push(elements['network-view'].offsetWidth); }},
+  loadPlans() {{}},
+  pollImportStatus() {{}},
+  loadImportResults() {{}},
+  loadLogs() {{}},
+  loadOBErrors() {{}},
+  loadV3Debug() {{}},
+  loadLetters() {{}},
+  loadAnchorsView() {{}},
+  loadAbout() {{}},
+  renderMcpUrls() {{}},
+}};
+window.window = window;
+vm.createContext(window);
+vm.runInContext(legacyListener, window, {{ filename: 'dashboard-legacy-tabs.js' }});
+
+// The unified listener is registered after the original listener and reveals
+// the panel only once routing has accepted the click.
+networkTab.addEventListener('click', () => {{
+  elements['network-view'].hidden = false;
+}});
+networkTab.click();
+frames.splice(0).forEach((callback) => callback());
+
+process.stdout.write(JSON.stringify({{ observedWidths, queuedFrames: frames.length }}));
+"""
+
+    assert _run_node(script) == {"observedWidths": [1200], "queuedFrames": 0}
 
 
 def test_bucket_detail_route_hydrates_once_on_reload_and_open_command() -> None:

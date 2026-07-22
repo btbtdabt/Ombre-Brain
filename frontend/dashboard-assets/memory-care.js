@@ -1467,6 +1467,11 @@
       return Array.isArray(value) ? value.join(', ') : String(value || '');
     }
 
+    function candidateField(label, control, wide) {
+      return '<label class="ob-memory-care__field' + (wide ? ' is-wide' : '') + '"><span>' +
+        label + '</span>' + control + '</label>';
+    }
+
     function renderCandidate(item) {
       var candidate = item && item.candidate && typeof item.candidate === 'object' ? item.candidate : {};
       var id = String(item.id || candidate.id || '');
@@ -1476,13 +1481,13 @@
         .filter(Boolean).join(' · ');
       var editor = editable ? '<div class="ob-memory-care__candidate-editor" data-role="candidate-editor" hidden>' +
         '<div class="ob-memory-care__form-grid">' +
-          field('标题', '<input name="candidate_title" maxlength="40" value="' + ui.escapeAttr(candidate.title || id) + '">') +
-          field('类型', '<input name="candidate_kind" maxlength="40" value="' + ui.escapeAttr(candidate.kind || 'key_event') + '">') +
-          field('正文', '<textarea name="candidate_content" maxlength="1200" rows="5">' + ui.escape(candidate.content || '') + '</textarea>', true) +
-          field('域', '<input name="candidate_domain" maxlength="200" value="' + ui.escapeAttr(listText(candidate.domain)) + '" placeholder="逗号分隔">') +
-          field('标签', '<input name="candidate_tags" maxlength="320" value="' + ui.escapeAttr(listText(candidate.tags)) + '" placeholder="逗号分隔">') +
-          field('重要度', '<input name="candidate_importance" type="number" min="1" max="10" value="' + ui.escapeAttr(candidate.importance == null ? '' : candidate.importance) + '">') +
-          field('置信度', '<input name="candidate_confidence" type="number" min="0" max="1" step="0.01" value="' + ui.escapeAttr(candidate.confidence == null ? '' : candidate.confidence) + '">') +
+          candidateField('标题', '<input name="candidate_title" maxlength="40" value="' + ui.escapeAttr(candidate.title || id) + '">') +
+          candidateField('类型', '<input name="candidate_kind" maxlength="40" value="' + ui.escapeAttr(candidate.kind || 'key_event') + '">') +
+          candidateField('正文', '<textarea name="candidate_content" maxlength="1200" rows="5">' + ui.escape(candidate.content || '') + '</textarea>', true) +
+          candidateField('域', '<input name="candidate_domain" maxlength="200" value="' + ui.escapeAttr(listText(candidate.domain)) + '" placeholder="逗号分隔">') +
+          candidateField('标签', '<input name="candidate_tags" maxlength="320" value="' + ui.escapeAttr(listText(candidate.tags)) + '" placeholder="逗号分隔">') +
+          candidateField('重要度', '<input name="candidate_importance" type="number" min="1" max="10" value="' + ui.escapeAttr(candidate.importance == null ? '' : candidate.importance) + '">') +
+          candidateField('置信度', '<input name="candidate_confidence" type="number" min="0" max="1" step="0.01" value="' + ui.escapeAttr(candidate.confidence == null ? '' : candidate.confidence) + '">') +
         '</div></div>' : '';
       var actions = editable
         ? '<button type="button" data-action="toggle-candidate-edit">编辑</button>' +

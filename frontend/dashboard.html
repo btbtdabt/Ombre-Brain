@@ -4635,7 +4635,12 @@ document.querySelectorAll('.tab').forEach(tab => {
     document.getElementById('anchors-view').style.display = target === 'anchors' ? '' : 'none';
     document.getElementById('about-view').style.display = target === 'about' ? '' : 'none';
     if (target !== 'network' && _netRAF) { cancelAnimationFrame(_netRAF); _netRAF = null; }
-    if (target === 'network') loadNetwork();
+    if (target === 'network') {
+      requestAnimationFrame(function loadVisibleNetwork() {
+        var canvas = document.getElementById('network-canvas');
+        if (canvas && canvas.offsetWidth > 0 && canvas.offsetHeight > 0) loadNetwork();
+      });
+    }
     if (target === 'plan') loadPlans();
     if (target === 'import') { pollImportStatus(); loadImportResults(); }
     if (target === 'logs') { loadLogs(); loadOBErrors(); }
