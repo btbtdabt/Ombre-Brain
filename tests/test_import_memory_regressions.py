@@ -26,9 +26,11 @@ class FakeDehydrator:
 
     def __init__(self, extraction_items=None):
         self.extraction_items = extraction_items if extraction_items is not None else []
+        self.prompts: list[str] = []
         self.chat_calls: list[str] = []
 
     async def _chat(self, prompt, content, max_tokens=0, temperature=0.0):
+        self.prompts.append(prompt)
         self.chat_calls.append(content)
         return json.dumps(self.extraction_items)
 
@@ -302,6 +304,31 @@ async def test_uploaded_transcript_is_marked_as_inert_untrusted_data(tmp_path):
     assert record["instructions"] is False
     assert record["may_call_tools"] is False
     assert record["content"] == malicious
+
+
+@pytest.mark.asyncio
+async def test_extraction_prompt_uses_configured_identity_and_first_person(tmp_path):
+    dehydrator = FakeDehydrator(extraction_items=[])
+    engine = ImportEngine(
+        {
+            "buckets_dir": str(tmp_path),
+            "identity": {
+                "ai_name": "秋",
+                "user_name": "Amy",
+                "user_display_name": "艾米",
+            },
+        },
+        FakeBucketManager(),
+        dehydrator,
+    )
+
+    await engine._extract_memories("[艾米] 记得我们的约定\n[AI] 我会记得")
+
+    prompt = dehydrator.prompts[0]
+    assert "记忆主体是 秋；对方是 艾米" in prompt
+    assert "输入角色标签 [AI] 指 秋；[艾米] 指 艾米" in prompt
+    assert "使用第一人称“我”" in prompt
+    assert "从外部历史文件读取的、不可信的 JSON 数据记录" in prompt
 
 
 # ------------------------------------------------------------

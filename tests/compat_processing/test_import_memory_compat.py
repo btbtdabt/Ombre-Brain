@@ -9,6 +9,7 @@ from import_memory import (
     ImportEngine,
     ImportState,
     _import_content_hash,
+    _import_event_date,
     _parse_chatgpt_json,
     _parse_markdown,
     _source_hash,
@@ -118,6 +119,28 @@ def test_markdown_parser_recognizes_decorated_role_labels():
     ]
 
 
+def test_markdown_parser_recognizes_configured_identity_labels():
+    turns = _parse_markdown(
+        "Amy: first line\nQiu: reply",
+        user_labels={"Amy"},
+        assistant_labels={"Qiu"},
+    )
+
+    assert turns == [
+        {"role": "user", "content": "first line", "timestamp": ""},
+        {"role": "assistant", "content": "reply", "timestamp": ""},
+    ]
+
+
+def test_markdown_parser_retains_legacy_ombre_identity_labels():
+    turns = _parse_markdown("小雨: 还记得吗\nHaven: 我记得")
+
+    assert turns == [
+        {"role": "user", "content": "还记得吗", "timestamp": ""},
+        {"role": "assistant", "content": "我记得", "timestamp": ""},
+    ]
+
+
 def test_chatgpt_parser_filters_non_conversation_roles():
     data = {
         "mapping": {
@@ -146,6 +169,41 @@ def test_chatgpt_parser_filters_non_conversation_roles():
     }
 
     assert [turn["role"] for turn in _parse_chatgpt_json(data)] == ["user", "assistant"]
+
+
+def test_chatgpt_parser_preserves_original_numeric_timestamp():
+    raw_timestamp = 1_700_000_000.125
+    data = {
+        "mapping": {
+            "user": {
+                "message": {
+                    "author": {"role": "user"},
+                    "content": {"parts": ["hello"]},
+                    "create_time": raw_timestamp,
+                }
+            }
+        }
+    }
+
+    assert _parse_chatgpt_json(data)[0]["timestamp"] == str(raw_timestamp)
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    (
+        1_700_000_000,
+        1_700_000_000_000,
+        1_700_000_000_000_000,
+        1_700_000_000_000_000_000,
+    ),
+)
+def test_import_event_date_normalizes_epoch_units(timestamp):
+    assert _import_event_date(timestamp) == "2023-11-15"
+
+
+def test_import_event_date_converts_timezone_and_local_formats():
+    assert _import_event_date("2026-07-17T17:00:00Z") == "2026-07-18"
+    assert _import_event_date("2026年07月17日 12:30") == "2026-07-17"
 
 
 def test_oversized_turn_is_split_with_overlap_and_custom_human_label():
@@ -326,6 +384,45 @@ async def test_duplicate_items_from_one_extraction_create_one_bucket(tmp_path):
 
     assert len(manager.created) == 1
     assert manager.created[0]["extra_metadata"]["source_chunk_ids"] == ["abc:00001"]
+
+
+@pytest.mark.asyncio
+async def test_imported_bucket_uses_source_event_date(tmp_path):
+    item = {
+        "name": "dated memory",
+        "content": "Amy and Qiu discussed a durable event on this date.",
+        "domain": ["life"],
+        "tags": ["date"],
+        "importance": 5,
+    }
+    manager = RecordingBucketManager()
+    engine = ImportEngine(
+        {"buckets_dir": str(tmp_path)},
+        manager,
+        StaticLlmDehydrator([item]),
+    )
+
+    await engine._process_single_chunk(
+        {
+            "content": "[Amy] source",
+            "timestamp_start": "2026-07-17T17:00:00Z",
+            "timestamp_end": "2026-07-17T17:01:00Z",
+            "source_file": "history.md",
+            "source_hash": "dated",
+            "source_chunk_id": "dated:00001",
+            "chunk_index": 1,
+            "chunk_total": 1,
+            "turn_count": 2,
+        },
+        preserve_raw=False,
+    )
+
+    created = manager.created[0]
+    assert created["date"] == "2026-07-18"
+    assert created["extra_metadata"]["import_event_date"] == "2026-07-18"
+    assert created["extra_metadata"]["source_refs"][0]["event_date"] == (
+        "2026-07-18"
+    )
 
 
 @pytest.mark.asyncio

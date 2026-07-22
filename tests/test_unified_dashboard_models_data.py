@@ -615,6 +615,7 @@ async def test_config_post_validates_and_atomically_persists_current_sections_wi
                 "persona": {
                     "enabled": True,
                     "event_recording_enabled": False,
+                    "conflict_nudge_enabled": True,
                     "model": "persona-v2",
                     "base_url": "https://persona.example/v1",
                 },
@@ -697,6 +698,7 @@ async def test_config_post_validates_and_atomically_persists_current_sections_wi
     assert persisted["gateway"]["upstreams"][0]["gemini_base_url"] == "https://gemini.example/v1beta"
     assert persisted["gateway"]["upstreams"][0]["gemini_auth"] == "bearer"
     assert persisted["persona"]["model"] == "persona-v2"
+    assert persisted["persona"]["conflict_nudge_enabled"] is True
     assert persisted["self_anchor"]["entry_bucket_id"] == "self-entry"
     assert "api_key" not in persisted["dehydration"]
     assert "new-runtime-secret" not in json.dumps(persisted)
@@ -1192,6 +1194,7 @@ def test_public_config_uses_runtime_defaults_and_inherited_credentials(
     )
     assert public["persona"]["api_ready"] is True
     assert public["persona"]["has_own_api_key"] is False
+    assert public["persona"]["conflict_nudge_enabled"] is False
     assert public["dream"]["model"] == ""
     assert public["dream"]["base_url"] == ""
     assert public["dream"]["effective_model"] == "deepseek-v4-flash"

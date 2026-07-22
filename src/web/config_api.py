@@ -178,6 +178,7 @@ _CURRENT_SECTION_FIELDS: dict[str, frozenset[str]] = {
         {
             "enabled",
             "event_recording_enabled",
+            "conflict_nudge_enabled",
             "model",
             "base_url",
             "api_key",
@@ -1201,7 +1202,11 @@ def _normalize_current_section(
 
     bool_fields = {
         "reranker": {"enabled"},
-        "persona": {"enabled", "event_recording_enabled"},
+        "persona": {
+            "enabled",
+            "event_recording_enabled",
+            "conflict_nudge_enabled",
+        },
         "dream": {
             "enabled",
             "auto_enabled",
@@ -1702,6 +1707,9 @@ def _current_public_config(config: Mapping[str, Any]) -> dict[str, Any]:
             "event_recording_enabled": _parse_bool(
                 persona.get("event_recording_enabled", True), default=True
             ),
+            "conflict_nudge_enabled": _parse_bool(
+                persona.get("conflict_nudge_enabled", False), default=False
+            ),
             "model": str(persona.get("model") or ""),
             "base_url": str(persona.get("base_url") or ""),
             "effective_model": persona_effective_model,
@@ -2024,6 +2032,9 @@ def _build_dependency_runtime_engine(
             enabled=enabled,
             event_recording_enabled=_parse_bool(
                 persona.get("event_recording_enabled", True), default=True
+            ),
+            conflict_nudge_enabled=_parse_bool(
+                persona.get("conflict_nudge_enabled", False), default=False
             ),
             model=model,
             base_url=base_url,

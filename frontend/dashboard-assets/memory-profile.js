@@ -271,6 +271,7 @@
               '<div class="ob-chip-row">' +
                 statusChip(config.enabled ? 'engine on' : 'engine paused', config.enabled ? 'active' : 'muted') +
                 statusChip(config.event_recording_enabled === false ? 'events paused' : 'events on', config.event_recording_enabled === false ? 'muted' : 'active') +
+                statusChip(config.conflict_nudge_enabled ? 'conflict guide on' : 'conflict guide off', config.conflict_nudge_enabled ? 'active' : 'muted') +
                 statusChip(config.api_ready ? 'LLM ready' : 'fallback state', config.api_ready ? 'active' : 'muted') +
                 statusChip(config.model || 'model unset', '') +
               '</div>' +
@@ -284,6 +285,7 @@
             personaMeter('想念 longing', affect.longing, 'warm') +
             personaMeter('安全 security', affect.security, 'warm') +
             personaMeter('保护 protective', affect.protective_drive, 'guard') +
+            personaMeter('欲望 libido', affect.libido, 'warm') +
             personaMeter('亲和 affinity', relationship.affinity, 'warm') +
             personaMeter('主导 dominance', relationship.dominance, '') +
             personaMeter('防御 defensiveness', relationship.defensiveness, 'guard') +

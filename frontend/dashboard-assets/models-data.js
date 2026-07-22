@@ -283,6 +283,7 @@
     var PERSONA_FIELDS = [
       { path: 'persona.enabled', label: 'Enable Persona', type: 'checkbox', default: true },
       { path: 'persona.event_recording_enabled', label: 'Record persona events', type: 'checkbox', default: true },
+      { path: 'persona.conflict_nudge_enabled', label: 'Conflict guidance', type: 'checkbox', default: false },
       { path: 'persona.model', label: 'Model', default: '', effectivePath: 'persona.effective_model', help: 'Leave blank to use the runtime default shown as the placeholder.' },
       { path: 'persona.base_url', label: 'Base URL', default: '', effectivePath: 'persona.effective_base_url', help: 'Leave blank to use the runtime default shown as the placeholder.' },
       { path: 'persona.api_key', label: 'API key', secret: true, maskPath: 'persona.api_key_masked' },

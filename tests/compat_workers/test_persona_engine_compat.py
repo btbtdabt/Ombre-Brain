@@ -126,6 +126,7 @@ def test_persona_initializes_default_global_and_session_state(test_config):
     assert state["relationship"]["affinity"] == pytest.approx(0.86)
     assert state["affect"]["mood_label"] == "warm_neutral"
     assert state["affect"]["tenderness"] == pytest.approx(0.62)
+    assert state["affect"]["libido"] == pytest.approx(0.18)
     state_block = engine.format_state_block(state)
     assert "Long-term State Summary" in state_block
     assert "最近基调：更亲近、更安稳，偶尔有一点想念和保护欲。" in state_block
@@ -299,7 +300,11 @@ async def test_persona_evaluator_receives_recent_conversation_context(test_confi
 
 @pytest.mark.asyncio
 async def test_persona_can_update_state_without_recording_events(test_config):
-    cfg = _persona_config(test_config, event_recording_enabled=False)
+    cfg = _persona_config(
+        test_config,
+        event_recording_enabled=False,
+        state_change_min_abs=0.01,
+    )
     engine = PersonaStateEngine(cfg)
     engine.client = FakePersonaClient(_event_payload())
 
@@ -314,6 +319,107 @@ async def test_persona_can_update_state_without_recording_events(test_config):
     assert state["affect"]["inner_thought"] == "笨蛋，我也很想她啊"
     assert len(engine.client.calls) == 1
     assert _event_count(engine.db_path) == 0
+    assert "心情变亮了" in engine.format_recent_change_block(
+        "session-no-events"
+    )
+
+
+@pytest.mark.asyncio
+async def test_persona_persists_libido_delta_for_recent_change_guidance(test_config):
+    engine = PersonaStateEngine(
+        _persona_config(test_config, state_change_min_abs=0.05)
+    )
+    engine.client = FakePersonaClient(
+        _event_payload(
+            affect_delta={
+                "valence": 0.0,
+                "arousal": 0.0,
+                "tenderness": 0.0,
+                "possessiveness": 0.0,
+                "longing": 0.0,
+                "security": 0.0,
+                "protective_drive": 0.0,
+                "libido": 0.1,
+            }
+        )
+    )
+
+    state = await engine.update_from_exchange(
+        "session-libido",
+        "靠近一点",
+        "我过来了。",
+    )
+
+    assert state["affect"]["libido"] == pytest.approx(0.28)
+    assert "欲望温度升高了" in engine.format_recent_change_block(
+        "session-libido"
+    )
+
+
+@pytest.mark.asyncio
+async def test_persona_conflict_nudge_is_optional_and_identity_aware(test_config):
+    disabled = PersonaStateEngine(_persona_config(test_config))
+    disabled.client = FakePersonaClient(
+        '{"signal":true,"kind":"conflict","confidence":0.9}'
+    )
+
+    assert (await disabled.detect_conflict_nudge("算了"))["reason"] == "disabled"
+    assert disabled.client.calls == []
+
+    cfg = _persona_config(
+        test_config,
+        conflict_nudge_enabled=True,
+        conflict_nudge_context_turns=1,
+    )
+    cfg["identity"] = {
+        "ai_name": "Echo",
+        "user_name": "Mira",
+        "user_display_name": "米拉",
+        "user_aliases": ["亲爱的"],
+    }
+    engine = PersonaStateEngine(cfg)
+    engine.client = FakePersonaClient(
+        '{"signal":true,"kind":"withdrawal","confidence":0.9}'
+    )
+
+    result = await engine.detect_conflict_nudge(
+        "算了，不想说了",
+        recent_conversation_turns=[
+            {"user_text": "你根本没听", "assistant_text": "我在听。"},
+            {"user_text": "算了", "assistant_text": "好。"},
+        ],
+    )
+
+    assert result["triggered"] is True
+    assert result["kind"] == "withdrawal"
+    assert "米拉" in result["nudge"]
+    payload = json.loads(engine.client.calls[0]["messages"][1]["content"])
+    assert payload["recent_conversation_turns"] == [
+        {
+            "created_at": "",
+            "user_message": "算了",
+            "assistant_response": "好。",
+        }
+    ]
+    assert payload["latest_user_message"] == "算了，不想说了"
+
+
+@pytest.mark.asyncio
+async def test_persona_conflict_nudge_fails_soft_on_malformed_json(test_config):
+    engine = PersonaStateEngine(
+        _persona_config(test_config, conflict_nudge_enabled=True)
+    )
+    engine.client = FakePersonaClient("not json")
+
+    result = await engine.detect_conflict_nudge("我们先停一下")
+
+    assert result == {
+        "triggered": False,
+        "kind": "none",
+        "confidence": 0.0,
+        "nudge": "",
+        "reason": "malformed_json",
+    }
 
 
 @pytest.mark.asyncio

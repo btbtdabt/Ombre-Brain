@@ -208,6 +208,32 @@ def test_dependency_engine_builders_resolve_inherited_provider_tuples(
 
 
 @pytest.mark.asyncio
+async def test_persona_conflict_toggle_hot_applies_to_live_engine(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _runtime, engines, _persistence_calls = install_config_runtime(
+        monkeypatch,
+        tmp_path,
+    )
+    engines["persona"].conflict_nudge_enabled = False
+
+    mcp = FakeMCP()
+    config_api.register(mcp)
+    response = await mcp.routes[("POST", "/api/config")](
+        JsonRequest(
+            {
+                "persist": True,
+                "persona": {"conflict_nudge_enabled": True},
+            }
+        )
+    )
+
+    assert response.status_code == 200
+    assert engines["persona"].conflict_nudge_enabled is True
+
+
+@pytest.mark.asyncio
 async def test_config_post_rolls_back_every_touched_dependency_when_commit_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

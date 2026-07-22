@@ -100,6 +100,38 @@ fixed access token remains a resource-bound compatibility credential.
 
 ## Integration Batch Ledger
 
+### 2026-07-22 P0luz 2.8.5 merge and Yinglianchun behavior port
+
+| Source commit(s) | Disposition | Evidence |
+| --- | --- | --- |
+| P0luz `87c4a4e` | Merged | Release 2.7.7 trace long-bucket replacement behavior is present through merge commit `73024dd`; the complete P0 suite passed before the secondary ports began. |
+| P0luz `282569d`, `b0343e1`, `1ff5c75`, `36c0bc6`, `95529d1`, `c81df31`, `c1f30c4`, `8427eb4`, `c0335fc`, `ab985fa`, `50342c2`, `c3de6c3`, `ccbc905`, `e671c3e`, `c352f42`, `9710be7` | Merged | The 2.7.8 package extraction series is retained in P0's modular `src/ombrebrain` support packages without moving the dormant distributed stack into the production boot path. |
+| P0luz `1cf0bc2`, `5b0bd10`, `648fe1a`, `796db07` | Merged | Releases 2.7.8 through 2.7.10, digest-viewpoint behavior, proxy documentation, and FAQ assets are present in `73024dd`; existing unified-Dashboard ownership remains intact. |
+| P0luz `1ebb233`, `1c6ecfe`, `d3651a8`, `321aaea`, `39d81b6`, `9c6c32a`, `e6c36e7`, `bdee836`, `2784f41` | Merged | Releases 2.8.0 through 2.8.4, retrieval/deployment corrections, memory footprint/restore, CI and Docker Web assertions, and passive resurfacing of digested memories are included by ancestry. |
+| P0luz `c741a6f`, `0e1d22e`, `898ef61`, `65bf8c3` | Merged | Collaboration/update rules, the current `CLAUDE_PROMPT.md`, and the 2.8.5 Kelivo MCP discovery compatibility release are included by ancestry. |
+| Yinglianchun `3054384` | Ported with documented conflict resolution | Retained libido state, recent net-delta Persona guidance, and the optional pre-reply conflict scout in the modular Persona/Gateway seams. The proposal to retire personality state and skip Persona evaluation for two out of every three final replies conflicts with the retained production contract, so personality remains available and every successful final reply remains eligible for post-reply evaluation. |
+| Yinglianchun `4a941e9` | Ported | A triggered conflict/withdrawal reminder takes precedence over the ordinary recent-state note for the same request. Regression coverage checks the private dynamic-context injection and fail-soft detector behavior. |
+| Yinglianchun `8bb06dd` | Ported and merged with P0 configuration ownership | Conflict guidance has its own Persona setting, live apply/public-config path, and Dashboard control/status. Recent-state guidance remains controlled independently by the Gateway interval, with the 15-round comparison default from this commit. Persona evaluation itself is not disabled by either control. |
+| Yinglianchun `9393232` | Ported and merged with P0 import safety | Conversation imports recognize configured identity labels, preserve raw exported timestamps, derive a local event date, and form first-person identity-aware memories. P0's untrusted-upload boundary, parser worker, resume hash, bounded extraction, quota enforcement, duplicate provenance, and configurable safe auto-merge remain authoritative. |
+| Yinglianchun `Haven/memory-server-p0-20260722` through `95a7377` | Deferred; not a mainline update | This non-main work-in-progress branch introduces the Scene/event-sourced architecture. It remains outside the single-node production boot path under the standing v3/distributed exclusion and requires a separate storage/runtime migration before activation. |
+
+Local verification completed so far for this batch:
+
+- P0 merge checkpoint: **2607 passed / 80 skipped**, Ruff clean, changed-file
+  Pyright clean, and Docker build successful.
+- Secondary-port and reviewer-regression suites: **127 passed**, then **33
+  passed**, with no failures.
+- Final full suite: **2622 passed / 80 skipped / 0 failed**.
+- Repository-wide Ruff and changed Dashboard JavaScript syntax: **clean**.
+- All changed Python files: **0 Pyright errors / 0 warnings**. The whole-tree
+  debt audit is **388 errors / 21 warnings**, improved from the recorded
+  **469/21** baseline without weakening its configuration.
+- Production Docker image `ombre-brain:upstream-sync-20260722`: **built
+  successfully**.
+- Staging, production, and public-alignment evidence is recorded after the final
+  reviewed commit is deployed. Until then, the recorded baseline hashes at the
+  top of this document remain unchanged.
+
 ### 2026-07-21 Dashboard consolidation and P0 visual contract
 
 | Source range | Disposition | Evidence |

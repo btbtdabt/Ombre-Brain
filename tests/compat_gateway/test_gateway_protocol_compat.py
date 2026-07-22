@@ -6,6 +6,25 @@ import pytest
 from starlette.responses import StreamingResponse
 
 
+def test_conflict_nudge_is_injected_as_dynamic_private_context(
+    gateway_module,
+) -> None:
+    service = gateway_module.GatewayService.__new__(gateway_module.GatewayService)
+    service.identity = {"ai_name": "Ombre"}
+    service.inject_total_budget = 10_000
+
+    stable, dynamic = service._build_injected_context_messages(
+        persona_block="",
+        core_memory="",
+        portrait_memory="",
+        conflict_nudge="private conflict guidance",
+    )
+
+    assert stable == ""
+    assert "Conflict / Withdrawal Reminder" in dynamic
+    assert "private conflict guidance" in dynamic
+
+
 @pytest.mark.asyncio
 async def test_stream_turn_finalizer_runs_exactly_once(gateway_module) -> None:
     service = gateway_module.GatewayService.__new__(gateway_module.GatewayService)

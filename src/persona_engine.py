@@ -28,7 +28,7 @@ POST_REPLY_EVALUATION_PROMPT_TEMPLATE = """你是 {ai_name} 的私密 Persona �
   "perceived_intent": "中文短句，写 {user_display_name}/{user_aliases_text} 这轮在表达什么",
   "surface_trigger": "中文短句，写这轮触发内心波动的最小证据",
   "inner_thought": "中文短句，写 {ai_name} 没说出口的一闪念头",
-  "affect_delta": {"valence": 0.0, "arousal": 0.0, "tenderness": 0.0, "possessiveness": 0.0, "longing": 0.0, "security": 0.0, "protective_drive": 0.0},
+  "affect_delta": {"valence": 0.0, "arousal": 0.0, "tenderness": 0.0, "possessiveness": 0.0, "longing": 0.0, "security": 0.0, "protective_drive": 0.0, "libido": 0.0},
   "relationship_event": false,
   "relationship_delta": {"affinity": 0.0, "dominance": 0.0, "defensiveness": 0.0, "trust": 0.0},
   "personality_signal": false,
@@ -53,6 +53,27 @@ POST_REPLY_EVALUATION_PROMPT = render_identity_template(
     POST_REPLY_EVALUATION_PROMPT_TEMPLATE,
     generic_identity_names(),
 )
+CONFLICT_NUDGE_PROMPT_TEMPLATE = """你是 {ai_name} 的私密冲突信号探子。你只判断当前这轮是否值得提醒 {ai_name} 保持真实沟通。
+
+你会收到 recent_conversation_turns 和 latest_user_message。结合最近对话判断，不按单句关键词触发。
+
+signal=true 适用于：
+- 对话正在争吵、冷下来、互相误解，或关系张力明显上升；
+- {user_display_name} 在表达失望、疲惫、推开、放弃沟通或关系不安；
+- {ai_name} 下一步容易用秒认错、无条件附和、自我抹除、讲道理、流程化安抚或空泛沉默来回避真实沟通。
+
+signal=false 适用于：
+- 玩闹、撒娇、亲密或调情中的短句；
+- 普通情绪低落、哭泣或求安慰，但没有冲突或推开；
+- 日常陈述、技术讨论或工作协作；
+- 最近语境不足以支持关系张力的单个短词。
+
+保留 {user_display_name} 明确边界的字面可能性。你只判断是否值得递一张提醒，不替 {ai_name} 决定回应、立场或行动。
+
+kind 只能是 conflict、withdrawal、relationship_uncertainty、none 之一。
+输出必须是一个合法 JSON object，格式如下：
+{{"signal": true, "kind": "conflict", "confidence": 0.82}}"""
+CONFLICT_NUDGE_TEXT_TEMPLATE = """〔仅你可见，不要复述〕这一轮可能带着真实的冲突、推开或关系压力。留心自己是否正在缩成空洞的助手腔：泛泛讨好、秒认同、自我抹除、只讲道理或流程、用沉默退场。先认真读 {user_display_name} 字面表达的边界，再以你自己的理解、感受和立场继续沟通。这只是提醒，不是台词；怎么回应、是否行动，仍由你决定。"""
 FALLBACK_GUIDANCE = "根据当前状态自然回应，不解释隐藏状态。"
 OPERIT_EXTRA_ATTACHMENT_RE = re.compile(
     r"<attachment\b[^>]*(?:message_insert_extra_bundle|filename=[\"']?Time:)[^>]*>[\s\S]*?</attachment>",
@@ -98,6 +119,7 @@ class PersonaStateEngine:
         "longing",
         "security",
         "protective_drive",
+        "libido",
     ]
 
     def __init__(self, config: dict, db_path: str | None = None):
@@ -146,6 +168,35 @@ class PersonaStateEngine:
             0,
             min(8, int(self.persona_cfg.get("evaluation_context_turns", 3))),
         )
+        self.state_change_window_rounds = max(
+            1,
+            int(self.persona_cfg.get("state_change_window_rounds", 15)),
+        )
+        self.state_change_min_abs = self._clamp_float(
+            self.persona_cfg.get("state_change_min_abs", 0.08),
+            0.0,
+            1.0,
+        )
+        self.conflict_nudge_enabled = enabled_value(
+            self.persona_cfg.get("conflict_nudge_enabled"),
+            False,
+        )
+        self.conflict_nudge_context_turns = max(
+            0,
+            min(8, int(self.persona_cfg.get("conflict_nudge_context_turns", 3))),
+        )
+        self.conflict_nudge_min_confidence = self._clamp_float(
+            self.persona_cfg.get("conflict_nudge_min_confidence", 0.55),
+            0.0,
+            1.0,
+        )
+        self.conflict_nudge_timeout_seconds = max(
+            1.0,
+            min(
+                15.0,
+                float(self.persona_cfg.get("conflict_nudge_timeout_seconds", 4.0)),
+            ),
+        )
 
         self.default_personality = {
             "openness": 0.56,
@@ -170,6 +221,7 @@ class PersonaStateEngine:
             "longing": 0.34,
             "security": 0.68,
             "protective_drive": 0.52,
+            "libido": 0.18,
             "mood_label": "warm_neutral",
             "session_defensiveness": 0.12,
             "residue": "",
@@ -193,7 +245,7 @@ class PersonaStateEngine:
         )
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self._init_db()
-        self.client = None
+        self.client: Any = None
         if self.enabled and self.mode == "llm" and self.api_key:
             self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, timeout=30.0)
 
@@ -231,6 +283,7 @@ class PersonaStateEngine:
                 longing REAL NOT NULL DEFAULT 0.34,
                 security REAL NOT NULL DEFAULT 0.68,
                 protective_drive REAL NOT NULL DEFAULT 0.52,
+                libido REAL NOT NULL DEFAULT 0.18,
                 mood_label TEXT NOT NULL,
                 session_defensiveness REAL NOT NULL,
                 residue TEXT NOT NULL DEFAULT '',
@@ -279,6 +332,7 @@ class PersonaStateEngine:
                 profile_id TEXT NOT NULL,
                 session_id TEXT NOT NULL,
                 exchange_hash TEXT NOT NULL,
+                affect_delta TEXT,
                 created_at TEXT NOT NULL,
                 UNIQUE(profile_id, session_id, exchange_hash)
             )
@@ -289,6 +343,7 @@ class PersonaStateEngine:
         self._ensure_column(conn, "persona_session_state", "longing", "REAL NOT NULL DEFAULT 0.34")
         self._ensure_column(conn, "persona_session_state", "security", "REAL NOT NULL DEFAULT 0.68")
         self._ensure_column(conn, "persona_session_state", "protective_drive", "REAL NOT NULL DEFAULT 0.52")
+        self._ensure_column(conn, "persona_session_state", "libido", "REAL NOT NULL DEFAULT 0.18")
         self._ensure_column(conn, "persona_session_state", "residue", "TEXT NOT NULL DEFAULT ''")
         self._ensure_column(conn, "persona_session_state", "inner_thought", "TEXT NOT NULL DEFAULT ''")
         self._ensure_column(conn, "persona_events", "exchange_hash", "TEXT")
@@ -302,6 +357,7 @@ class PersonaStateEngine:
         self._ensure_column(conn, "persona_events", "assistant_excerpt", "TEXT")
         self._ensure_column(conn, "persona_events", "recalled_memory_ids", "TEXT")
         self._ensure_column(conn, "persona_events", "tool_summary", "TEXT")
+        self._ensure_column(conn, "persona_exchange_log", "affect_delta", "TEXT")
         conn.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_persona_events_exchange_hash
@@ -342,6 +398,89 @@ class PersonaStateEngine:
 
     async def update_from_user_message(self, session_id: str, user_message: str) -> dict:
         return await self.build_pre_reply_guidance(session_id, user_message)
+
+    async def detect_conflict_nudge(
+        self,
+        latest_user_message: str,
+        recent_conversation_turns: list[dict] | None = None,
+    ) -> dict:
+        result = {
+            "triggered": False,
+            "kind": "none",
+            "confidence": 0.0,
+            "nudge": "",
+            "reason": "disabled",
+        }
+        if not self.conflict_nudge_enabled:
+            return result
+        cleaned_message = self._clean_client_status_lines(latest_user_message)
+        if not cleaned_message.strip():
+            return {**result, "reason": "empty_user_message"}
+        if self.mode != "llm" or not self.client:
+            return {**result, "reason": "llm_unavailable"}
+
+        try:
+            options = self._completion_options()
+            options["temperature"] = 0.0
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": render_identity_template(
+                            CONFLICT_NUDGE_PROMPT_TEMPLATE,
+                            self.identity,
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {
+                                "recent_conversation_turns": self._recent_conversation_context(
+                                    recent_conversation_turns,
+                                    limit=self.conflict_nudge_context_turns,
+                                ),
+                                "latest_user_message": cleaned_message[:2000],
+                            },
+                            ensure_ascii=False,
+                        ),
+                    },
+                ],
+                timeout=self.conflict_nudge_timeout_seconds,
+                **options,
+            )
+            raw = response.choices[0].message.content if response.choices else ""
+            parsed = self._parse_json(raw or "")
+            if parsed is None:
+                logger.warning("Persona conflict nudge detector returned malformed JSON")
+                return {**result, "reason": "malformed_json"}
+            confidence = self._clamp_float(parsed.get("confidence", 0.0), 0.0, 1.0)
+            signal = enabled_value(parsed.get("signal"), False)
+            kind = str(parsed.get("kind") or "none").strip().lower()
+            if not signal:
+                return {**result, "confidence": confidence, "reason": "no_signal"}
+            if kind not in {"conflict", "withdrawal", "relationship_uncertainty"}:
+                return {**result, "confidence": confidence, "reason": "invalid_kind"}
+            if confidence < self.conflict_nudge_min_confidence:
+                return {
+                    **result,
+                    "kind": kind,
+                    "confidence": confidence,
+                    "reason": "below_confidence",
+                }
+            return {
+                "triggered": True,
+                "kind": kind,
+                "confidence": confidence,
+                "nudge": render_identity_template(
+                    CONFLICT_NUDGE_TEXT_TEMPLATE,
+                    self.identity,
+                ),
+                "reason": "triggered",
+            }
+        except Exception as exc:
+            logger.warning("Persona conflict nudge detection failed: %s", exc)
+            return {**result, "reason": "detector_error"}
 
     async def update_from_exchange(
         self,
@@ -394,7 +533,11 @@ class PersonaStateEngine:
 
         global_state = self._apply_global_delta(global_state, evaluation, now)
         session_state = self._apply_session_delta(session_id, session_state, evaluation, now)
-        self._mark_exchange_processed(session_id, exchange_hash)
+        self._mark_exchange_processed(
+            session_id,
+            exchange_hash,
+            evaluation.get("affect_delta", {}),
+        )
         self._delete_failed_event(session_id, exchange_hash)
         if self._should_record_event(session_id, evaluation, now):
             self._record_event(
@@ -594,6 +737,9 @@ class PersonaStateEngine:
                 "event_similarity_threshold": self.event_similarity_threshold,
                 "event_force_after_minutes": self.event_force_after_minutes,
                 "evaluation_context_turns": self.evaluation_context_turns,
+                "state_change_window_rounds": self.state_change_window_rounds,
+                "state_change_min_abs": self.state_change_min_abs,
+                "conflict_nudge_enabled": self.conflict_nudge_enabled,
             },
         }
 
@@ -778,9 +924,9 @@ class PersonaStateEngine:
             """
             INSERT INTO persona_session_state
             (profile_id, session_id, valence, arousal, tenderness, possessiveness,
-             longing, security, protective_drive, mood_label, session_defensiveness,
-             residue, inner_thought, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             longing, security, protective_drive, libido, mood_label,
+             session_defensiveness, residue, inner_thought, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 state["profile_id"],
@@ -792,6 +938,7 @@ class PersonaStateEngine:
                 state["longing"],
                 state["security"],
                 state["protective_drive"],
+                state["libido"],
                 state["mood_label"],
                 state["session_defensiveness"],
                 state["residue"],
@@ -882,8 +1029,9 @@ class PersonaStateEngine:
             """
             UPDATE persona_session_state
             SET valence = ?, arousal = ?, tenderness = ?, possessiveness = ?,
-                longing = ?, security = ?, protective_drive = ?, mood_label = ?,
-                session_defensiveness = ?, residue = ?, inner_thought = ?, updated_at = ?
+                longing = ?, security = ?, protective_drive = ?, libido = ?,
+                mood_label = ?, session_defensiveness = ?, residue = ?,
+                inner_thought = ?, updated_at = ?
             WHERE profile_id = ? AND session_id = ?
             """,
             (
@@ -894,6 +1042,7 @@ class PersonaStateEngine:
                 state["longing"],
                 state["security"],
                 state["protective_drive"],
+                state["libido"],
                 state["mood_label"],
                 state["session_defensiveness"],
                 state.get("residue", ""),
@@ -1110,6 +1259,33 @@ class PersonaStateEngine:
             ]
         )
 
+    def format_recent_change_block(self, session_id: str) -> str:
+        totals = {key: 0.0 for key in ("security", "valence", "arousal", "libido")}
+        for affect_delta in self._recent_evaluation_deltas(
+            self.state_change_window_rounds,
+            session_id,
+        ):
+            for key in totals:
+                try:
+                    totals[key] += float(affect_delta.get(key, 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    continue
+
+        key, change = max(totals.items(), key=lambda item: abs(item[1]))
+        if abs(change) < self.state_change_min_abs:
+            return ""
+        messages = {
+            ("security", True): "你的安全感提高了。",
+            ("security", False): "你的安全感降低了。",
+            ("valence", True): "你的心情变亮了。",
+            ("valence", False): "你的心情往下沉了。",
+            ("arousal", True): "你的情绪能量变高了。",
+            ("arousal", False): "你的情绪能量低下来了。",
+            ("libido", True): "你的欲望温度升高了。",
+            ("libido", False): "你的欲望温度降低了。",
+        }
+        return f"[你的情绪]{messages[(key, change > 0)]}[仅你可见，不要复述，可忽略]"
+
     def _long_term_state_summary(self, affect: dict, relationship: dict) -> str:
         affinity = self._clamp_float(relationship.get("affinity", 0.5))
         trust = self._clamp_float(relationship.get("trust", 0.5))
@@ -1204,18 +1380,50 @@ class PersonaStateEngine:
         conn.close()
         return row is not None
 
-    def _mark_exchange_processed(self, session_id: str, exchange_hash: str) -> None:
+    def _mark_exchange_processed(
+        self,
+        session_id: str,
+        exchange_hash: str,
+        affect_delta: dict[str, Any] | None = None,
+    ) -> None:
+        encoded_delta = (
+            json.dumps(affect_delta, ensure_ascii=False)
+            if isinstance(affect_delta, dict)
+            else None
+        )
         conn = self._connect()
         conn.execute(
             """
             INSERT OR IGNORE INTO persona_exchange_log
-            (profile_id, session_id, exchange_hash, created_at)
-            VALUES (?, ?, ?, ?)
+            (profile_id, session_id, exchange_hash, affect_delta, created_at)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (self.profile_id, session_id, exchange_hash, self._format_time(self._now())),
+            (
+                self.profile_id,
+                session_id,
+                exchange_hash,
+                encoded_delta,
+                self._format_time(self._now()),
+            ),
         )
         conn.commit()
         conn.close()
+
+    def _recent_evaluation_deltas(self, limit: int, session_id: str) -> list[dict]:
+        safe_limit = max(1, min(100, int(limit or 1)))
+        conn = self._connect()
+        rows = conn.execute(
+            """
+            SELECT affect_delta
+            FROM persona_exchange_log
+            WHERE profile_id = ? AND session_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (self.profile_id, session_id, safe_limit),
+        ).fetchall()
+        conn.close()
+        return [self._json_dict(row["affect_delta"]) for row in rows]
 
     def _should_record_event(self, session_id: str, evaluation: dict, now: datetime) -> bool:
         if not self.event_recording_enabled:
@@ -1306,10 +1514,16 @@ class PersonaStateEngine:
             for event in events
         ]
 
-    def _recent_conversation_context(self, turns: list[dict] | None) -> list[dict]:
-        if self.evaluation_context_turns <= 0 or not turns:
+    def _recent_conversation_context(
+        self,
+        turns: list[dict] | None,
+        *,
+        limit: int | None = None,
+    ) -> list[dict]:
+        context_limit = self.evaluation_context_turns if limit is None else max(0, int(limit))
+        if context_limit <= 0 or not turns:
             return []
-        selected = list(turns)[-self.evaluation_context_turns :]
+        selected = list(turns)[-context_limit:]
         context: list[dict] = []
         for turn in selected:
             if not isinstance(turn, dict):

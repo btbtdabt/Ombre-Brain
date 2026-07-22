@@ -550,7 +550,7 @@ gateway:
   favorite_memory_max_cards: 1
   related_memory_budget: 220
   core_memory_interval_rounds: 0
-  current_inner_state_interval_rounds: 0
+  current_inner_state_interval_rounds: 15 # inject only when recent Persona deltas show a clear net change
   relationship_weather_interval_rounds: 0
   favorite_memory_interval_rounds: 0
   word_map_hint_enabled: false       # true lets derived Word Map add weak recall candidates; still gated by RecallPolicy
@@ -738,6 +738,13 @@ persona:
   event_force_after_minutes: 30
   event_excerpt_chars: 220          # short evidence snippets for future date traces, not full transcripts
   evaluation_context_turns: 3       # previous same-session turns sent to the post-reply Persona evaluator
+  state_change_window_rounds: 15    # compare the latest successful Persona evaluations
+  state_change_min_abs: 0.08        # inject only the single strongest meaningful net change
+  # Optional pre-reply conflict scout. It is read-only and fail-soft.
+  conflict_nudge_enabled: false
+  conflict_nudge_context_turns: 3
+  conflict_nudge_min_confidence: 0.55
+  conflict_nudge_timeout_seconds: 4
   initial_personality:
     openness: 0.56
     conscientiousness: 0.50
@@ -757,6 +764,7 @@ persona:
     longing: 0.34
     security: 0.68
     protective_drive: 0.52
+    libido: 0.18                    # tone temperature only; never action or consent inference
     mood_label: "warm_neutral"
     session_defensiveness: 0.12
     residue: ""

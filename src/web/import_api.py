@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Callable, cast
 from starlette.requests import Request
 from starlette.responses import FileResponse, Response
 
-from identity import effective_human_name
+from identity import effective_human_name, identity_names
 from . import _shared as sh
 from .upload_limits import (
     read_multipart_form_limited as _read_multipart_form_limited,
@@ -489,6 +489,12 @@ def register(mcp) -> None:
                 )
 
             human_label = effective_human_name(sh.config, default="用户")
+            identity = identity_names(sh.config)
+            user_aliases = [
+                str(identity.get("user_name") or ""),
+                str(identity.get("user_display_name") or ""),
+                *(str(alias) for alias in identity.get("user_aliases") or []),
+            ]
             tagging_enabled = (
                 bool(getattr(sh.import_engine, "operit_tagging_enabled", True))
                 if requested_tagging is None
@@ -501,6 +507,8 @@ def register(mcp) -> None:
                 human_label,
                 import_mode,
                 tagging_enabled,
+                str(identity.get("ai_name") or "AI"),
+                user_aliases,
             )
             raw_content = ""
             llm_ready = _import_llm_ready()
