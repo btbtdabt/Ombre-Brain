@@ -1,7 +1,7 @@
 import json
 import sqlite3
 
-from ledger_mirror import LedgerMirror
+from ombrebrain.eventsourcing.ledger_mirror import LedgerMirror
 
 
 def _write_embedding_db(path, rows, meta=None):
@@ -36,7 +36,7 @@ def _write_embedding_db(path, rows, meta=None):
 
 
 def test_vector_projection_manifest_reports_embedding_drift_without_mutation(tmp_path):
-    from projection_vector import TraceVectorProjectionManifest
+    from ombrebrain.projection.projection_vector import TraceVectorProjectionManifest
 
     ledger = LedgerMirror(tmp_path / "events.jsonl")
     ledger.append_event(

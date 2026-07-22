@@ -180,9 +180,10 @@ async def test_search_breath_filters_terminal_states_but_keeps_dont_surface(deca
 
     assert "Visible query memory" in result
     assert "Hidden query memory" in result
-    assert "Deleted query memory" not in result
-    assert "Tombstone query memory" not in result
-    assert "Archived query memory" not in result
+    assert "Deleted query memory" in result
+    assert "Tombstone query memory" in result
+    assert "Archived query memory" in result
+    assert "restore=True" in result
     assert bucket_mgr.touched == ["visible", "hidden"]
 
 

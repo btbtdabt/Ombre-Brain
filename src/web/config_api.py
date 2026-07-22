@@ -42,8 +42,8 @@ from config_modes import (
     normalize_retrieval_mode,
     normalize_thinking_mode,
 )
-from deployment_profile import normalize_public_https_origin
-from public_origin import configured_public_origin
+from ombrebrain.security.deployment_profile import normalize_public_https_origin
+from ombrebrain.security.public_origin import configured_public_origin
 
 from . import _shared as sh
 

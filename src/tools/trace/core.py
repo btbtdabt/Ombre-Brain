@@ -25,15 +25,15 @@ trace 是 OB 唯一的「写元数据」入口，承接所有桶字段更新和�
                      tags, resolved, pinned, digested, content, delete,
                      status, weight, dont_surface, why_remembered,
                      meaning_append, meaning_replace, media_append, media_replace,
-                     hard_delete, delete_reason) → str
+                     hard_delete, delete_reason, restore, old_str, new_str) → str
 ========================================
 """
 
 from contextlib import AsyncExitStack
 from typing import Optional
 
-from memory_messages import resolved_hint
 from runtime_values import finite_float
+from ombrebrain.domain.memory_messages import resolved_hint
 from utils import parse_bool
 from .. import _runtime as rt
 from .._common import (
@@ -72,6 +72,9 @@ async def trace_core(
     media_replace: Optional[list | str] = None,
     hard_delete: Optional[bool] = False,
     delete_reason: Optional[str] = "",
+    restore: Optional[bool] = False,
+    old_str: Optional[str] = "",
+    new_str: Optional[str] = None,
 ) -> str:
     bucket_id = "" if bucket_id is None else str(bucket_id)
     if name is None:
@@ -108,6 +111,9 @@ async def trace_core(
         meaning_append = ""
     if media_append is None:
         media_append = []
+    new_str_provided = new_str is not None
+    old_str = "" if old_str is None else str(old_str)
+    new_str = "" if new_str is None else str(new_str)
     content = str(content)
     name = str(name)
     domain = str(domain)
@@ -117,6 +123,7 @@ async def trace_core(
     meaning_append = str(meaning_append)
     delete = parse_bool(delete, default=False)
     hard_delete = parse_bool(hard_delete, default=False)
+    restore = parse_bool(restore, default=False)
     delete_reason = "" if delete_reason is None else str(delete_reason).strip()
 
     def _safe_int(value, default: int) -> int:
@@ -162,7 +169,10 @@ async def trace_core(
         "content_length": len(content or ""),
         "delete": delete,
         "hard_delete": hard_delete,
+        "restore": restore,
         "delete_reason_length": len(delete_reason),
+        "old_str_length": len(old_str),
+        "new_str_length": len(new_str) if new_str_provided else 0,
         "status": status,
         "weight": weight,
         "dont_surface": dont_surface,
@@ -171,6 +181,65 @@ async def trace_core(
 
     if not bucket_id or not bucket_id.strip():
         return "请提供有效的 bucket_id。"
+
+    restore_conflicts = any((
+        delete,
+        hard_delete,
+        bool(name),
+        bool(domain),
+        valence != -1,
+        arousal != -1,
+        importance != -1,
+        bool(tags),
+        resolved != -1,
+        pinned != -1,
+        digested != -1,
+        bool(content),
+        bool(status),
+        weight != -1,
+        dont_surface != -1,
+        bool(why_remembered),
+        bool(meaning_append),
+        meaning_replace is not None,
+        bool(media_append),
+        media_replace is not None,
+        bool(delete_reason),
+        bool(old_str),
+        new_str_provided,
+    ))
+    if restore and restore_conflicts:
+        return (
+            "参数冲突：restore=True 必须单独调用，不能同时删除或修改记忆；"
+            "本次未恢复、未修改。"
+        )
+    if restore:
+        result = await rt.bucket_mgr.restore_archived(bucket_id)
+        if result.get("ok"):
+            return f"已重新回忆并恢复记忆桶: {bucket_id}"
+        if result.get("error") == "not_archived":
+            return f"记忆桶仍在日常记忆中，无需恢复: {bucket_id}"
+        if result.get("error") == "not_found":
+            return f"未找到记忆桶: {bucket_id}"
+        return f"恢复记忆桶失败: {result.get('error', 'unknown_error')}"
+
+    patch_args_supplied = bool(old_str) or new_str_provided
+    if patch_args_supplied and (delete or hard_delete):
+        return (
+            "参数冲突：old_str/new_str 局部替换不能与 delete/hard_delete 同时使用；"
+            "本次未修改、未删除、未归档。"
+        )
+    if patch_args_supplied and content:
+        return (
+            "参数冲突：不能同时使用 content 完整替换和 old_str/new_str 局部替换；"
+            "本次未修改。"
+        )
+    if patch_args_supplied and (not old_str or not new_str_provided):
+        return (
+            "局部替换必须同时提供 old_str 和 new_str；new_str 可以是空字符串以删除片段。"
+            "本次未修改。"
+        )
+    if patch_args_supplied and old_str == new_str:
+        return "old_str 与 new_str 完全相同，没有内容需要替换；本次未修改。"
 
     # --- Delete 模式（F-10：普通记忆只允许软删除/归档）---
     if hard_delete and delete:
@@ -374,18 +443,51 @@ async def trace_core(
             media_replace=media_replace,
         )
 
-        if not updates:
+        if not updates and not patch_args_supplied:
             return "没有任何字段需要修改。"
 
-        apply_plan_change_log(bucket, updates)
+        is_plan = bucket.get("metadata", {}).get("type") == "plan"
+        append_plan_history_in_patch = is_plan and patch_args_supplied
+        if not patch_args_supplied:
+            apply_plan_change_log(bucket, updates)
 
-        success = await rt.bucket_mgr.update(bucket_id, **updates)
-        if not success:
-            return f"修改失败: {bucket_id}"
+        if patch_args_supplied:
+            patch_result = await rt.bucket_mgr.update_content_fragment(
+                bucket_id,
+                old_str=old_str,
+                new_str=new_str,
+                append_plan_history=append_plan_history_in_patch,
+                **updates,
+            )
+            if not patch_result.get("ok"):
+                patch_error = patch_result.get("error")
+                if patch_error == "not_found":
+                    return f"未找到记忆桶: {bucket_id}"
+                if patch_error == "old_str_not_found":
+                    return (
+                        "未找到 old_str，正文未修改。请从 Dashboard 或对应记忆类型的读取入口"
+                        "核对当前原文；普通记忆也可用 "
+                        f'breath_advanced(query="{bucket_id}", max_results=1, '
+                        "max_tokens=20000) 按完整 bucket_id 读取。复制连续且逐字一致的片段后重试。"
+                    )
+                if patch_error == "old_str_ambiguous":
+                    return (
+                        "old_str 在正文中至少出现 2 次，"
+                        "无法安全确定要修改哪一处；正文未修改。请提供更长且唯一的原文片段。"
+                    )
+                if patch_error == "invalid_content":
+                    return str(patch_result.get("message") or "替换后的内容不符合存储限制。")
+                if patch_error == "unchanged":
+                    return "old_str 与 new_str 替换后正文没有变化；本次未修改。"
+                return f"修改失败: {bucket_id}"
+        else:
+            success = await rt.bucket_mgr.update(bucket_id, **updates)
+            if not success:
+                return f"修改失败: {bucket_id}"
 
-    # 注意：bucket_mgr.update() 在 "content" in kwargs 时已经内部调用
-    # update(content=...) 会投递 embedding outbox（见 bucket_manager.py），这里不需要
-    # 也不应该重复调用 generate_and_store，否则同一条内容会多打一次向量 API。
+    # 注意：完整正文更新和局部替换都会在 BucketManager 内汇入
+    # _update_locked(content=...)，并投递 embedding outbox。这里不需要、也不应该
+    # 重复调用 generate_and_store，否则同一条内容会多打一次向量 API。
 
     # --- plan 桶人工/AI 显式 resolve → 联动 related_bucket / resolved_by ---
     # rule.md §1：plan 是承诺，承诺被显式放下，承载它的事件桶也不该再浮上来。
@@ -408,7 +510,9 @@ async def trace_core(
         if k not in ("content", "meaning_append", "meaning", "media_append", "media")
     }
     changed = ", ".join(f"{k}={v}" for k, v in _display_updates.items())
-    if "content" in updates:
+    if patch_args_supplied:
+        changed += (", content=已局部替换" if changed else "content=已局部替换")
+    elif "content" in updates:
         changed += (", content=已替换" if changed else "content=已替换")
     if "meaning_append" in updates:
         changed += (", " if changed else "") + "meaning=已追加一条"
@@ -422,9 +526,9 @@ async def trace_core(
         changed += f" → {resolved_hint(bool(updates['resolved']))}"
     if "digested" in updates:
         if updates["digested"]:
-            changed += " → 已隐藏，保留但不再浮现"
+            changed += " → 已从默认/被动浮现与 dream 隐藏，显式检索/审计仍可找回"
         else:
-            changed += " → 已取消隐藏，重新参与浮现"
+            changed += " → 已取消消化隐藏；若无其他隐藏策略，将重新参与默认浮现与 dream"
     if cascaded:
         changed += f" → 同步把 {len(cascaded)} 个关联事件桶也标为已放下（{', '.join(cascaded)}）"
     return f"已修改记忆桶 {bucket_id}: {changed}"

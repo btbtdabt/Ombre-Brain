@@ -7,7 +7,7 @@ import sqlite3
 from types import SimpleNamespace
 
 from embedding_engine import EmbeddingEngine
-from embedding_outbox import EmbeddingOutbox
+from ombrebrain.storage.embedding_outbox import EmbeddingOutbox
 from utils import bucket_text_for_embedding
 
 
@@ -267,7 +267,7 @@ def test_generate_embedding_zero_cache_bypasses_p0_backend_cache(tmp_path):
             return 3
 
     backend = Backend()
-    engine._backend = backend
+    engine.__dict__["_backend"] = backend
     engine.client = None
 
     asyncio.run(engine._generate_embedding("uncached", kind="query"))

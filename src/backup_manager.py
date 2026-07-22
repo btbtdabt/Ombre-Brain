@@ -13,13 +13,13 @@ from typing import Any, cast
 
 import frontmatter
 
-from backup_archive import (
+from ombrebrain.storage.backup_archive import (
     BackupArchiveError,
     build_export_archive_file,
     extract_backup_archive_file,
     validate_sqlite_file,
 )
-from media_store import media_bucket_directory_name
+from ombrebrain.storage.media_store import media_bucket_directory_name
 from utils import atomic_write_text, get_version, now_iso, same_path
 
 

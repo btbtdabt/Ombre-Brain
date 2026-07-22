@@ -1,4 +1,4 @@
-from bucket_scoring import calc_topic_score
+from ombrebrain.retrieval.bucket_scoring import calc_topic_score
 
 
 def test_followup_section_does_not_create_topic_relevance() -> None:

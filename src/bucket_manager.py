@@ -54,6 +54,8 @@ from typing import (
     SupportsInt,
     TypedDict,
 )
+from ombrebrain.domain.plan_history import append_plan_change_log
+from ombrebrain.eventsourcing.footprint import FootprintSnapshot
 
 # 统一错误体系：越界 clamp 时上报 OB-W001/OB-W002（rule.md §11）
 try:
@@ -322,18 +324,18 @@ from memory_relevance import (
     recall_topic_query,
 )
 from query_terms import GENERIC_LEXICAL_STOPWORDS
-from media_store import MediaStore
-from bucket_scoring import (
+from ombrebrain.storage.media_store import MediaStore
+from ombrebrain.retrieval.bucket_scoring import (
     calc_topic_score,
     calc_emotion_score,
     calc_time_score,
     calc_touch_score,
 )
-from ledger_mirror import LedgerMirror
-from ledger_replay import LedgerReplayValidator
-from projection_mirror import TraceCatalogProjection
-from projection_sqlite import TraceSQLiteProjection
-from projection_vector import TraceVectorProjectionManifest
+from ombrebrain.eventsourcing.ledger_mirror import LedgerMirror
+from ombrebrain.eventsourcing.ledger_replay import LedgerReplayValidator
+from ombrebrain.projection.projection_mirror import TraceCatalogProjection
+from ombrebrain.projection.projection_sqlite import TraceSQLiteProjection
+from ombrebrain.projection.projection_vector import TraceVectorProjectionManifest
 from ombrebrain.policy.formal_invariants import FormalInvariantChecker
 from runtime_values import valid_memory_id
 
@@ -485,7 +487,7 @@ _RESOLVED_RANK_PENALTY = 0.3   # resolved 桶仅在排序时降权
 _LITERAL_MATCH_BONUS = 25.0    # 查询串原样命中 name/tags/domain/正文时的召回加分（修短查询召回）
 
 # topic/emotion/time/touch 四个评分维度的纯函数 + 权重常量已拆到
-# bucket_scoring.py（search() 和 _calc_*_score 兼容 wrapper 都从那边导入）。
+# ombrebrain.retrieval.bucket_scoring（search() 和 _calc_*_score wrapper 都从那里导入）。
 
 
 def _clamp01(value, default: float) -> float:
@@ -715,6 +717,10 @@ class BucketManager:
             }
         report["replay"] = LedgerReplayValidator.default().validate(events)
         return report
+
+    def footprint_snapshot(self) -> FootprintSnapshot:
+        """读取旧 Ledger 兼容存储，生成面向 breath 的一次性足迹快照。"""
+        return FootprintSnapshot.from_events(self.ledger_mirror.iter_events())
 
     # ---------------------------------------------------------
     # Internal helpers【代码多复用、不作为公共 API】
@@ -1559,6 +1565,13 @@ class BucketManager:
             return None
         return data
 
+    async def get_including_archive(self, bucket_id: str) -> Optional[dict]:
+        """Read one bucket by ID without hiding its archived/tombstoned state."""
+        if not bucket_id or not isinstance(bucket_id, str):
+            return None
+        file_path = self._find_bucket_file(bucket_id)
+        return self._load_bucket(file_path) if file_path else None
+
     def find_exact_content(
         self,
         content: str,
@@ -1803,6 +1816,106 @@ class BucketManager:
                     total += replacements
 
         return {"buckets_changed": changed, "replacements": total}
+
+    async def update_content_fragment(
+        self,
+        bucket_id: str,
+        *,
+        old_str: str,
+        new_str: str,
+        append_plan_history: bool = False,
+        **kwargs,
+    ) -> dict[str, Any]:
+        """Atomically replace one unique literal fragment in a bucket body.
+
+        The match and the write deliberately happen under the same per-bucket
+        cross-process lock.  Computing the replacement from an earlier
+        ``get()`` result would let a concurrent trace/update be overwritten by
+        a stale full-body snapshot.
+
+        ``new_str`` may be empty (delete the matched fragment).  Zero matches
+        and multiple matches are both non-mutating results so callers never
+        have to guess which occurrence was intended.
+        """
+        old_text = str(old_str)
+        replacement = str(new_str)
+        if not old_text:
+            return {"ok": False, "error": "empty_old_str", "matches": 0}
+        if "content" in kwargs:
+            return {"ok": False, "error": "content_conflict", "matches": 0}
+
+        async with self._bucket_turn(bucket_id):
+            file_path = self._find_bucket_file(bucket_id)
+            if not file_path:
+                return {"ok": False, "error": "not_found", "matches": 0}
+            try:
+                post = frontmatter.load(file_path)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to load bucket for content patch %s: %s",
+                    bucket_id,
+                    exc,
+                )
+                return {"ok": False, "error": "read_failed", "matches": 0}
+
+            current_content = str(post.content or "")
+            # ``str.count`` ignores overlapping occurrences ("aa" in "aaa"),
+            # which could silently patch the first of two valid match starts.
+            # Only 0/1/many matters, so stop at the second start rather than
+            # scanning every pathological overlapping match.
+            first_match = current_content.find(old_text)
+            if first_match < 0:
+                return {
+                    "ok": False,
+                    "error": "old_str_not_found",
+                    "matches": 0,
+                }
+            second_match = current_content.find(old_text, first_match + 1)
+            if second_match >= 0:
+                return {
+                    "ok": False,
+                    "error": "old_str_ambiguous",
+                    "matches": 2,
+                }
+
+            updated_content = self._sanitize_text(
+                current_content.replace(old_text, replacement, 1)
+            )
+            if updated_content == current_content:
+                return {"ok": False, "error": "unchanged", "matches": 1}
+            if not updated_content.strip():
+                return {
+                    "ok": False,
+                    "error": "invalid_content",
+                    "matches": 1,
+                    "message": "替换后正文不能为空；如需移除整个桶，请使用归档。",
+                }
+
+            updates = dict(kwargs)
+            if append_plan_history and str(post.get("type") or "") == "plan":
+                history: Any = post.get("change_log") or []
+                if "status" in updates and updates["status"] != post.get("status"):
+                    history = append_plan_change_log(
+                        history,
+                        "status",
+                        **{"from": post.get("status"), "to": updates["status"]},
+                    )
+                updates["change_log"] = append_plan_change_log(history, "edit")
+            updates["content"] = updated_content
+            try:
+                committed = await self._update_locked(bucket_id, **updates)
+            except ValueError as exc:
+                return {
+                    "ok": False,
+                    "error": "invalid_content",
+                    "matches": 1,
+                    "message": str(exc),
+                }
+            return {
+                "ok": bool(committed),
+                "error": "" if committed else "update_failed",
+                "matches": 1,
+            }
 
     # ---------------------------------------------------------
     # Update bucket
@@ -2583,6 +2696,97 @@ class BucketManager:
         async with self._bucket_turn(bucket_id):
             return await self._delete_locked(bucket_id)
 
+    async def restore_archived(self, bucket_id: str) -> dict:
+        """Restore an archived/tombstoned Markdown bucket to its original channel.
+
+        Discovery never calls this method.  It is deliberately exposed only
+        through an explicit ``trace(..., restore=True)`` decision.
+        """
+        async with self._bucket_turn(bucket_id):
+            file_path = self._find_bucket_file(bucket_id)
+            if not file_path:
+                return {"ok": False, "error": "not_found"}
+            try:
+                post = frontmatter.load(file_path)
+            except Exception as exc:
+                return {"ok": False, "error": f"read_failed: {exc}"}
+
+            normalized_path = os.path.normcase(os.path.abspath(file_path))
+            normalized_archive = os.path.normcase(os.path.abspath(self.archive_dir))
+            try:
+                stored_in_archive = (
+                    os.path.commonpath((normalized_path, normalized_archive))
+                    == normalized_archive
+                )
+            except ValueError:
+                stored_in_archive = False
+            archived_state = (
+                stored_in_archive
+                or str(post.get("type") or "").strip().lower() == "archived"
+                or bool(post.get("deleted_at"))
+                or parse_bool(post.get("tombstone"), default=False)
+            )
+            if not archived_state:
+                return {"ok": False, "error": "not_archived"}
+
+            original_kind = self.footprint_snapshot().original_kind(
+                bucket_id, dict(post.metadata)
+            )
+            if original_kind not in _EDITABLE_BUCKET_TYPES:
+                original_kind = "dynamic"
+            if parse_bool(post.get("pinned"), default=False) or parse_bool(
+                post.get("protected"), default=False
+            ):
+                original_kind = "permanent"
+
+            post["type"] = original_kind
+            for field in (
+                "deleted_at", "tombstone", "tombstoned_at", "erasure_mode"
+            ):
+                post.metadata.pop(field, None)
+            raw_domain = post.get("domain")
+            if isinstance(raw_domain, str):
+                restored_domain: Sequence[str] | str = raw_domain
+            elif isinstance(raw_domain, list):
+                restored_domain = [str(item) for item in raw_domain]
+            else:
+                restored_domain = [_DEFAULT_DOMAIN_NAME]
+            try:
+                target_path = self._bucket_target_path(
+                    file_path,
+                    original_kind,
+                    restored_domain,
+                    str(post.get("status") or "active"),
+                )
+                committed_path = self._commit_bucket_update(
+                    file_path, target_path, frontmatter.dumps(post)
+                )
+            except (OSError, ValueError) as exc:
+                logger.error("Failed to restore archived bucket %s: %s", bucket_id, exc)
+                return {"ok": False, "error": f"restore_failed: {exc}"}
+
+            self._invalidate_bm25()
+            await self._index_after_write(bucket_id, post.content or "")
+            raw_meaning = post.get("meaning")
+            meaning = (
+                [str(item) for item in raw_meaning]
+                if isinstance(raw_meaning, list)
+                else []
+            )
+            await self._sync_meaning_embedding(bucket_id, meaning)
+            self._record_v3_bucket_event(
+                "restore", bucket_id, original_kind, post.content or "", dict(post.metadata)
+            )
+            self._record_ledger_event(
+                "TraceRestored",
+                bucket_id,
+                original_kind,
+                post.content or "",
+                dict(post.metadata),
+            )
+            logger.info("Restored archived bucket: %s -> %s", bucket_id, committed_path)
+            return {"ok": True, "restored": bucket_id, "type": original_kind}
+
     async def _delete_locked(self, bucket_id: str) -> bool:
         file_path = self._find_bucket_file(bucket_id)
         if not file_path:
@@ -2847,6 +3051,7 @@ class BucketManager:
         query_valence: Optional[float] = None,
         query_arousal: Optional[float] = None,
         vector_scores: Optional[dict[str, float]] = None,
+        include_archive: bool = False,
     ) -> list[dict]:
         """
         Multi-dimensional indexed search for memory buckets.
@@ -2861,7 +3066,7 @@ class BucketManager:
         limit = limit or self.max_results
         # 字面召回：把查询原样（小写、去空白）留作子串匹配，保证显式搜的词必被召回
         q_norm = query.strip().lower()
-        all_buckets = await self.list_all(include_archive=False)
+        all_buckets = await self.list_all(include_archive=include_archive)
 
         if not all_buckets:
             return []
@@ -3031,7 +3236,7 @@ class BucketManager:
         return scored[:limit]
 
     # ---------------------------------------------------------
-    # 四个评分维度的纯函数实现已拆到 bucket_scoring.py；这里保留同名
+    # 四个评分维度的纯函数实现已拆到 ombrebrain.retrieval.bucket_scoring；这里保留同名
     # wrapper 方法 —— 测试和历史调用方一直用 bucket_mgr._calc_xxx_score(...)
     # 这种实例方法写法，wrapper 保持该接口不变，同时让实现本身可独立单测/复用。
     # ---------------------------------------------------------

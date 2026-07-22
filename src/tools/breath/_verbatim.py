@@ -38,7 +38,11 @@ def _miss_block(bucket: dict) -> str:
     return ("\n" + "\n".join(lines)) if lines else ""
 
 
-def render_stored_bucket(bucket: dict, metadata_header: str) -> tuple[str, int]:
+def render_stored_bucket(
+    bucket: dict,
+    metadata_header: str,
+    footprint: str = "",
+) -> tuple[str, int]:
     """Render metadata around, but never inside, the stored bucket body."""
     # Temporary compatibility patch: force breath to return stored bucket
     # content verbatim. Remove after upstream breath fixes content reconstruction.
@@ -48,4 +52,6 @@ def render_stored_bucket(bucket: dict, metadata_header: str) -> tuple[str, int]:
         f"{metadata_header} {_STORED_DATA_BOUNDARY}"
         f"{_miss_block(bucket)}\n{stored_bucket_content(bucket)}"
     )
+    if footprint:
+        rendered += f"\n{footprint}"
     return rendered, count_tokens_approx(rendered)

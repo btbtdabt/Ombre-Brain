@@ -138,7 +138,7 @@ def test_siliconflow_short_bge_name_is_canonicalized():
 
 
 def test_provider_detection_uses_exact_hostname():
-    from provider_detect import (
+    from ombrebrain.integrations.provider_detect import (
         is_gemini_native_host,
         is_siliconflow_endpoint,
         normalize_model_for_endpoint,

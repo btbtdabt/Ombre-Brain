@@ -1184,19 +1184,25 @@ async def trace(
     delete: bool = False,
     hard_delete: bool = False,
     delete_reason: str = "",
+    restore: bool = False,
+    old_str: str = "",
+    new_str: str | None = None,
 ) -> str:
-    """修改已有记忆，不创建新桶。tags/domain/content 是替换；date 可改事件日期；meaning/media 的 append 是追加、replace 是整体替换；hard_delete 只清理明确标记的测试桶。改前先 read_bucket。"""
+    """修改已有记忆，不创建新桶。tags/domain/content 是替换；old_str/new_str 精确修改正文片段；restore 恢复归档桶；date 可改事件日期；meaning/media 的 append 是追加、replace 是整体替换；hard_delete 只清理明确标记的测试桶。改前先 read_bucket。"""
     bucket_id = coerce_id(bucket_id)
     if not bucket_id:
         return "请提供有效的 bucket_id。"
 
     delete = bool_value(delete, False)
     hard_delete = bool_value(hard_delete, False)
+    restore = bool_value(restore, False)
     date = str(date or "").strip()
     if hard_delete and (anchor in (0, 1) or date):
         return "hard_delete 不能与 anchor 或 date 修改同时执行。"
     if delete and (anchor in (0, 1) or date):
         return "delete 归档不能与 anchor 或 date 修改同时执行。"
+    if (restore or old_str or new_str is not None) and (anchor in (0, 1) or date):
+        return "restore 或正文片段修改不能与 anchor 或 date 修改同时执行。"
 
     # P0 owns the common trace path: it carries quota locking, plan history,
     # plan-resolution cascade, meaning/media updates, and guarded test erasure.
@@ -1225,6 +1231,9 @@ async def trace(
             media_replace=media_replace,
             hard_delete=hard_delete,
             delete_reason=delete_reason,
+            restore=restore,
+            old_str=old_str,
+            new_str=new_str,
         )
         if (delete and result.startswith("已将记忆桶存入档案")) or (
             hard_delete and result.startswith("已永久删除测试桶")

@@ -9,7 +9,7 @@ import pytest
 
 from bucket_manager import BucketManager
 from embedding_engine import EmbeddingEngine
-from embedding_outbox import EmbeddingOutbox, content_hash
+from ombrebrain.storage.embedding_outbox import EmbeddingOutbox, content_hash
 from tools import _common as common
 from tools import _runtime as rt
 from web import embedding as embedding_web
@@ -91,7 +91,7 @@ class DisabledEngine(RecordingEngine):
 class ObservableEngine(RecordingEngine):
     def __init__(self):
         super().__init__()
-        self.manager = None
+        self.manager: BucketManager | None = None
         self.meaning_started = asyncio.Event()
         self.release_meaning = asyncio.Event()
         self.visible_during_meaning = None
@@ -100,6 +100,7 @@ class ObservableEngine(RecordingEngine):
         return [0.1, 0.2, 0.3] if bucket_id in self.hashes else None
 
     async def generate_and_store_meaning(self, bucket_id, _meaning):
+        assert self.manager is not None
         self.visible_during_meaning = (
             await self.manager.get(bucket_id) is not None
         )
@@ -165,13 +166,14 @@ async def test_reconcile_does_not_requeue_a_worker_completed_mid_scan(tmp_path):
     class CompletingEngine(RecordingEngine):
         def __init__(self):
             super().__init__()
-            self.outbox = None
+            self.outbox: EmbeddingOutbox | None = None
             self.completed = False
 
         def list_content_hashes(self):
             if not self.completed:
                 self.completed = True
                 self.hashes[bucket_id] = digest
+                assert self.outbox is not None
                 self.outbox._complete(bucket_id, digest)
             return dict(self.hashes)
 
@@ -238,8 +240,8 @@ async def test_reconcile_queues_content_for_meaning_only_index_row(tmp_path):
     bucket_id = "meaning-only"
     engine.hashes[bucket_id] = ""
 
-    async def get_bucket(requested_id):
-        assert requested_id == bucket_id
+    async def get_bucket(bucket_id: str):
+        assert bucket_id == "meaning-only"
         return {
             "id": bucket_id,
             "content": "正文仍然需要自己的向量",

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import frontmatter
 
-from backup_archive import (
+from ombrebrain.storage.backup_archive import (
     BackupArchiveError,
     build_export_archive_file,
     extract_backup_archive_file,

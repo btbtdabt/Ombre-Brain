@@ -14,7 +14,7 @@ tools/_common.py — 跨工具共享的辅助逻辑
 - iter 2.0：merge_or_create 接受 ``source_tool`` / ``grow_batch_id``，
   新建时写入 frontmatter；合并时不动原桶 source_tool，只追加 ``last_merged_by``
 - check_duplicate_for：fire-and-forget 标记疑似重复对（不自动合并）
-- check_plan_resolution：fire-and-forget 用向量预筛 + LLM 保守判断
+- check_plan_resolution：fire-and-forget 用关键词/向量双通道预筛 + LLM 保守判断
   来把已完成的 active plan 标为 resolved
 
 不做什么（边界）：
@@ -42,6 +42,7 @@ from typing import Any, Tuple, cast
 import uuid
 
 from utils import parse_bool
+from ombrebrain.domain.plan_history import append_plan_change_log
 
 from . import _runtime as rt
 
@@ -82,6 +83,7 @@ _DUP_TOPK = 10                         # 检索前 N 个候选以判重复
 _PLAN_VECTOR_TOPK = 20                 # plan 判定的向量预筛范围
 _PLAN_VECTOR_THRESHOLD = 0.7           # 超过才交给 LLM 判定是否已完成
 _PLAN_LLM_CONFIDENCE_MIN = 0.7         # LLM judgement.confidence 下限
+_SAME_EVENT_CONFIDENCE_MIN = 0.85      # 自动合并必须高置信，疑似时新建
 _PLAN_FALLBACK_CAP = 10                # 无向量时直接送 LLM 的 plan 上限（防止过多 LLM 调用）
 
 # --- 字段截断长度（下游存储 / 日志可读性）---
@@ -660,23 +662,6 @@ async def enforce_pinned_quota(pinned: bool) -> bool:
     return True
 
 
-def append_plan_change_log(old_history, action: str, **fields) -> list:
-    """plan 桶 change_log 唯一写入口（iter 2.0 §10 U-01 修复）。
-
-    把旧 history 复制一份、追加一条带 ISO 时间戳的新条目，返回新 list。
-    所有写 plan change_log 的地方（plan_create / trace plan / dashboard plan action）
-    都必须走这里，保证字段顺序、时间戳精度、复制语义一致。
-    """
-    from datetime import datetime as _dt
-    history = list(old_history or [])
-    entry = {"ts": _dt.now().isoformat(timespec="seconds"), "action": action}
-    for k, v in fields.items():
-        if v is not None:
-            entry[k] = v
-    history.append(entry)
-    return history
-
-
 def apply_plan_change_log(bucket: dict, updates: dict) -> None:
     """Append plan status/content history to an in-flight update payload."""
 
@@ -798,7 +783,10 @@ async def _merge_or_create_inner(
     if callable(exact_finder):
         try:
             find_exact_content = cast(_ExactContentFinder, exact_finder)
-            exact = find_exact_content(content, domain_filter=domain or None)
+            # Byte-identical source text is the same write even when concurrent
+            # Flash analyses choose different domains/tags. Metadata is a
+            # derived classification and must not split one identical event.
+            exact = find_exact_content(content, domain_filter=None)
         except Exception as exc:
             rt.logger.warning(f"Exact-content storage check failed: {exc}")
         else:
@@ -836,6 +824,34 @@ async def _merge_or_create_inner(
                         break
                     snapshot_content = str(bucket.get("content") or "")
                     snapshot_metadata = deepcopy(metadata)
+
+                    if not exact_storage_match:
+                        judge = getattr(rt.dehydrator, "judge_same_event", None)
+                        if not callable(judge):
+                            rt.logger.warning(
+                                "Same-event judge unavailable; creating new bucket / "
+                                "同一事件判定器不可用，保守新建"
+                            )
+                            break
+                        judge_same_event = cast(
+                            Callable[[str, str], Awaitable[dict[str, Any]]],
+                            judge,
+                        )
+                        judgement = await judge_same_event(snapshot_content, content)
+                        same_event = parse_bool(
+                            judgement.get("same_event", False), default=False
+                        )
+                        try:
+                            confidence = float(judgement.get("confidence", 0.0))
+                        except (TypeError, ValueError):
+                            confidence = 0.0
+                        if not same_event or confidence < _SAME_EVENT_CONFIDENCE_MIN:
+                            rt.logger.info(
+                                "op=merge_or_create phase=branch branch=separate_event "
+                                f"bucket_id={candidate_id} confidence={confidence:.3f} "
+                                f"reason={str(judgement.get('reason', ''))[:_LOG_REASON_PREVIEW]}"
+                            )
+                            break
 
                     if raw_merge or exact_storage_match:
                         old_text = snapshot_content.rstrip()
@@ -1154,8 +1170,30 @@ async def check_duplicate_for(new_bucket_id: str, new_text: str, threshold: floa
         rt.logger.warning(f"check_duplicate_for outer error: {e}")
 
 
+async def _rank_active_plans_by_query(
+    new_event_text: str,
+    active_plans: list[dict],
+) -> list[dict]:
+    """用 BucketManager 的关键词/BM25 通道排序 active plan，不调用向量。"""
+    active_by_id = {str(plan.get("id") or ""): plan for plan in active_plans}
+    try:
+        ranked = await rt.bucket_mgr.search(
+            new_event_text,
+            limit=max(len(active_plans), _PLAN_FALLBACK_CAP),
+            vector_scores={},
+        )
+    except Exception as exc:
+        rt.logger.warning(f"plan resolution: keyword pre-filter failed: {exc}")
+        return []
+    return [
+        active_by_id[bucket_id]
+        for bucket in ranked
+        if (bucket_id := str(bucket.get("id") or "")) in active_by_id
+    ]
+
+
 async def check_plan_resolution(new_event_text: str, source_bucket_id: str = "") -> None:
-    """fire-and-forget：扫描 active plan，向量相似 > 0.7 的让 LLM 保守判断是否完成。"""
+    """新事件触发 active plan 关键词/向量召回，再由 LLM 保守判断是否闭环。"""
     try:
         all_b = await rt.bucket_mgr.list_all(include_archive=False)
         active_plans = [
@@ -1165,23 +1203,31 @@ async def check_plan_resolution(new_event_text: str, source_bucket_id: str = "")
         ]
         if not active_plans:
             return
-        plan_candidates = []
+        keyword_candidates = await _rank_active_plans_by_query(
+            new_event_text, active_plans
+        )
+        vector_candidates = []
         if rt.embedding_engine and getattr(rt.embedding_engine, "enabled", False):
             try:
                 sims = await rt.embedding_engine.search_similar(new_event_text, top_k=_PLAN_VECTOR_TOPK)
                 sim_map = {bid: sc for bid, sc in sims}
                 for p in active_plans:
                     if sim_map.get(p["id"], 0.0) > _PLAN_VECTOR_THRESHOLD:
-                        plan_candidates.append(p)
-                # 向量预筛没命中任何 plan → fallback 到全量（上限保护）
-                if not plan_candidates:
-                    plan_candidates = active_plans[:_PLAN_FALLBACK_CAP]
+                        vector_candidates.append(p)
             except Exception as e:
                 rt.logger.warning(f"plan resolution: vector pre-filter failed, falling back: {e}")
-                plan_candidates = active_plans[:_PLAN_FALLBACK_CAP]
-        else:
-            # 无向量后端：直接把所有 active plan 送 LLM 判定（上限防止过多调用）
-            plan_candidates = active_plans[:_PLAN_FALLBACK_CAP]
+        # 关键词是不可缺失的基础召回；向量只补充语义候选。去重后仍限制
+        # 小模型调用数，避免 active plan 很多时一次写入触发无界 API 请求。
+        plan_candidates = []
+        seen_plan_ids: set[str] = set()
+        for candidate in keyword_candidates + vector_candidates + active_plans:
+            candidate_id = str(candidate.get("id") or "")
+            if not candidate_id or candidate_id in seen_plan_ids:
+                continue
+            seen_plan_ids.add(candidate_id)
+            plan_candidates.append(candidate)
+            if len(plan_candidates) >= _PLAN_FALLBACK_CAP:
+                break
         for p in plan_candidates:
             try:
                 judgement = await rt.dehydrator.judge_plan_resolution(

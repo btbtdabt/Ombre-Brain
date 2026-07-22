@@ -5,13 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from backup_archive import (
+from ombrebrain.storage.backup_archive import (
     build_export_archive,
     build_export_archive_file,
     extract_backup_archive_file,
     read_backup_archive,
 )
-from media_store import (
+from ombrebrain.storage.media_store import (
     MediaPersistenceError,
     MediaStore,
     media_bucket_directory_name,

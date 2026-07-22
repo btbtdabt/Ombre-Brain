@@ -157,6 +157,7 @@ breath_advanced(mode="handoff")
 - `name`、`content`、`domain`、`tags` 是替换操作；正文或标题变更会重建 embedding。
 - `meaning_append/media_append` 是追加；`meaning_replace/media_replace` 是整体替换。
 - `delete=True` 是**归档**：从日常召回隐藏并清理可重建索引，Markdown 保留在 archive，不是物理抹除。
+- `breath_search` 命中归档记忆时只会展示原文、Footprint 与恢复提示，不会自动改变状态。判断它对当下确实有帮助并值得再次回忆后，单独调用 `trace(bucket_id="...", restore=True)`；恢复调用不与其他修改同传。
 - `hard_delete=True` 只允许清理创建时已经标记 `test_data=True` 的测试桶，并应提供 `delete_reason`；真实记忆会被拒绝。
 - 当前兼容 schema 仍接受 `anchor=1/0`，但默认应使用专门的 `anchor` / `release`。
 - 不要 resolve feel；feel 是留下的痕迹，不是待办。

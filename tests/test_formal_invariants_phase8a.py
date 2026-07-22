@@ -1,4 +1,4 @@
-from ledger_mirror import LedgerMirror
+from ombrebrain.eventsourcing.ledger_mirror import LedgerMirror
 
 
 def _bucket(bucket_id="b1", **metadata):

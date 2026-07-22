@@ -44,10 +44,11 @@ try:
 except ImportError:  # pragma: no cover
     from ..utils import parse_bool, sanitize_name  # type: ignore
 
-try:
-    from backup_archive import MAX_ARCHIVE_BYTES, BackupArchiveError, build_export_archive_file  # type: ignore
-except ImportError:  # pragma: no cover
-    from ..backup_archive import MAX_ARCHIVE_BYTES, BackupArchiveError, build_export_archive_file  # type: ignore
+from ombrebrain.storage.backup_archive import (
+    MAX_ARCHIVE_BYTES,
+    BackupArchiveError,
+    build_export_archive_file,
+)
 
 logger = sh.logger
 

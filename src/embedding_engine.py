@@ -53,18 +53,11 @@ try:
 except ImportError:  # pragma: no cover
     from .utils import parse_bool, positive_float  # type: ignore
 
-try:
-    from provider_detect import (
-        is_known_cloud_embedding_endpoint,
-        normalize_model_for_endpoint,
-        strip_native_resource_prefix,
-    )
-except ImportError:  # pragma: no cover
-    from .provider_detect import (  # type: ignore
-        is_known_cloud_embedding_endpoint,
-        normalize_model_for_endpoint,
-        strip_native_resource_prefix,
-    )
+from ombrebrain.integrations.provider_detect import (
+    is_known_cloud_embedding_endpoint,
+    normalize_model_for_endpoint,
+    strip_native_resource_prefix,
+)
 
 logger = logging.getLogger("ombre_brain.embedding")
 

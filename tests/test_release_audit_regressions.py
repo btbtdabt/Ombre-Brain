@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from bucket_manager import BucketManager
-from bucket_scoring import calc_time_score
+from ombrebrain.retrieval.bucket_scoring import calc_time_score
 from decay_engine import _days_since_active
 from dehydrator import Dehydrator
 from embedding_engine import EmbeddingEngine
@@ -147,6 +147,9 @@ async def test_merge_updates_embedding_exactly_once(tmp_path, monkeypatch):
         return [bucket]
 
     class _NoCompression:
+        async def judge_same_event(self, *_args, **_kwargs):
+            return {"same_event": True, "confidence": 0.99, "reason": "同一事件"}
+
         def invalidate_cache(self, _content):
             pass
 

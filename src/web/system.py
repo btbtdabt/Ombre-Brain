@@ -49,7 +49,7 @@ from ombrebrain.protocol import PublicToolDesignContract, PublicToolSpec
 from tools.current.manifest import REGISTERED_TOOL_NAMES
 from ombrebrain.resilience import CrashRecoveryContract, CrashRecoveryPlan, PathStep
 from ombrebrain.retrieval import SurfaceContextCompiler
-from deployment_profile import effective_configuration_report
+from ombrebrain.security.deployment_profile import effective_configuration_report
 from utils import config_file_path
 
 try:
@@ -62,10 +62,7 @@ try:
 except ImportError:  # pragma: no cover
     from ..utils import parse_bool  # type: ignore
 
-try:
-    from vault_health import inspect_vault  # type: ignore
-except ImportError:  # pragma: no cover
-    from ..vault_health import inspect_vault  # type: ignore
+from ombrebrain.storage.vault_health import inspect_vault
 
 _LOGS_DEFAULT_LIMIT = 200
 _LOGS_MAX_LIMIT = 2000

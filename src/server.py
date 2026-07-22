@@ -44,7 +44,7 @@ from bucket_manager import BucketManager
 from dehydrator import Dehydrator
 from decay_engine import DecayEngine
 from embedding_engine import EmbeddingEngine
-from embedding_outbox import EmbeddingOutbox
+from ombrebrain.storage.embedding_outbox import EmbeddingOutbox
 from import_memory import ImportEngine
 from migrate_engine import MigrateEngine
 from current_runtime import RuntimeCollaborators
@@ -309,10 +309,14 @@ _gh_auto_interval: int = int(_gh_cfg.get("auto_interval_minutes") or 0)
 # stdio mode ignores host (no network)
 #
 # 历史上的 /mcp-extra 已退休；所有工具与 HTTP custom_route 都挂在唯一实例上。
+# Streamable HTTP 固定返回单个 JSON-RPC 对象并采用无状态请求，兼容不会
+# 保存 Mcp-Session-Id 的客户端，同时不影响 stdio 与 legacy SSE。
 mcp = FastMCP(
     "Ombre Brain",
     host=_BIND_HOST,
     port=OMBRE_PORT,
+    json_response=True,
+    stateless_http=True,
 )
 
 
@@ -411,7 +415,7 @@ _wsh.init_runtime(
 
 # =============================================================
 # 结构化操作日志 helpers（任务A，2026-05-03）
-# 给 14 个 MCP 工具入口统一打 entry/ok/err 三段日志，便于排查
+# 给公共 MCP 工具入口统一打 entry/ok/err 三段日志，便于排查
 # 客户端报 invalid_arguments / 静默错误等问题。
 # 输出格式：op=<name> phase=entry|ok|err key=value...
 # 所有可能含 PII 的字段（content / 信件正文等）只记 length，不记内容。
@@ -516,8 +520,10 @@ _SENSITIVE_TOOL_ARGUMENTS = {
     "media",
     "note",
     "object_value",
+    "old_str",
     "reason",
     "reflection",
+    "new_str",
     "tags",
     "title",
     "why_remembered",
@@ -740,7 +746,7 @@ if __name__ == "__main__":
             logger.warning(
                 "=" * 60 + "\n"
                 "⚠️  MCP 认证已关闭 (mcp_require_auth: false)：/mcp 无需任何令牌即可直连，\n"
-                "    14 个记忆工具全部对外开放——任何能访问本端口的人都能读写你的全部记忆。\n"
+                "    所有记忆工具全部对外开放——任何能访问本端口的人都能读写你的全部记忆。\n"
                 "    本服务监听 0.0.0.0，若端口暴露到局域网/公网，请务必用反代鉴权、防火墙\n"
                 "    或仅绑定 127.0.0.1 保护；仅在可信内网/本机自有前端场景才建议关闭鉴权。\n"
                 + "=" * 60

@@ -63,7 +63,16 @@ class RankedBucketManager:
         self.touched.extend(bucket_ids)
 
 
-def _bucket(bucket_id, content, *, name, bucket_type="dynamic", importance=5, pinned=False):
+def _bucket(
+    bucket_id,
+    content,
+    *,
+    name,
+    bucket_type="dynamic",
+    importance=5,
+    pinned=False,
+    created="2026-07-19T12:00:00",
+):
     return {
         "id": bucket_id,
         "content": content,
@@ -73,6 +82,7 @@ def _bucket(bucket_id, content, *, name, bucket_type="dynamic", importance=5, pi
             "importance": importance,
             "pinned": pinned,
             "domain": ["回归测试"],
+            "created": created,
         },
     }
 
@@ -173,3 +183,47 @@ async def test_catalog_with_query_renders_core_as_metadata_only_and_never_runs_s
     assert "=== 浮现记忆 ===" not in output
     assert manager.search_calls == 0
     assert manager.touched == []
+
+
+@pytest.mark.asyncio
+async def test_query_created_date_range_filters_hits_and_associations(monkeypatch):
+    on_day = _bucket(
+        "on-day",
+        "7月19日的游戏聊天。",
+        name="当日记忆",
+        created="2026-07-19T00:30:00",
+    )
+    previous_day = _bucket(
+        "previous-day",
+        "7月18日的游戏聊天。",
+        name="前日记忆",
+        created="2026-07-18T23:59:59",
+    )
+    manager = RankedBucketManager([on_day, previous_day])
+    _install_runtime(monkeypatch, manager)
+
+    output = await dispatch(
+        query="游戏聊天",
+        date_from="2026-07-19",
+        date_to="2026-07-19",
+        max_results=5,
+        max_tokens=6000,
+    )
+
+    assert "[bucket_id:on-day]" in output
+    assert "[bucket_id:previous-day]" not in output
+
+
+@pytest.mark.asyncio
+async def test_query_rejects_invalid_created_date_range(monkeypatch):
+    manager = RankedBucketManager([])
+    _install_runtime(monkeypatch, manager)
+
+    output = await dispatch(
+        query="游戏",
+        date_from="2026-07-20",
+        date_to="2026-07-19",
+    )
+
+    assert "date_from 不能晚于 date_to" in output
+    assert manager.search_calls == 0

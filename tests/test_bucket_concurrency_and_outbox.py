@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from bucket_manager import BucketManager
-from embedding_outbox import EmbeddingOutbox, content_hash
+from ombrebrain.storage.embedding_outbox import EmbeddingOutbox, content_hash
 from utils import bucket_text_for_embedding
 
 

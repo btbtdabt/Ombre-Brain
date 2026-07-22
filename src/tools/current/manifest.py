@@ -138,7 +138,7 @@ TOOL_MANIFEST = (
         forbid_extra_args=True,
     ),
     *(
-        _tool(handler)
+        _tool(handler, forbid_extra_args=handler is trace)
         for handler in (
             breath_search,
             breath_advanced,
@@ -227,6 +227,7 @@ def register_current_tools(
             arg_model = tool.fn_metadata.arg_model
             arg_model.model_config["extra"] = "forbid"
             arg_model.model_rebuild(force=True)
+            tool.parameters = arg_model.model_json_schema()
         if spec.advertised_schema is not None:
             tool.parameters = deepcopy(spec.advertised_schema)
     return registered

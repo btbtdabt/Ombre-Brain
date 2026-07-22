@@ -54,6 +54,22 @@ def _payload(response):
     return json.loads(response.body)
 
 
+def test_oauth_authorize_page_exposes_progress_timeout_and_trace_id():
+    html = oauth_mod._oauth_authorize_html(
+        "client-1",
+        "https://chatgpt.com/callback",
+        "state-1",
+        "a" * 43,
+    )
+
+    assert 'id="oauth-form"' in html
+    assert 'id="oauth-submit"' in html
+    assert 'name="trace_id"' in html
+    assert "正在验证…" in html
+    assert "等待超过 30 秒" in html
+    assert "诊断编号" in html
+
+
 def _fresh_oauth_routes(
     monkeypatch,
     tmp_path,

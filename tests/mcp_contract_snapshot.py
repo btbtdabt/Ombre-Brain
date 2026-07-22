@@ -60,7 +60,7 @@ EXPECTED_PARAMETERS = {
         "tags", "resolved", "pinned", "anchor", "digested", "content", "date",
         "status", "weight", "dont_surface", "why_remembered", "meaning_append",
         "meaning_replace", "media_append", "media_replace", "delete",
-        "hard_delete", "delete_reason",
+        "hard_delete", "delete_reason", "restore", "old_str", "new_str",
     ),
     "pulse": ("include_archive",),
     "introspection": ("limit", "offset", "created_date", "created_from", "created_to"),

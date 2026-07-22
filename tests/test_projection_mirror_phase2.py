@@ -1,5 +1,5 @@
 def test_trace_catalog_projection_reports_shadow_role_for_empty_rebuild():
-    from projection_mirror import TraceCatalogProjection
+    from ombrebrain.projection.projection_mirror import TraceCatalogProjection
 
     projection = TraceCatalogProjection()
 
@@ -16,8 +16,8 @@ def test_trace_catalog_projection_reports_shadow_role_for_empty_rebuild():
 
 
 def test_trace_catalog_projection_rebuilds_trace_lifecycle_from_ledger(tmp_path):
-    from ledger_mirror import LedgerMirror
-    from projection_mirror import TraceCatalogProjection
+    from ombrebrain.eventsourcing.ledger_mirror import LedgerMirror
+    from ombrebrain.projection.projection_mirror import TraceCatalogProjection
 
     ledger = LedgerMirror(tmp_path / "events.jsonl")
     ledger.append_event(

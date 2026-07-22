@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import cast
 
+import httpx
 import pytest
 from starlette.applications import Starlette
 
@@ -11,7 +12,7 @@ from server_app import (
     DEFAULT_MAX_MANAGEMENT_REQUEST_BYTES,
     DEFAULT_MAX_MCP_REQUEST_BYTES,
     HTTPRuntimeSettings,
-    MCPAcceptShim,
+    MCPJSONAcceptShim,
     MCPAuthMiddleware,
     NgrokHeaderMiddleware,
     OriginCSRFGuardMiddleware,
@@ -19,6 +20,10 @@ from server_app import (
     build_http_app,
     install_runtime_lifespan,
 )
+
+from tools.current.manifest import REGISTERED_TOOL_NAMES
+
+EXPECTED_PUBLIC_MCP_TOOLS = REGISTERED_TOOL_NAMES
 
 
 class RecordingLogger:
@@ -147,37 +152,251 @@ def test_management_request_limit_is_normalized(raw, expected):
 
 
 @pytest.mark.asyncio
-async def test_accept_shim_adds_both_mcp_media_types():
+@pytest.mark.parametrize(
+    ("accept_headers", "expected"),
+    [
+        ([], b"application/json"),
+        ([(b"accept", b"*/*")], b"*/*, application/json"),
+        (
+            [(b"accept", b"text/event-stream, */*")],
+            b"text/event-stream, */*, application/json",
+        ),
+        (
+            [(b"accept", b"application/*; q=0.8")],
+            b"application/*; q=0.8, application/json",
+        ),
+    ],
+)
+async def test_json_accept_shim_normalizes_missing_or_wildcard_accept(
+    accept_headers,
+    expected,
+):
     downstream = RecordingASGIApp()
-    middleware = MCPAcceptShim(downstream)
-    messages = []
+    middleware = MCPJSONAcceptShim(downstream)
     scope = {
         "type": "http",
         "path": "/mcp",
-        "headers": [(b"accept", b"application/json")],
+        "headers": [(b"content-type", b"application/json"), *accept_headers],
     }
 
-    await middleware(scope, _empty_receive, _collect_into(messages))
+    await middleware(scope, _empty_receive, _discard_send)
 
-    forwarded = dict(downstream.scopes[0]["headers"])[b"accept"]
-    assert b"application/json" in forwarded
-    assert b"text/event-stream" in forwarded
+    forwarded = dict(downstream.scopes[0]["headers"])
+    assert forwarded[b"accept"] == expected
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path", ["/health", "/mcp-extra", "/mcp-retired"])
-async def test_accept_shim_leaves_non_mcp_routes_unchanged(path):
+@pytest.mark.parametrize(
+    ("path", "accept"),
+    [
+        ("/mcp", b"application/json"),
+        ("/mcp", b"text/event-stream"),
+        ("/mcp", b"*/*;q=0"),
+        ("/health", b"*/*"),
+    ],
+)
+async def test_json_accept_shim_preserves_explicit_or_non_mcp_accept(path, accept):
     downstream = RecordingASGIApp()
-    middleware = MCPAcceptShim(downstream)
+    middleware = MCPJSONAcceptShim(downstream)
     scope = {
         "type": "http",
         "path": path,
-        "headers": [(b"accept", b"application/json")],
+        "headers": [(b"accept", accept)],
     }
 
     await middleware(scope, _empty_receive, _discard_send)
 
     assert downstream.scopes[0] is scope
+
+
+@pytest.mark.asyncio
+async def test_kelivo_compatible_stateless_json_handshake_lists_all_tools():
+    """Kelivo 风格多请求握手不应依赖会话头或 SSE 解析。"""
+
+    import server
+
+    assert server.mcp.settings.json_response is True
+    assert server.mcp.settings.stateless_http is True
+    registered = await server.mcp.list_tools()
+    assert [tool.name for tool in registered] == list(EXPECTED_PUBLIC_MCP_TOOLS)
+
+    app = build_http_app(
+        server.mcp,
+        "streamable-http",
+        settings=HTTPRuntimeSettings(
+            auth_required=False,
+            max_request_bytes=DEFAULT_MAX_MCP_REQUEST_BYTES,
+        ),
+        token_validator=lambda *_args, **_kwargs: False,
+        lifecycle=RuntimeLifecycle(logger=RecordingLogger()),
+    )
+    headers = {
+        # 一些简化客户端沿用 HTTP 库默认值；生产中间件需把通配范围落到 JSON。
+        "accept": "*/*",
+        "content-type": "application/json",
+    }
+    protocol_versions = (
+        "2024-11-05",
+        "2025-03-26",
+        "2025-06-18",
+        "2025-11-25",
+    )
+
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://localhost",
+        ) as client:
+            for index, protocol_version in enumerate(protocol_versions, start=1):
+                initialize = await client.post(
+                    "/mcp",
+                    headers=headers,
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": index * 10,
+                        "method": "initialize",
+                        "params": {
+                            "protocolVersion": protocol_version,
+                            "capabilities": {},
+                            "clientInfo": {
+                                "name": "Kelivo MCP",
+                                "version": "1.1.17",
+                            },
+                        },
+                    },
+                )
+                assert initialize.status_code == 200
+                assert initialize.headers["content-type"].startswith(
+                    "application/json"
+                )
+                assert "mcp-session-id" not in initialize.headers
+                initialize_payload = initialize.json()
+                assert (
+                    initialize_payload["result"]["protocolVersion"]
+                    == protocol_version
+                )
+                capabilities = initialize_payload["result"]["capabilities"]
+                assert isinstance(capabilities.get("tools"), dict)
+
+                negotiated = initialize_payload["result"]["protocolVersion"]
+                post_init_headers = dict(headers)
+                if negotiated >= "2025-06-18":
+                    post_init_headers["mcp-protocol-version"] = negotiated
+
+                initialized = await client.post(
+                    "/mcp",
+                    headers=post_init_headers,
+                    json={
+                        "jsonrpc": "2.0",
+                        "method": "notifications/initialized",
+                        "params": {},
+                    },
+                )
+                assert initialized.status_code == 202
+                assert "mcp-session-id" not in initialized.headers
+
+                tools_response = await client.post(
+                    "/mcp",
+                    headers=post_init_headers,
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": index * 10 + 1,
+                        "method": "tools/list",
+                        "params": {},
+                    },
+                )
+                assert tools_response.status_code == 200
+                assert tools_response.headers["content-type"].startswith(
+                    "application/json"
+                )
+                assert "mcp-session-id" not in tools_response.headers
+                tools = tools_response.json()["result"]["tools"]
+                assert [tool["name"] for tool in tools] == list(
+                    EXPECTED_PUBLIC_MCP_TOOLS
+                )
+                assert all(isinstance(tool.get("inputSchema"), dict) for tool in tools)
+
+
+@pytest.mark.asyncio
+async def test_legacy_sse_official_client_lists_all_tools():
+    """Streamable HTTP 的兼容改动不能破坏旧版 SSE 发现路径。"""
+
+    import socket
+
+    import uvicorn
+    from mcp import ClientSession
+    from mcp.client.sse import sse_client
+
+    import server
+
+    app = build_http_app(
+        server.mcp,
+        "sse",
+        settings=HTTPRuntimeSettings(
+            auth_required=False,
+            max_request_bytes=DEFAULT_MAX_MCP_REQUEST_BYTES,
+        ),
+        token_validator=lambda *_args, **_kwargs: False,
+        lifecycle=RuntimeLifecycle(logger=RecordingLogger()),
+    )
+    requests = []
+
+    async def recording_app(scope, receive, send):
+        if scope["type"] == "http":
+            requests.append((scope["method"], scope["path"]))
+        await app(scope, receive, send)
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", 0))
+    sock.listen()
+    port = sock.getsockname()[1]
+    uvicorn_server = uvicorn.Server(
+        uvicorn.Config(
+            recording_app,
+            log_level="warning",
+            lifespan="on",
+        )
+    )
+    server_task = asyncio.create_task(uvicorn_server.serve(sockets=[sock]))
+
+    async def wait_until_started():
+        while not uvicorn_server.started:
+            if server_task.done():
+                await server_task
+            await asyncio.sleep(0.01)
+
+    try:
+        await asyncio.wait_for(wait_until_started(), timeout=10)
+        async with sse_client(
+            f"http://127.0.0.1:{port}/sse",
+            timeout=5,
+            sse_read_timeout=10,
+        ) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                initialized = await asyncio.wait_for(
+                    session.initialize(),
+                    timeout=10,
+                )
+                listed = await asyncio.wait_for(
+                    session.list_tools(),
+                    timeout=10,
+                )
+
+        assert initialized.protocolVersion
+        assert [tool.name for tool in listed.tools] == list(
+            EXPECTED_PUBLIC_MCP_TOOLS
+        )
+        assert ("GET", "/sse") in requests
+        assert any(
+            method == "POST" and path.rstrip("/") == "/messages"
+            for method, path in requests
+        )
+    finally:
+        uvicorn_server.should_exit = True
+        await asyncio.wait_for(server_task, timeout=10)
+        sock.close()
 
 
 @pytest.mark.asyncio
@@ -737,6 +956,29 @@ async def test_auth_middleware_can_be_explicitly_disabled():
     assert downstream.scopes == [scope]
 
 
+@pytest.mark.asyncio
+async def test_auth_middleware_skips_mcp_cors_preflight():
+    downstream = RecordingASGIApp()
+    middleware = MCPAuthMiddleware(
+        downstream,
+        auth_required=True,
+        token_validator=lambda *_args, **_kwargs: pytest.fail(
+            "CORS preflight must not be authenticated"
+        ),
+        auth_mode="token",
+    )
+    scope = {
+        "type": "http",
+        "method": "OPTIONS",
+        "path": "/mcp",
+        "headers": [(b"origin", b"https://polaris.example")],
+    }
+
+    await middleware(scope, _empty_receive, _discard_send)
+
+    assert downstream.scopes == [scope]
+
+
 class RecordingService:
     def __init__(self, name, events):
         self.name = name
@@ -908,18 +1150,80 @@ def test_build_http_app_uses_same_managed_stack_for_both_http_transports(transpo
         "OriginCSRFGuardMiddleware",
         "MCPRequestBodyLimitMiddleware",
         "ManagementRequestBodyLimitMiddleware",
-        "MCPAcceptShim",
         "MCPAuthMiddleware",
         "NgrokHeaderMiddleware",
     }
+    assert ("MCPJSONAcceptShim" in middleware_names) is (
+        transport == "streamable-http"
+    )
     csrf_middleware = next(
         item
         for item in app.user_middleware
         if item.cls is OriginCSRFGuardMiddleware
     )
     assert csrf_middleware.kwargs["public_origin"] == "https://public.example"
+    middleware_order = [item.cls.__name__ for item in app.user_middleware]
+    assert middleware_order.index("CORSMiddleware") < middleware_order.index(
+        "MCPAuthMiddleware"
+    )
+    cors_middleware = next(
+        item for item in app.user_middleware if item.cls.__name__ == "CORSMiddleware"
+    )
+    assert set(cors_middleware.kwargs["expose_headers"]) >= {
+        "Mcp-Session-Id",
+        "WWW-Authenticate",
+        "Ngrok-Skip-Browser-Warning",
+    }
     assert app.state.ombre_http_settings is settings
     assert app.state.ombre_runtime_lifecycle is lifecycle
+
+
+@pytest.mark.asyncio
+async def test_build_http_app_answers_mcp_preflight_before_token_auth():
+    class FakeMCP:
+        def streamable_http_app(self):
+            return Starlette()
+
+    app = build_http_app(
+        FakeMCP(),
+        "streamable-http",
+        settings=HTTPRuntimeSettings(
+            auth_required=True,
+            max_request_bytes=2048,
+            auth_mode="token",
+        ),
+        token_validator=lambda *_args, **_kwargs: pytest.fail(
+            "CORS preflight must not be authenticated"
+        ),
+        lifecycle=RuntimeLifecycle(logger=RecordingLogger()),
+    )
+    messages = []
+    scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "scheme": "https",
+        "method": "OPTIONS",
+        "path": "/mcp",
+        "raw_path": b"/mcp",
+        "query_string": b"",
+        "server": ("ombre.example", 443),
+        "client": ("127.0.0.1", 50000),
+        "headers": [
+            (b"host", b"ombre.example"),
+            (b"origin", b"https://polaris.example"),
+            (b"access-control-request-method", b"POST"),
+            (b"access-control-request-headers", b"authorization,content-type"),
+        ],
+    }
+
+    await app(scope, _empty_receive, _collect_into(messages))
+
+    start = next(message for message in messages if message["type"] == "http.response.start")
+    headers = dict(start["headers"])
+    assert start["status"] == 200
+    assert headers[b"access-control-allow-origin"] == b"*"
+    assert b"POST" in headers[b"access-control-allow-methods"]
+    assert b"authorization" in headers[b"access-control-allow-headers"].lower()
 
 
 def test_build_http_app_rejects_stdio_transport():

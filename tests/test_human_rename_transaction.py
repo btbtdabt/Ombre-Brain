@@ -12,6 +12,9 @@ from web import _shared as sh
 from web import buckets as buckets_web
 
 
+pytestmark = pytest.mark.asyncio
+
+
 async def _make_bucket(bucket_mgr, *, content: str = "old content") -> str:
     bucket_id = await bucket_mgr.create(
         content,
@@ -127,7 +130,6 @@ class _FakeRequest:
         return self._body
 
 
-@pytest.mark.asyncio
 async def test_concurrent_human_name_routes_are_one_full_vault_transaction(
     bucket_mgr,
     monkeypatch,

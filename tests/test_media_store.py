@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from media_store import MediaPersistenceError, MediaStore
+from ombrebrain.storage.media_store import MediaPersistenceError, MediaStore
 
 
 @pytest.mark.asyncio

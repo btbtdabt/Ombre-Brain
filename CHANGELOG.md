@@ -2,49 +2,135 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`p0luz/ombre-brain:<VERSION>`）。
 
+## 2.8.5
+
+### 修复 / Fixed
+
+- 增强 Streamable HTTP 对无法正确处理有状态会话或 SSE 响应的客户端的兼容性，覆盖反馈环境中 Kelivo “能读到 `Ombre Brain` 服务名、但显示 0 工具”的表象：`/mcp` 现在使用无状态、直接 JSON 响应，初始化后无需保存/回传 `Mcp-Session-Id` 也能稳定列出完整的 30 工具 manifest。
+- 删除“主/副 FastMCP 实例 + 启动时操作私有注册表合并”的历史机制；全部公共工具直接注册到唯一实例，避免导入式 ASGI 启动或 SDK 私有结构变化时静默丢失工具。
+- CORS 响应显式暴露 MCP/OAuth 排障头，legacy SSE 启动日志改为输出真实 `/sse` 地址，避免客户端被误导到 `/mcp`。
+- `/mcp` 对省略 `Accept` 或仅发送通配媒体类型的简化客户端自动选择 JSON；显式只接受 SSE 时仍返回协议错误，避免发送客户端无法解析的响应。
+- MCP SDK 声明收紧为 `mcp>=1.27,<2`（生产锁定仍为 1.28.1），防止未来 v2 破坏性变更被非锁定安装静默带入。
+
+### 版本 / Version
+
+- 根目录 `VERSION` 与热更新优先读取的 `src/VERSION` 同步更新为 `2.8.5`。
+
+## 2.8.4
+
+### 修复 / Fixed
+
+- 修复 `digested=1` 只改变字段却仍会出现在无参 `breath()` 的问题：spontaneous/dream 策略现在硬过滤已消化桶，不再受 importance、pinned 或 3% 偶遇影响；带 query 的真实命中、importance 审计和 catalog 目录仍可显式找回。查询结果不足时追加的“非检索命中”随机漂浮也改用 spontaneous 策略，不再旁带 digested、dont_surface 或 anchor 桶。
+
+### 版本 / Version
+
+- 根目录 `VERSION` 与热更新优先读取的 `src/VERSION` 同步更新为 `2.8.4`，Dashboard、运行时与热更新检查显示一致。
+
+## 2.8.3
+
+### 修复 / Fixed
+
+- 修复"我 / Self"面板（dashboard.html 左下角 `I` 按钮）在窄屏设备上宽度固定溢出屏幕、显示不全的问题；连带把详情侧滑面板与自我面板的宽度都改成 `min(定宽, calc(100vw - 边距))` 自适应公式，替换掉原来"基础规则写死宽度 + 单独一条 `@media` 补丁"的模式，避免同类遗漏再次出现。
+- 修复"我 / Self"面板关闭按钮未贴靠面板右边缘的问题。
+- 修复手机端「写一封信」日期选择器点不开：原实现把真实 `<input type="date">` 藏成 1px 透明元素，靠 JS 调 `showPicker()`/`click()` 唤起原生选择器，但 iOS Safari 等移动浏览器只认落在控件本体上的真实点击，程序模拟点击不生效；现在改为直接展示原生日期输入框，任何设备直接点选。
+
+### 版本 / Version
+
+- 根目录 `VERSION` 与热更新优先读取的 `src/VERSION` 同步更新为 `2.8.3`。
+
+## 2.8.2
+
+### 修复 / Fixed
+
+- 修复 Zeabur 等跨域部署在 Streamable HTTP + 静态 Token 鉴权下无法连接 `/mcp`：浏览器的 `OPTIONS /mcp` 预检现在显式跳过 MCP 鉴权，CORS 中间件调整到鉴权外层，预检不再返回无 CORS 响应头的 401；鉴权失败响应也会携带正确的 CORS 响应头，Polaris 网页版和桌面版可正常发起后续带 Token 请求。
+
+### 维护 / Maintenance
+
+- 完成 2.7.8 启动、跨越 2.7.8—2.7.10 三个正式版本的首批 `src/` 扁平模块兼容观察期：经生产引用、测试、活动文档与部署入口审计后，移除 memory/plan/provider/public-origin/scoring、storage/deployment、ledger/projection 共 16 个顶层兼容壳；仓库测试全部切换到 `ombrebrain.*` canonical package，避免内部代码继续延长旧路径生命周期。
+- 修正内部资料忽略边界：`docs/superpowers/`、代码健康审计、内部 TODO 与旧版发布草稿不再受 Git 跟踪，并补入 `.gitignore`；运行时覆盖矩阵不再发布内部计划文件路径。
+
+### 测试 / Tests
+
+- 新增鉴权中间件预检放行与完整 Streamable HTTP 中间件栈回归，覆盖静态 Token 模式下 `OPTIONS /mcp` 返回 200、允许 `POST` 及 `Authorization`/`Content-Type` 请求头。
+
+### 版本 / Version
+
+- 根目录 `VERSION` 与热更新优先读取的 `src/VERSION` 同步更新为 `2.8.2`。
+
 ## 2.8.0
 
 ### 新增 / Added
 
 - 将 P0luz Dashboard 与 current / Ying 功能整合为同一个应用，统一由 `/` 提供，并按 Shared、Memory、Models & Data、System 四个工作区组织；`/memory-dashboard` 与 `/dashboard` 保留为兼容入口，不再维护第二套页面。
 - 在统一外壳中补齐提醒、自省、梦境、暗房、人物画像、长期画像、记忆洞察、Gateway 注入、模型配置、完整记忆库、兼容导出与迁移等现有功能，同时保留 P0luz 的系统管理能力。
-- Embeddings 编辑器现在实际挂载并唯一归属于 Models & Data；System 只保留跳转入口和只读诊断，不再提供第二套向量配置保存表单。
+- Embeddings 编辑器唯一归属于 Models & Data；System 只保留跳转入口和只读诊断，不再提供第二套向量配置保存表单。
 
 ### 修复 / Fixed
 
 - 去除重复导航、重复配置编辑器和双 Dashboard 状态漂移；桶列表、身份资料与功能面板现在共享同一套路径、请求、缓存和路由核心。
 - 桶轻量列表改为服务端有界分页：后端按全局顺序只保留当前 `offset + limit` 窗口，并只为所选页读取预览；`type` 使用精确匹配，`tags` 使用全部标签精确包含过滤，非法或过大的分页/过滤参数会在边界拒绝。
 - 修复并发刷新、过期详情回写、反思历史分页漂移以及延迟写操作可能作用到错误对象的问题。
+- 保留 `hold` 与 `grow(items=...)` 的自动合并能力，同时在相似候选之后增加保守的“同一具体事件”判定；仅主题、人物或情绪相似，日期、场景或关键动作不同的独立事件不再串入旧桶，完全相同正文继续保持幂等。
+- 修复 `breath_advanced(catalog=True)` 忽略 `tags` 与 `max_results`：目录模式现在执行 tags AND 过滤并遵守返回上限，仍保持 0 LLM、只读元数据。
+- `breath_search` 与 `breath_advanced` 新增 `date_from/date_to` 创建日期过滤，支持 `YYYY-MM-DD` 与 ISO 8601；自由联想也受同一日期范围约束，避免按日期检索时漂出范围外旧桶。
+- 为语义检索补充不记录查询原文的诊断日志，包含查询哈希、向量候选与得分、embedding 引擎和耐久 outbox 状态，便于区分索引未更新、服务不可用和排序结果问题。
+- OAuth 授权页增加提交中状态、重复提交保护、30 秒超时提示与诊断编号；服务端按同一编号记录提交、密码失败和跳转阶段，便于定位授权页面卡住。
 
 ### 安全 / Security
 
-- Dashboard 配置写入增加完整字段验证、秘密遮罩和托管 `OMBRE_ENV_PATH` 持久化事务：受支持部署把 Dashboard 管理值放在持久目录中的独立 `.ombre-managed.env`，与 Compose / shell 读取的操作员 `.env` 隔离，并共用锁与原子更新；运行时重建、YAML 或环境提交任一步失败都会回滚已暂存状态，秘密不会提前发布，含引号与反斜杠的 Key 也会安全序列化。
-- Gateway 上游只允许新建 `OMBRE_GATEWAY_*_API_KEY` 专用密钥引用；旧引用与隐藏直写密钥仅可在目标地址完全不变时保留，避免把 OAuth、Dashboard、基础设施或其他进程秘密转发到可编辑的上游地址。
-- 收紧静态资源路径、写操作重放和动态渲染边界，避免路径穿越、重复提交与不受信内容注入。
+- Dashboard 配置写入增加字段验证、秘密遮罩和托管 `OMBRE_ENV_PATH` 持久化事务；运行时、YAML 或环境提交失败会回滚暂存状态。
+- Gateway 上游只允许新建 `OMBRE_GATEWAY_*_API_KEY` 专用密钥引用；收紧静态资源路径、写操作重放和动态渲染边界。
 
-### 验证 / Verification
+### 行为说明 / Behavior
 
-- 本地核验完成：`pytest` 2535 passed / 75 skipped / 0 failed，Ruff clean，变更的 production Pyright 0，全树 Pyright 469 errors / 21 warnings（较记录的 530 / 21 已下降且 warning 未增加），Node syntax clean，`docker build .` successful，独立 code、Python、TypeScript、安全和 root reviews 的 findings 已全部清零。
-- 这些结果对应最终落地的单一 canonical Dashboard、bounded/nonblocking Buckets、transactional config/Gateway、verified backup tickets、备份清单 canonical 版本元数据、Ying Reflection/profile/insights parity，以及 Amy identity fix。
-- staging 与 production 仍然 pending；此处不记录任何尚未实际完成的部署结果。
+- 保留检索命中不足时浮现 3–5 条低权重旧记忆的自由联想设计，并以“非检索命中”独立分区明确标记。
+- 保留核心准则无条件注入设计；传入 tags 时会明确说明 tags 只过滤普通浮现记忆。
+
+### 部署 / Deployment
+
+- 新建并验证 Zeabur 一键部署模板 `WB5ZKE`，README 部署按钮已指向新模板，同时保留 Deploy from GitHub 备用流程。
 
 ### 版本 / Version
 
 - 根目录 `VERSION` 与热更新优先读取的 `src/VERSION` 同步更新为 `2.8.0`。
 
+## 2.7.9
+
+### 修复 / Fixed
+
+- 修复 `grow` 长内容拆分所用的 digest prompt 未注入第一人称视角铁律：现在与 dehydrate/merge 共用同一规则，AI 自身保持“我”，人类一方保持配置名称，并禁止动作或情绪主语翻转（#62）。
+
+### 文档 / Documentation
+
+- 补清 Zeabur/Render 反代后的 OAuth 公网来源配置：标准 `X-Forwarded-Proto` / `X-Forwarded-Host` 已受支持，但只采信可信最后一跳；托管平台应在安全部署向导填写 HTTPS 公网地址，避免 OAuth 元数据回落为容器内部 `http://`，同时禁止用 `0.0.0.0/0` 放宽代理信任（#63）。
+
+### 版本 / Version
+
+- 根目录 `VERSION` 与热更新优先读取的 `src/VERSION` 同步更新为 `2.7.9`。
+
+## 2.7.8
+
+### 维护 / Maintenance
+
+- 渐进整理 `src/` 根目录：将领域消息、计划历史、服务商识别、公开来源校验、部署模式、检索评分、媒体与备份存储、embedding outbox、ledger 及 projection 实现迁入 `ombrebrain/` 对应领域包；仓库内生产代码改用新的 canonical package 路径。
+- 旧的顶层 Python 导入路径暂时保留为轻量兼容壳。本版本开始计算三个正式版本的弃用观察期：`2.7.8`、`2.7.9`、`2.7.10` 保持兼容；最早在 `2.7.11` 经引用、文档、部署和完整回归审计后删除，不能仅按版本号自动移除。
+
+### 版本 / Version
+
+- 根目录 `VERSION` 与热更新优先读取的 `src/VERSION` 同步更新为 `2.7.8`。
+
 ## 2.7.7
 
 ### 修复 / Fixed
 
-- 修复双 Dashboard 入口的路径和身份契约：`/` 继续作为 P0 / system Dashboard，`/memory-dashboard` 与 `/dashboard` 继续指向 current / Ying 记忆 Dashboard，并补上两边的交叉跳转入口。
-- 修复 memory Dashboard 把自身路由误当作部署前缀、继而错误拼接 API 与静态资源路径的问题；同时保留反向代理使用真实路径前缀时的挂载兼容性。
-- `auth/status` 只在已认证时返回最小身份信息，避免前端误用旧的默认昵称；`/api/settings/human` 在 human 未显式设置时改为回退到 identity 里的展示名，而不是固定回退到 `人类`。
-- 身份称呼的脱水、导入、同步旧记忆与 Dashboard 展示统一使用同一套有效值规则，显式 human 覆盖 identity，清空时恢复经过验证的 identity 展示名；无 identity 的旧安装继续稳定沿用历史默认值并迁移旧的 `用户` 称呼。
-- 桶列表加载增加有界超时与可见重试状态，避免长时间卡在“加载中”；分类目录不再阻塞桶列表；认证状态读取失败不再假装已登录，登录成功后会立即启动数据加载。瞬时网关重试仅用于 GET/HEAD，避免重复提交写操作。
+- 修复双 Dashboard 入口的路径和身份契约、反向代理路径前缀识别以及登录后的数据加载流程。
+- 身份称呼的脱水、导入、同步旧记忆与 Dashboard 展示统一使用同一套有效值规则；显式 human 覆盖 identity，清空时恢复经过验证的 identity 展示名。
+- 桶列表加载增加有界超时与可见重试状态，分类目录不再阻塞桶列表；瞬时网关重试仅用于 GET/HEAD。
+- `trace` 正式支持 `old_str/new_str` 原文片段局部替换：在单桶跨进程锁内读取完整正文并仅替换唯一的逐字命中，长 pinned 桶尾部同样有效；零命中、重叠或普通多命中、替换后正文为空都会明确拒绝且不写盘，`new_str=""` 可删除不会清空整桶的局部片段。替换后的正文继续受 50KB 上限约束并正常重建 embedding，plan 并发编辑也会在锁内追加 change log。`content` 与局部替换互斥，未知或拼错的 trace 参数也不再被 FastMCP 静默吞掉后误报“没有任何字段需要修改”。
 
-### 维护 / Maintenance
+### 版本 / Version
 
-- 根目录 `VERSION` 与热更新优先读取的 `src/VERSION` 同步更新为 `2.7.7`。
+- 根目录 `VERSION` 与热更新优先读取的 `src/VERSION` 同步更新为 `2.7.7`，Dashboard、运行时和热更新检查显示一致。
 
 ## 2.7.6
 

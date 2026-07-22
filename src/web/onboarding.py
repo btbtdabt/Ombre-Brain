@@ -21,7 +21,7 @@ import yaml
 from starlette.requests import Request
 from starlette.responses import Response
 
-from deployment_profile import (
+from ombrebrain.security.deployment_profile import (
     build_profile_patch,
     effective_configuration_report,
     profile_catalog,

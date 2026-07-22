@@ -22,7 +22,10 @@ from starlette.applications import Starlette
 from starlette.routing import Mount
 from starlette.types import ASGIApp
 
-from public_origin import configured_public_origin, normalize_public_origin
+from ombrebrain.security.public_origin import (
+    configured_public_origin,
+    normalize_public_origin,
+)
 from utils import parse_bool
 from web.request_limits import (
     MCPRequestBodyLimitMiddleware,
@@ -233,6 +236,7 @@ class MCPAuthMiddleware:
         path = str(scope.get("path", ""))
         if (
             scope.get("type") == "http"
+            and str(scope.get("method", "")).upper() != "OPTIONS"
             and self.auth_required
             and self.path_matcher(path)
         ):
@@ -297,10 +301,15 @@ class MCPAuthMiddleware:
         await self.app(scope, receive, send)
 
 
-class MCPAcceptShim:
-    """Ensure MCP clients advertise both supported response media types."""
+class MCPJSONAcceptShim:
+    """为省略或通配 ``Accept`` 的 Streamable HTTP 客户端选择 JSON。
 
-    _REQUIRED = (b"application/json", b"text/event-stream")
+    FastMCP 会按 MCP 规范拒绝没有明确声明响应媒体类型的 POST。部分简化
+    客户端只发送浏览器/HTTP 库默认的 ``*/*``，虽然它在 HTTP 语义上本就
+    接受 JSON，却会因此在 ``tools/list`` 前收到 406。这里只把“缺失”补成
+    JSON、把通配范围补充为 JSON；显式只接受 SSE 等媒体类型时保持原样，
+    避免向客户端返回它没有声明能够解析的响应。
+    """
 
     def __init__(
         self,
@@ -311,34 +320,62 @@ class MCPAcceptShim:
         self.app = app
         self.path_matcher = path_matcher
 
+    @staticmethod
+    def _wildcard_allows_json(media_range: bytes) -> bool:
+        parts = [part.strip().lower() for part in media_range.split(b";")]
+        if not parts or parts[0] not in (b"*/*", b"application/*"):
+            return False
+        for parameter in parts[1:]:
+            key, separator, value = parameter.partition(b"=")
+            if separator and key.strip() == b"q":
+                try:
+                    quality = float(value.strip())
+                except ValueError:
+                    return False
+                return 0 < quality <= 1
+        return True
+
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
         if scope.get("type") == "http" and self.path_matcher(
             scope.get("path")
         ):
             headers = list(scope.get("headers", []))
-            accept_index = next(
-                (
-                    index
-                    for index, (key, _value) in enumerate(headers)
-                    if key.lower() == b"accept"
-                ),
-                -1,
+            accept_values = [
+                value
+                for key, value in headers
+                if key.lower() == b"accept"
+            ]
+            combined = b", ".join(accept_values).strip()
+            raw_media_ranges = [
+                item.strip()
+                for item in combined.lower().split(b",")
+                if item.strip()
+            ]
+            media_ranges = [
+                item.split(b";", 1)[0].strip()
+                for item in raw_media_ranges
+            ]
+            has_json = b"application/json" in media_ranges
+            accepts_wildcard = any(
+                self._wildcard_allows_json(item)
+                for item in raw_media_ranges
             )
-            current = headers[accept_index][1].lower() if accept_index >= 0 else b""
-            missing = [value for value in self._REQUIRED if value not in current]
-            if missing:
-                required = b", ".join(missing)
-                if accept_index >= 0 and headers[accept_index][1].strip():
-                    headers[accept_index] = (
-                        headers[accept_index][0],
-                        headers[accept_index][1] + b", " + required,
-                    )
-                elif accept_index >= 0:
-                    headers[accept_index] = (headers[accept_index][0], required)
-                else:
-                    headers.append((b"accept", required))
+
+            if not combined or (accepts_wildcard and not has_json):
+                normalized = (
+                    b"application/json"
+                    if not combined
+                    else combined + b", application/json"
+                )
+                headers = [
+                    (key, value)
+                    for key, value in headers
+                    if key.lower() != b"accept"
+                ]
+                headers.append((b"accept", normalized))
                 scope = dict(scope)
                 scope["headers"] = headers
+
         await self.app(scope, receive, send)
 
 
@@ -696,13 +733,6 @@ def build_http_app(
 
     install_runtime_lifespan(app, lifecycle)
     app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
-        expose_headers=["*"],
-    )
-    app.add_middleware(
         OriginCSRFGuardMiddleware,
         mcp_path_matcher=mcp_path_matcher,
         public_origin=settings.public_origin,
@@ -717,7 +747,11 @@ def build_http_app(
         max_bytes=settings.max_management_request_bytes,
         mcp_path_matcher=mcp_path_matcher,
     )
-    app.add_middleware(MCPAcceptShim, path_matcher=mcp_path_matcher)
+    if transport == "streamable-http":
+        app.add_middleware(
+            MCPJSONAcceptShim,
+            path_matcher=mcp_path_matcher,
+        )
     app.add_middleware(
         MCPAuthMiddleware,
         auth_required=settings.auth_required,
@@ -726,6 +760,22 @@ def build_http_app(
         path_matcher=mcp_path_matcher,
         resource_path="/mcp",
         public_origin=settings.public_origin,
+    )
+    # Starlette wraps middleware in reverse registration order.  CORS must be
+    # outside MCP auth so browser preflights never receive a bare 401 and auth
+    # challenges/errors still carry the appropriate CORS response headers.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+        # 携带凭据时，部分浏览器不把通配符视为可读响应头。
+        # 显式暴露 MCP/OAuth 排障需要的字段。
+        expose_headers=[
+            "Mcp-Session-Id",
+            "WWW-Authenticate",
+            "Ngrok-Skip-Browser-Warning",
+        ],
     )
     # Outermost: must still fire on auth-rejected/error responses, not just
     # successful tool calls, so add it last (see NgrokHeaderMiddleware).

@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 import yaml
 
-from deployment_profile import (
+from ombrebrain.security.deployment_profile import (
     build_profile_patch,
     effective_configuration_report,
     normalize_public_https_origin,

@@ -64,12 +64,12 @@ P0luz 的 14 个核心工具与 current/Yinglianchun 的 16 个扩展工具全�
 
 | 工具 | 一句话 |
 |---|---|
-| `breath` | 睁眼。**0 参数**，让权重最高的未解决事浮现 + 置顶核心准则。**每次对话第一件事**。故意做成 0 参数：claude.ai 按需加载工具时会跳过参数复杂的工具，塞太多参数会导致它常年加载不上。 |
-| `breath_search` | 按关键词 / 语义找记忆：`query`（必填）/ `domain` / `max_results`。融合关键词/BM25 + 语义检索，向量不可用时自动退回关键词检索。 |
+| `breath` | 睁眼。**0 参数**，让权重最高、未解决且未标记 digested 的事浮现 + 置顶核心准则；每条正文后附一行简洁 Footprint。digested 只从默认/被动浮现隐藏，仍可按 query 找回。**每次对话第一件事**。故意做成 0 参数：claude.ai 按需加载工具时会跳过参数复杂的工具，塞太多参数会导致它常年加载不上。 |
+| `breath_search` | 按关键词 / 语义找记忆：`query`（必填）/ `domain` / `max_results`。融合关键词/BM25 + 语义检索，向量不可用时自动退回关键词检索。可命中已归档记忆，但只提示足迹与明确恢复调用，不会自动恢复。 |
 | `breath_advanced` | `breath` 的完整参数版：`catalog=True` 目录模式（每桶一行元数据，0 LLM，最省 token）、`tags`、`importance_min`、`valence`/`arousal`、`max_tokens` 等精细控制，日常用不到时用前两个就够。 |
 | `hold` | 记下当下一件事（一句话级）。自动打标 + 与近似桶合并；打标失败时仍会原样落盘，绝不压缩正文。所有记忆的向量索引都在原文落盘后由后台生成，失败会自动重试。`pinned=True` 钉为永久核心；`feel=True` 写第一人称感受。 |
 | `grow` | 整理一段长内容（日记 / 总结），自动拆成 2~6 条独立桶。要存多条时用它，别连续 `hold`。 |
-| `trace` | 唯一的元数据写入口：resolved / pinned / 改情感坐标 / 替换正文 / 删除到档案 / 改 plan 状态。只传要改的字段。 |
+| `trace` | 唯一的元数据写入口：resolved / pinned / 改情感坐标 / 替换正文 / 删除到档案 / 改 plan 状态。长正文可用 `old_str/new_str` 做唯一片段的原子局部替换；只传要改的字段。 |
 | `dream` | 做梦消化最近窗口（默认 48h）有变动的记忆。**不是义务**，需要消化时再调。 |
 
 ### 低频 7 个
@@ -92,6 +92,8 @@ P0luz 的 14 个核心工具与 current/Yinglianchun 的 16 个扩展工具全�
 | Darkroom | `darkroom_enter` / `darkroom_rooms` / `darkroom_view` / `darkroom_delete` / `darkroom_status` / `darkroom_release` |
 | 提醒 | `reminder_create` / `reminder_list` / `reminder_update` |
 | 维护 | `entity_edge_backfill` |
+
+归档记忆若经 `breath_search` 命中，会显示 `trace(bucket_id="...", restore=True)`。只有在判断它对当下有帮助、值得再次回忆后才调用；`restore=True` 必须单独使用，查询本身不会改变记忆状态。
 
 > 给模型的完整使用约定（含示例、边界、返回提示）见 [docs/CLAUDE_PROMPT.md](docs/CLAUDE_PROMPT.md)；逐工具技术规格见 [docs/INTERNALS.md](docs/INTERNALS.md) §3。
 
@@ -384,6 +386,26 @@ Authorization: Bearer 你的Token
 Ombre-MCP-Token: 你的Token
 ```
 
+在 **Kelivo** 里请选 `Streamable HTTP`，导入 JSON 时使用它要求的 `baseUrl`（不是其他客户端常用的 `url`）：
+
+```json
+{
+  "mcpServers": {
+    "ombre-brain": {
+      "name": "Ombre Brain",
+      "type": "streamableHttp",
+      "isActive": true,
+      "baseUrl": "https://ombre.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer <OMBRE_MCP_TOKEN>"
+      }
+    }
+  }
+}
+```
+
+截至 Kelivo v1.1.17，常规远程 MCP 配置没有接入交互式 OAuth 授权流程，因此建议 OB 选“静态 Token 鉴权”（除非你自行获取并维护 OAuth access token）。连接后还要在 Kelivo 中把该 MCP 服务分配给当前助手/会话；否则服务可以显示已连接，但模型不会获得其工具。
+
 （不支持把 Token 放进 URL 查询参数——`/mcp` 能读写全部记忆，查询参数更容易被隧道/反代/浏览器历史记录留痕。）
 
 > ⚠️ **安全提醒**：静态 Token 等同万能密钥，泄露后果和关闭鉴权一样。请勿把服务直接暴露公网，妥善保管并定期轮换该 Token。
@@ -394,7 +416,7 @@ Ombre-MCP-Token: 你的Token
 
 适合：在手机上用 **Operit** 等本地 MCP 客户端，通过 **Termux / Proot** 跑 Ombre Brain，客户端灯常亮黄、连不上 `/mcp`。
 
-先说结论：**streamable-http 传输本身在 Proot 下没有已知的不兼容**——它就是普通的 HTTP + SSE，Proot 对回环 HTTP 是透明的。能用 bash 存进记忆，说明 Python、依赖、磁盘、端口都是好的；黄灯几乎都卡在 `/mcp` 的**握手环节**。按下面三步逐个对齐，基本能覆盖：
+先说结论：**streamable-http 传输本身在 Proot 下没有已知的不兼容**——它是普通 HTTP + JSON-RPC（协议也允许 SSE，但 OB 2.8.5 的 `/mcp` 直接返回 JSON），Proot 对回环 HTTP 是透明的。能用 bash 存进记忆，说明 Python、依赖、磁盘、端口都是好的；黄灯几乎都卡在 `/mcp` 的**握手环节**。按下面三步逐个对齐，基本能覆盖：
 
 1. **transport 必须是 `streamable-http`**
    默认是 `stdio`——**stdio 根本不开 HTTP 服务**，本地桥自然连不上。config.yaml 里写 `transport: streamable-http`，或设环境变量 `OMBRE_TRANSPORT=streamable-http`，然后重启。
@@ -583,15 +605,22 @@ Render 自带 HTTPS，可直接在 Claude.ai 添加，无需额外 Tunnel。
 
 ### Zeabur
 
-[![Deploy on Zeabur](https://zeabur.com/button.svg)](https://zeabur.com/templates/OMBRE-BRAIN)
+[![Deploy on Zeabur](https://zeabur.com/button.svg)](https://zeabur.com/templates/WB5ZKE?referralCode=P0luz)
+
+> **模板状态（2026-07-19）**：新版一键部署模板代码为 `WB5ZKE`，已在
+> Zeabur 公开模板目录验证可检索。若平台模板服务临时不可用，仍可按下方
+> **Deploy from GitHub** 步骤部署；仓库 Dockerfile 已完成实际构建和容器
+> bootstrap 验证，不需要改用其他构建方式。
 
 1. Fork 本仓库 → Zeabur **New Project** → **Deploy from GitHub**；根目录 Dockerfile 会被自动识别。
 2. Variables 只填模型所需的 Key（至少 `OMBRE_COMPRESS_API_KEY`）；不要额外设置 `OMBRE_MCP_REQUIRE_AUTH`，避免它覆盖 Dashboard。
 3. Volumes 新建 `data`，挂载路径必须是 `/app/buckets`。这是记忆、OAuth 客户端注册和 `config.yaml` 的共同持久目录。
-4. 绑定 HTTPS 域名后打开 Dashboard，进入 `/onboarding`，选择“公网安全模式”、填入域名并保存，然后在平台重启一次服务。
+4. Networking → Port `8000` → **Generate Domain**，绑定 HTTPS 域名。
+5. 打开 Dashboard，进入 `/onboarding`，选择“公网安全模式”，把刚才的 HTTPS 域名填入“公网连接地址”并保存，然后在平台重启一次服务。这个地址是 OAuth 元数据、授权端点和 `/mcp` resource 的权威外部来源；若不填写，容器可能只能看到 Zeabur 内部的 `http://` 地址，Claude.ai 会拒绝连接。
+
+OB 已支持标准 `X-Forwarded-Proto` / `X-Forwarded-Host`，但为防止客户端伪造 OAuth 地址，只采信来自 `OMBRE_TRUSTED_PROXY_CIDRS` 的最后一跳代理。Zeabur、Render 等托管平台的代理网段可能变化，因此推荐使用上面的“公网连接地址”，不要把 `0.0.0.0/0` 加入可信代理。
 
 如果“页面里明明开启 OAuth，重启后却仍显示未开启”，去 **系统体检 → 实际生效配置**：它会同时列出已保存值、当前进程值和覆盖来源。优先删除 Zeabur 中遗留的 `OMBRE_MCP_REQUIRE_AUTH=false`；环境变量优先级高于 `config.yaml`。
-4. Networking → Port `8000` → **Generate Domain**
 
 ### 自有 VPS
 
@@ -779,6 +808,7 @@ docker compose -f deploy/docker-compose.yml up -d
 | 首次进 Dashboard 设置密码页一闪而过变成登录页 | 已修复（v2.0.4+） | 更新到最新版本 |
 | 所有记忆 domain 显示「未分类」 | ① `max_tokens` 太小，JSON 被截断；② **打标模型太弱**（如 7B 级小模型），吐不出可解析的分类 JSON，OB 兜底为「未分类」 | ① 将 `dehydration.max_tokens` 设为 `4096`；② 换一个够强的打标模型（`gemini-2.0-flash`、`deepseek-ai/DeepSeek-V3`、`Qwen/Qwen2.5-72B-Instruct` 等；7B 级免费小模型不足以稳定产出结构化打标）。OB 的 JSON 提取已容忍模型前后的寒暄，但模型返回空/彻底损坏时只能兜底 |
 | Claude.ai 添加 MCP 报「Couldn't register」 | OAuth 端点无法访问（通常是 Tunnel 未启动/域名错误） | 先确认 Dashboard 能正常访问，再添加 MCP |
+| Zeabur / Render 上 OAuth 元数据或授权链接生成 `http://`，Claude.ai 拒绝连接 | 反代在容器内使用 HTTP；转发头来自未配置的代理地址时会被安全策略忽略，且“公网连接地址”尚未保存 | Dashboard → `/onboarding` →“公网安全模式”，填入平台分配的 HTTPS 域名并保存，重启后重新添加连接器；不要用 `0.0.0.0/0` 放宽可信代理 |
 | OAuth 授权页正常弹出但密码输入后报错 | Dashboard 密码错误 | 使用 Dashboard 设置时的密码（不是 Cloudflare 密码） |
 | 连接成功但「no tools available」 | URL 末尾路径不是 `/mcp` | 确认连接 URL 末尾是 `/mcp` |
 | 每开新对话工具加载不全 / 偶尔搜不到某个工具 | **不是服务器问题**：同时启用的连接器太多时，Anthropic 客户端会改用 tool_search「延迟加载」，按描述去搜工具，命中带随机性 | 关掉该会话里用不到的其它连接器，把工具总数压到阈值以下即可一次性全部加载；或在 Claude.ai 自定义指令里列出全部工具名引导模型搜索 |

@@ -8,7 +8,11 @@ from backup_manager import VaultBackupManager
 from bucket_manager import BucketManager
 from embedding_engine import EmbeddingEngine
 from letter_service import LetterService
-from media_store import MediaPersistenceError, MediaStore, media_bucket_directory_name
+from ombrebrain.storage.media_store import (
+    MediaPersistenceError,
+    MediaStore,
+    media_bucket_directory_name,
+)
 from utils import same_path
 
 

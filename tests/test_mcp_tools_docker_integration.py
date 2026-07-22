@@ -30,6 +30,7 @@ EXPECT_COMPRESSION_PROVIDER = os.environ.get(
 pytestmark = pytest.mark.skipif(not MCP_URL, reason="Docker MCP integration service is not configured")
 
 EXPECTED_TOOLS = set(EXPECTED_PARAMETERS)
+EXPECTED_TOOL_ORDER = tuple(EXPECTED_PARAMETERS)
 EXPECTED_TOOL_PROPERTIES = {
     name: set() if name == "breath" else set(parameters)
     for name, parameters in EXPECTED_PARAMETERS.items()
@@ -44,8 +45,8 @@ class MCPClient:
     def __init__(self, url: str):
         self.url = url
         self.client = httpx.Client(timeout=30.0, trust_env=False)
-        self.session_id = ""
         self.request_id = 0
+        self.protocol_version = ""
 
     def close(self):
         self.client.close()
@@ -63,28 +64,32 @@ class MCPClient:
 
     def _post(self, payload: dict, *, expect_body: bool = True) -> dict:
         headers = {
-            "Accept": "application/json, text/event-stream",
+            # Kelivo 兼容路径：只接受 JSON，不保存或回传会话头。
+            "Accept": "application/json",
             "Content-Type": "application/json",
         }
-        if self.session_id:
-            headers["Mcp-Session-Id"] = self.session_id
+        if self.protocol_version >= "2025-06-18":
+            headers["MCP-Protocol-Version"] = self.protocol_version
         response = self.client.post(self.url, headers=headers, json=payload)
-        self.session_id = response.headers.get("mcp-session-id", self.session_id)
+        assert "mcp-session-id" not in response.headers
         if not expect_body:
             assert response.status_code in (200, 202, 204)
             return {}
+        assert response.headers.get("content-type", "").startswith("application/json")
         return self._decode(response)
 
-    def initialize(self):
+    def initialize(self, protocol_version: str = "2025-03-26"):
         payload = self.request(
             "initialize",
             {
-                "protocolVersion": "2025-03-26",
+                "protocolVersion": protocol_version,
                 "capabilities": {},
                 "clientInfo": {"name": "ombre-docker-audit", "version": "1.0"},
             },
         )
         assert payload["result"]["serverInfo"]["name"]
+        assert payload["result"]["protocolVersion"] == protocol_version
+        self.protocol_version = payload["result"]["protocolVersion"]
         self._post(
             {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
             expect_body=False,
@@ -195,8 +200,24 @@ def _hold(mcp_client: MCPClient, marker: str, **overrides) -> str:
     return str(matches[0]["id"])
 
 
+@pytest.mark.parametrize(
+    "protocol_version",
+    ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"),
+)
+def test_kelivo_handshake_versions_list_all_tools_without_session_header(
+    protocol_version,
+):
+    client = MCPClient(MCP_URL)
+    try:
+        client.initialize(protocol_version)
+        assert {tool["name"] for tool in client.list_tools()} == EXPECTED_TOOLS
+    finally:
+        client.close()
+
+
 def test_manifest_exposes_exactly_the_canonical_tools(mcp_client):
     tools = mcp_client.list_tools()
+    assert [tool["name"] for tool in tools] == list(EXPECTED_TOOL_ORDER)
     tools_by_name = {tool["name"]: tool for tool in tools}
     assert set(tools_by_name) == EXPECTED_TOOLS
 
@@ -402,6 +423,39 @@ def test_trace_existing_bucket_without_changes_is_a_clean_noop(mcp_client):
     bucket_id = _hold(mcp_client, _marker("trace-noop"))
     result = mcp_client.call("trace", {"bucket_id": bucket_id})
     assert result == "没有任何字段需要修改。"
+
+
+def test_trace_patches_unique_tail_fragment_of_long_pinned_bucket(mcp_client):
+    marker = _marker("trace-patch-long")
+    filler = f"{marker} 长桶填充行，必须保留。\n" * 700
+    old_str = "目标旧片段第一行🙂\n目标旧片段第二行 **原样**"
+    new_str = "目标新片段第一行🙂\n目标新片段第二行 **原样**"
+    suffix = "\n长桶尾声不能丢。"
+    bucket_id = _hold(
+        mcp_client,
+        filler + old_str + suffix,
+        pinned=True,
+        importance=10,
+    )
+
+    result = mcp_client.call(
+        "trace",
+        {
+            "bucket_id": bucket_id,
+            "old_str": old_str,
+            "new_str": new_str,
+        },
+    )
+    recalled = mcp_client.call(
+        "breath_advanced",
+        {"query": bucket_id, "max_results": 1, "max_tokens": 20_000},
+    )
+
+    assert "content=已局部替换" in result
+    assert new_str in recalled
+    assert old_str not in recalled
+    assert filler[:100] in recalled
+    assert suffix in recalled
 
 
 def test_anchor_marks_a_bucket(mcp_client):

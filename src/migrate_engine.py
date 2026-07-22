@@ -45,25 +45,21 @@ import uuid
 import weakref
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, Optional
+from pathlib import Path
+from typing import Any, AsyncContextManager, Awaitable, Callable, Optional, cast
 
 import frontmatter
 
+from ombrebrain.storage.backup_archive import (
+    BackupArchiveError,
+    extract_backup_archive_file,
+    validate_sqlite_bytes,
+    validate_sqlite_file,
+)
+
 try:
-    from backup_archive import (  # type: ignore
-        BackupArchiveError,
-        extract_backup_archive_file,
-        validate_sqlite_bytes,
-        validate_sqlite_file,
-    )
     from utils import _win_long_path, now_iso, safe_path, sanitize_name  # type: ignore
 except ImportError:  # pragma: no cover
-    from .backup_archive import (  # type: ignore
-        BackupArchiveError,
-        extract_backup_archive_file,
-        validate_sqlite_bytes,
-        validate_sqlite_file,
-    )
     from .utils import _win_long_path, now_iso, safe_path, sanitize_name  # type: ignore
 
 logger = logging.getLogger("ombre_brain.migrate")
@@ -774,6 +770,8 @@ class MigrateEngine:
                 validate_sqlite_file(db_path)
                 has_embeddings = os.path.getsize(db_path) > 0
             else:
+                if not isinstance(source, bytes):
+                    raise BackupArchiveError("embeddings.db 内存快照不是字节数据")
                 db_bytes = bytes(source)
                 validate_sqlite_bytes(db_bytes)
                 has_embeddings = bool(db_bytes)
@@ -862,10 +860,14 @@ class MigrateEngine:
         existing_by_id: dict[str, dict[str, Any]] = {}
         list_all = getattr(self._bucket_mgr, "list_all", None)
         if callable(list_all):
+            list_all_buckets = cast(
+                Callable[..., Awaitable[list[dict[str, Any]]]],
+                list_all,
+            )
             try:
-                existing_buckets = await list_all(include_archive=True)
+                existing_buckets = await list_all_buckets(include_archive=True)
             except TypeError:
-                existing_buckets = await list_all()
+                existing_buckets = await list_all_buckets()
             for existing in existing_buckets or []:
                 if not isinstance(existing, dict):
                     continue
@@ -1029,10 +1031,18 @@ class MigrateEngine:
         """Recheck and commit one ID while holding its normal mutation lock."""
 
         turn_factory = getattr(self._bucket_mgr, "_bucket_turn", None)
-        turn = turn_factory(pb.bucket_id) if callable(turn_factory) else _noop_bucket_turn()
+        turn = (
+            cast(Callable[[str], AsyncContextManager[Any]], turn_factory)(pb.bucket_id)
+            if callable(turn_factory)
+            else _noop_bucket_turn()
+        )
         async with turn:
             finder = getattr(self._bucket_mgr, "_find_bucket_file", None)
-            existing_path = finder(pb.bucket_id) if callable(finder) else None
+            existing_path = (
+                cast(Callable[[str], str | None], finder)(pb.bucket_id)
+                if callable(finder)
+                else None
+            )
 
             # The filesystem state under this lock is authoritative.  A caller
             # cannot forge overwrite/keep_both for an ID that was conflict-free
@@ -1136,13 +1146,13 @@ class MigrateEngine:
         # domain 嵌套路径在深层 buckets_dir 下真的会超限（同款问题 utils.
         # atomic_write_text 已经踩过并修过，这里保持一致而不是各写各的）。
         temp_path = f"{path}.{uuid.uuid4().hex}.tmp"
-        temp_path_long = _win_long_path(temp_path)
+        temp_path_long = _win_long_path(Path(temp_path))
         try:
             with open(temp_path_long, "w", encoding="utf-8") as f:
                 f.write(rendered)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(temp_path_long, _win_long_path(path))
+            os.replace(temp_path_long, _win_long_path(Path(path)))
         finally:
             try:
                 if os.path.exists(temp_path_long):
@@ -1155,8 +1165,8 @@ class MigrateEngine:
         """Atomically create ``path`` while refusing to replace any file."""
 
         temp_path = f"{path}.{uuid.uuid4().hex}.tmp"
-        temp_path_long = _win_long_path(temp_path)
-        target_long = _win_long_path(path)
+        temp_path_long = _win_long_path(Path(temp_path))
+        target_long = _win_long_path(Path(path))
         try:
             with open(temp_path_long, "x", encoding="utf-8") as handle:
                 handle.write(rendered)
@@ -1246,15 +1256,21 @@ class MigrateEngine:
             )
 
             if same_target:
-                os.replace(_win_long_path(staged_path), _win_long_path(target_path))
+                os.replace(
+                    _win_long_path(Path(staged_path)),
+                    _win_long_path(Path(target_path)),
+                )
             else:
                 # Publish without replacement, then remove the still-untouched
                 # source.  If source removal fails, delete the publication and
                 # historical copy; the original remains the sole truth.
-                os.link(_win_long_path(staged_path), _win_long_path(target_path))
+                os.link(
+                    _win_long_path(Path(staged_path)),
+                    _win_long_path(Path(target_path)),
+                )
                 target_created = True
                 try:
-                    os.unlink(_win_long_path(existing_path))
+                    os.unlink(_win_long_path(Path(existing_path)))
                 except Exception:
                     _safe_unlink(target_path)
                     target_created = False

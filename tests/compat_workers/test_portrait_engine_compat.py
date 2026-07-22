@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 
 import pytest
 
@@ -86,7 +87,10 @@ def test_recent_activity_and_handoff_sections_preserve_user_context(worker_confi
         "Amy is validating the P0 worker migration.",
         source_date="2026-07-16",
     )
-    sections = engine.build_handoff_sections(max_recent_items=3)
+    sections = engine.build_handoff_sections(
+        max_recent_items=3,
+        now=datetime(2026, 7, 22, 12, tzinfo=timezone.utc),
+    )
 
     assert result["status"] == "updated"
     assert "Amy is validating the P0 worker migration" in sections["current_focus"]

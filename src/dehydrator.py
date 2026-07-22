@@ -54,13 +54,10 @@ from utils import (
     positive_float,
 )
 
-try:
-    from provider_detect import is_gemini_native_host, strip_native_resource_prefix
-except ImportError:  # pragma: no cover
-    from .provider_detect import (  # type: ignore
-        is_gemini_native_host,
-        strip_native_resource_prefix,
-    )
+from ombrebrain.integrations.provider_detect import (
+    is_gemini_native_host,
+    strip_native_resource_prefix,
+)
 
 logger = logging.getLogger("ombre_brain.dehydrator")
 
@@ -109,12 +106,15 @@ _MERGE_INPUT_LIMIT = 2000     # 新旧各一份
 _ANALYZE_INPUT_LIMIT = 2000
 _DIGEST_INPUT_LIMIT = 5000    # 一天的日记量较大
 _PLAN_JUDGE_INPUT_LIMIT = 1500  # plan 与 new event 各一份
+_SAME_EVENT_INPUT_LIMIT = 1800  # 旧桶与新内容各一份
 
 # --- 各专用调用的 max_tokens 覆盖 ---
 _ANALYZE_MAX_TOKENS = 4096      # Gemini 2.5 thinking 会消耗大量 token，需留足余量
 _DIGEST_MAX_TOKENS = 8192       # 日记拆条内容多，thinking + 输出都需要足量空间
 _PLAN_JUDGE_MAX_TOKENS = 2048   # thinking 模型下 200 token 完全不够
 _PLAN_JUDGE_TEMPERATURE = 0.0   # 判定需确定性
+_SAME_EVENT_MAX_TOKENS = 1024   # 仅返回紧凑 JSON
+_SAME_EVENT_TEMPERATURE = 0.0   # 事件边界判定需确定性
 _DIGEST_TEMPERATURE = 0.0       # 拆条需确定性
 
 # --- 默认情感坐标（与 bucket_manager 中保持一致）---
@@ -126,6 +126,7 @@ _TAGS_MAX = 15           # tags 最多保留几个
 _DOMAIN_MAX = 3          # domain 最多保留几个（rule.md 推荐选 1~2 个）
 _NAME_MAX_CHARS = 20     # suggested_name 上限
 _PLAN_REASON_MAX = 200   # plan 判定 reason 上限
+_SAME_EVENT_REASON_MAX = 200  # 合并边界判定 reason 上限
 _PARSE_ERR_PREVIEW = 200  # JSON 解析失败时日志中 raw 预览长度
 
 # --- importance 范围（与哲学边界一致）---
@@ -1216,7 +1217,8 @@ class Dehydrator:
         调用 LLM API 执行日记整理。
         """
         raw = await self._chat(
-            _render_dehydrator_template(DIGEST_PROMPT_TEMPLATE, self.identity),
+            _render_dehydrator_template(DIGEST_PROMPT_TEMPLATE, self.identity)
+            + _perspective_rule(self.human),
             content[:_DIGEST_INPUT_LIMIT],
             max_tokens=_DIGEST_MAX_TOKENS,
             temperature=_DIGEST_TEMPERATURE,
@@ -1335,6 +1337,47 @@ class Dehydrator:
         except Exception as e:
             logger.warning(f"judge_plan_resolution failed: {e}")
             return {"resolved": False, "confidence": 0.0, "reason": str(e)}
+
+    async def judge_same_event(self, old_memory: str, new_content: str) -> dict:
+        """保守判断两段内容是否属于同一个具体事件。
+
+        主题相似不足以合并；只有后者是前者的补充、进展、纠正或重复表述时
+        才返回 same_event=True。API 不可用或解析失败时保守返回 False。
+        """
+        if old_memory.strip() == new_content.strip():
+            return {"same_event": True, "confidence": 1.0, "reason": "正文完全相同"}
+        if not self.api_available:
+            return {"same_event": False, "confidence": 0.0, "reason": "API 不可用"}
+        system = (
+            "你是一个保守的记忆事件边界判定器。判断新内容与旧记忆是否描述同一个具体事件。"
+            "只有新内容是旧事件的补充、进展、纠正或重复表述时才能判为 true。"
+            "仅主题、人物、情绪或 tags 相似必须判为 false。"
+            "日期不同、场景不同、关键动作不同，或两段各自已是语义闭合的独立事件，必须判为 false。"
+            "有疑问时一律 false。只返回严格 JSON："
+            '{"same_event": true/false, "confidence": 0~1, "reason": "..."}。'
+        )
+        user = (
+            f"OLD MEMORY:\n{old_memory[:_SAME_EVENT_INPUT_LIMIT]}\n\n"
+            f"NEW CONTENT:\n{new_content[:_SAME_EVENT_INPUT_LIMIT]}"
+        )
+        try:
+            raw = await self._chat(
+                system,
+                user,
+                max_tokens=_SAME_EVENT_MAX_TOKENS,
+                temperature=_SAME_EVENT_TEMPERATURE,
+            )
+            if not raw:
+                return {"same_event": False, "confidence": 0.0, "reason": "空响应"}
+            data = json.loads(self._strip_md_fence(raw))
+            return {
+                "same_event": parse_bool(data.get("same_event", False), default=False),
+                "confidence": float(data.get("confidence", 0.0)),
+                "reason": str(data.get("reason", ""))[:_SAME_EVENT_REASON_MAX],
+            }
+        except Exception as e:
+            logger.warning(f"judge_same_event failed: {e}")
+            return {"same_event": False, "confidence": 0.0, "reason": str(e)}
 
     def _completion_options(
         self,

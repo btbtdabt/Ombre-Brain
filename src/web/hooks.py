@@ -23,12 +23,16 @@ import random
 import threading
 import time
 from collections import OrderedDict, deque
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
+from typing import Any, cast
 
+from ombrebrain.policy.surfacing import SurfacePolicyVM
 
 from . import _shared as sh
 
 logger = sh.logger
+_SURFACE_POLICY = SurfacePolicyVM.default()
 
 _HOOK_CONCURRENCY = 2
 _HOOK_RATE_WINDOW_SECONDS = 60.0
@@ -49,6 +53,17 @@ except ImportError:  # pragma: no cover
 
 def _truthy(value) -> bool:
     return str(value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+async def _emit_breath_hook_webhook(payload: dict[str, Any]) -> None:
+    webhook = sh.fire_webhook
+    if not callable(webhook):
+        return
+    callback = cast(
+        Callable[[str, dict[str, Any]], Awaitable[None]],
+        webhook,
+    )
+    await callback("breath_hook", payload)
 
 
 def _hook_setting(name: str, default=None):
@@ -253,7 +268,8 @@ def register(mcp) -> None:
 
         def setting_int(name: str, default: int, minimum: int, maximum: int) -> int:
             try:
-                value = int(_hook_setting(name, default))
+                raw_value: Any = _hook_setting(name, default)
+                value = int(default if raw_value is None else raw_value)
             except (TypeError, ValueError, OverflowError):
                 value = default
             return max(minimum, min(maximum, value))
@@ -272,8 +288,13 @@ def register(mcp) -> None:
                 all_buckets = await sh.bucket_mgr.list_all(include_archive=False)
                 pinned = [
                     bucket for bucket in all_buckets
-                    if bucket["metadata"].get("pinned")
-                    or bucket["metadata"].get("protected")
+                    if (
+                        bucket["metadata"].get("pinned")
+                        or bucket["metadata"].get("protected")
+                    )
+                    and _SURFACE_POLICY.evaluate_bucket(
+                        bucket, mode="spontaneous"
+                    ).allowed
                 ]
                 pinned.sort(
                     key=lambda bucket: (
@@ -289,7 +310,9 @@ def register(mcp) -> None:
                     not in ("permanent", "feel", "plan", "letter", "self", "i")
                     and not bucket["metadata"].get("pinned")
                     and not bucket["metadata"].get("protected")
-                    and not bucket["metadata"].get("dont_surface", False)
+                    and _SURFACE_POLICY.evaluate_bucket(
+                        bucket, mode="spontaneous"
+                    ).allowed
                 ]
                 scored = sorted(
                     unresolved,
@@ -452,7 +475,7 @@ def register(mcp) -> None:
                 if not parts:
                     try:
                         await asyncio.wait_for(
-                            sh.fire_webhook("breath_hook", {"surfaced": 0}),
+                            _emit_breath_hook_webhook({"surfaced": 0}),
                             timeout=3,
                         )
                     except Exception as exc:
@@ -462,9 +485,8 @@ def register(mcp) -> None:
                 body_text = header + "\n---\n".join(parts)
                 try:
                     await asyncio.wait_for(
-                        sh.fire_webhook(
-                            "breath_hook",
-                            {"surfaced": len(parts), "chars": len(body_text)},
+                        _emit_breath_hook_webhook(
+                            {"surfaced": len(parts), "chars": len(body_text)}
                         ),
                         timeout=3,
                     )

@@ -18,7 +18,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from identity import effective_human_name, identity_human_name, validate_human_name
-from memory_messages import resolved_hint
+from ombrebrain.domain.memory_messages import resolved_hint
 from . import _shared as sh
 
 logger = sh.logger

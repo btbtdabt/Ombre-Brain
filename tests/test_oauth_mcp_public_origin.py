@@ -7,10 +7,11 @@ import hashlib
 import json
 import time
 import urllib.parse
+from typing import Any
 
 import pytest
 
-from public_origin import (
+from ombrebrain.security.public_origin import (
     configured_public_origin,
     normalize_http_resource,
     normalize_public_origin,
@@ -266,7 +267,9 @@ async def test_refresh_token_and_both_http_transports_keep_public_resource(
 
     for path, matcher in (("/mcp", None), ("/sse", is_sse_endpoint_path)):
         downstream = RecordingASGIApp()
-        kwargs = {} if matcher is None else {"path_matcher": matcher}
+        kwargs: dict[str, Any] = (
+            {} if matcher is None else {"path_matcher": matcher}
+        )
         middleware = MCPAuthMiddleware(
             downstream,
             auth_required=True,

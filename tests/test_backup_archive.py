@@ -11,7 +11,7 @@ from pathlib import Path
 import frontmatter
 import pytest
 
-from backup_archive import (
+from ombrebrain.storage.backup_archive import (
     BackupArchiveError,
     build_export_archive,
     build_export_archive_file,
@@ -22,7 +22,7 @@ from bucket_manager import BucketManager
 from embedding_engine import EmbeddingEngine
 from migrate_engine import MigrateEngine
 import migrate_engine as migrate_mod
-import backup_archive as archive_mod
+from ombrebrain.storage import backup_archive as archive_mod
 
 
 class _Backend:
@@ -41,7 +41,7 @@ def _config(root):
 def _engine(config, model="test-embedding"):
     engine = EmbeddingEngine(config)
     engine.model = model
-    engine._backend = _Backend()
+    engine.__dict__["_backend"] = _Backend()
     return engine
 
 
@@ -630,7 +630,9 @@ async def test_disk_backed_parse_releases_extracted_payload_after_apply(tmp_path
     assert not os.path.exists(workspace)
     assert migrate._parsed_buckets == []
     assert migrate._zip_db_path == ""
-    assert (await manager.get("memory-1"))["content"] == "important memory"
+    restored = await manager.get("memory-1")
+    assert restored is not None
+    assert restored["content"] == "important memory"
 
 
 @pytest.mark.asyncio

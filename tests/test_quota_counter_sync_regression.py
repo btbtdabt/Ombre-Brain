@@ -32,6 +32,9 @@ class EchoDehydrator:
     async def dehydrate(self, content, meta=None):
         return content
 
+    async def judge_same_event(self, *_args, **_kwargs):
+        return {"same_event": True, "confidence": 0.99, "reason": "配额测试的合并前置"}
+
 
 def install_runtime(bucket_mgr, limits=None):
     rt.config = {"surfacing": {}, "limits": limits or {}}
@@ -56,9 +59,9 @@ class StaticBucketManager:
 def _quota_row(
     bucket_id: str,
     *,
-    importance=9,
+    importance: object = 9,
     bucket_type="dynamic",
-    pinned=False,
+    pinned: object = False,
     protected=False,
     dont_surface=False,
 ):
