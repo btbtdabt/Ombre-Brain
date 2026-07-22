@@ -66,6 +66,15 @@ def test_dashboard_loads_core_features_then_single_bootstrap() -> None:
     )
 
 
+def test_dashboard_cache_busts_the_fixed_memory_care_runtime() -> None:
+    html = _read(DASHBOARD)
+
+    assert (
+        'dashboard-assets/memory-care.js?v=20260722-memory-candidate-fix-v1'
+        in html
+    )
+
+
 def test_bootstrap_adapts_ui_and_legacy_commands_before_feature_loading() -> None:
     source = _read(BOOTSTRAP)
 
