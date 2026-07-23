@@ -8,8 +8,8 @@ verification evidence.
 
 ## Recorded Baselines
 
-- P0luz primary baseline: `v2.7.6` / `6da5158`
-- Yinglianchun secondary baseline: `4e0a546`
+- P0luz primary baseline: `v2.8.5` / `65bf8c3`
+- Yinglianchun secondary baseline: `9393232`
 - Historical deployed root runtime: `8e68a7d`
 - P0luz-base production cutover: `c806f78`
 
@@ -128,9 +128,21 @@ Local verification completed so far for this batch:
   **469/21** baseline without weakening its configuration.
 - Production Docker image `ombre-brain:upstream-sync-20260722`: **built
   successfully**.
-- Staging, production, and public-alignment evidence is recorded after the final
-  reviewed commit is deployed. Until then, the recorded baseline hashes at the
-  top of this document remain unchanged.
+- Exact commit `3c2df50` was built on the VPS as
+  `ombre-brain:staging-3c2df50` and started with image-only code on isolated
+  loopback ports and copied state. All five copied SQLite databases passed
+  `PRAGMA quick_check`; Brain and Gateway health checks returned 200 with no
+  startup errors.
+- Authenticated staging checks returned 200 for the Claude 4.8 and native
+  Gemini 3.5 routes. Streamable HTTP MCP negotiated protocol `2025-06-18`,
+  exposed all **30 tools**, and successfully called the read-only `pulse` tool.
+- The copied Persona database migrated the `affect_delta` exchange-log column,
+  and a unique normal final reply produced a new Persona exchange for its
+  staging session. This verifies that the retained every-final-reply Persona
+  contract still runs after the upstream integration.
+- Both upstream baselines were advanced only after this staging evidence and
+  the completed local/reviewer gates above. Production and public-alignment
+  verification remain pending for the exact final commit.
 
 ### 2026-07-21 Dashboard consolidation and P0 visual contract
 
