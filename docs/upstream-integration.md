@@ -113,11 +113,11 @@ until the exact integration commit passes staging.
 | P0luz `0e83d46` | Merged except for the release-specific archive shortcut | Hot-update dependency comparison, legacy upgrade handling, entrypoint bootstrap, and integrity regressions are retained. The `/requirements.txt export-ignore` shortcut is intentionally superseded because this fork's release lock differs from P0luz's fixed 2.8.4 lock; source constraints and the hashed lock both remain in release archives so dependency changes fail closed. |
 | P0luz `4fb7714` | Merged | Meaning content is restored in the canonical memory detail view with escaped rendering. CI lock regeneration remains pinned to a fixed package-index cutoff. |
 | P0luz `0582a3b` | Merged into current module ownership | Storage/media race hardening, sanitized tool errors, atomic migration/config behavior, bounded API work, OAuth refresh handling, diagnostics offloading, strict MCP schemas, and the added regression coverage are retained. The canonical 30-tool manifest applies strict unknown-argument rejection to the complete public surface rather than duplicating tool definitions in `src/server.py`. |
-| Yinglianchun `0b4a877` | Policy port with richer engine retained | Automatic daily chat-memory extraction now defaults to `off` across the example config, runtime schedulers, API defaults, and Dashboard. Explicitly configured modes still use the modular candidate extraction, validation, and fallback pipeline; the legacy root runtime and wholesale prompt/heuristic removal are superseded by the active P0luz-base implementation. |
+| Yinglianchun `0b4a877` | Policy port with richer engine retained | Automatic daily chat-memory extraction now defaults to `off` across the example config, runtime schedulers, API defaults, and Dashboard. Explicitly configured modes still use the modular candidate extraction, validation, and fallback pipeline; the legacy root runtime and wholesale prompt/heuristic removal are superseded by the active P0luz-base implementation. A one-time Persona schema migration materializes the retained Ying `libido` default in historical rows so copied and upgraded databases pass SQLite integrity checks without changing existing values. |
 
 Local verification completed so far:
 
-- Full suite: **2734 passed / 95 skipped / 0 failed**.
+- Full suite: **2735 passed / 95 skipped / 0 failed**.
 - Repository-wide Ruff: **clean**.
 - Conflict-marker scan: **clean**.
 - All changed Python files: **0 Pyright errors / 0 warnings**. The whole-tree

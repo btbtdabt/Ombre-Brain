@@ -360,6 +360,35 @@ class PersonaStateEngine:
         self._ensure_column(conn, "persona_exchange_log", "affect_delta", "TEXT")
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS persona_schema_migrations (
+                name TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            )
+            """
+        )
+        libido_migration = "materialize_session_libido_v1"
+        if conn.execute(
+            "SELECT 1 FROM persona_schema_migrations WHERE name = ?",
+            (libido_migration,),
+        ).fetchone() is None:
+            # SQLite can synthesize an ALTER TABLE default for old rows without
+            # storing the field in each record. Rewriting once makes the
+            # NOT NULL value physical so PRAGMA quick_check remains clean.
+            conn.execute(
+                """
+                UPDATE persona_session_state
+                SET libido = CAST(libido AS REAL)
+                """
+            )
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO persona_schema_migrations (name, applied_at)
+                VALUES (?, ?)
+                """,
+                (libido_migration, utc_now().isoformat()),
+            )
+        conn.execute(
+            """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_persona_events_exchange_hash
             ON persona_events(profile_id, session_id, exchange_hash)
             WHERE exchange_hash IS NOT NULL

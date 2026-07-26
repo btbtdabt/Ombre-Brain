@@ -134,6 +134,59 @@ def test_persona_initializes_default_global_and_session_state(test_config):
     assert "affinity=" not in state_block
 
 
+def test_persona_materializes_legacy_libido_defaults_once(test_config, tmp_path):
+    db_path = tmp_path / "legacy-persona.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE persona_session_state (
+            profile_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            valence REAL NOT NULL,
+            arousal REAL NOT NULL,
+            mood_label TEXT NOT NULL,
+            session_defensiveness REAL NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (profile_id, session_id)
+        );
+        INSERT INTO persona_session_state (
+            profile_id,
+            session_id,
+            valence,
+            arousal,
+            mood_label,
+            session_defensiveness,
+            updated_at
+        ) VALUES ('legacy', 'session', 0.5, 0.3, 'neutral', 0.1, '2026-01-01T00:00:00Z');
+        """
+    )
+    conn.close()
+
+    PersonaStateEngine(_persona_config(test_config), db_path=str(db_path))
+
+    conn = sqlite3.connect(db_path)
+    libido = conn.execute(
+        """
+        SELECT libido
+        FROM persona_session_state
+        WHERE profile_id = 'legacy' AND session_id = 'session'
+        """
+    ).fetchone()[0]
+    migration_count = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM persona_schema_migrations
+        WHERE name = 'materialize_session_libido_v1'
+        """
+    ).fetchone()[0]
+    quick_check = conn.execute("PRAGMA quick_check").fetchone()[0]
+    conn.close()
+
+    assert libido == pytest.approx(0.18)
+    assert migration_count == 1
+    assert quick_check == "ok"
+
+
 def test_persona_evaluator_prompt_asks_for_chinese_persona_text():
     assert "perceived_intent、surface_trigger、inner_thought 和 residue 必须是自然中文" in POST_REPLY_EVALUATION_PROMPT
     assert "recent_conversation_turns 是最近几轮原始对话" in POST_REPLY_EVALUATION_PROMPT
