@@ -133,6 +133,10 @@ class PersonaStateEngine:
         self.base_url = self.persona_cfg.get("base_url") or "https://api.deepseek.com/v1"
         self.model = self.persona_cfg.get("model") or "deepseek-chat"
         self.thinking_mode = normalize_thinking_mode(self.persona_cfg.get("thinking_mode", ""))
+        self.json_response_format = enabled_value(
+            self.persona_cfg.get("json_response_format"),
+            True,
+        )
         self.temperature = float(self.persona_cfg.get("temperature", 0.1))
         self.max_tokens = int(self.persona_cfg.get("max_tokens", 500))
         self.session_mood_half_life_minutes = float(
@@ -449,8 +453,6 @@ class PersonaStateEngine:
             return {**result, "reason": "llm_unavailable"}
 
         try:
-            options = self._completion_options()
-            options["temperature"] = 0.0
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -475,8 +477,11 @@ class PersonaStateEngine:
                         ),
                     },
                 ],
-                timeout=self.conflict_nudge_timeout_seconds,
-                **options,
+                **self._completion_options(
+                    temperature=0.0,
+                    max_tokens=120,
+                    timeout=self.conflict_nudge_timeout_seconds,
+                ),
             )
             raw = response.choices[0].message.content if response.choices else ""
             parsed = self._parse_json(raw or "")
@@ -752,6 +757,7 @@ class PersonaStateEngine:
                 "mode": self.mode,
                 "model": self.model,
                 "thinking_mode": self.thinking_mode,
+                "json_response_format": self.json_response_format,
                 "base_url": self.base_url,
                 "api_ready": bool(self.api_key),
                 "db_path": self.db_path,
@@ -1634,11 +1640,21 @@ class PersonaStateEngine:
 
     _clamp_float = staticmethod(clamp_float)
 
-    def _completion_options(self) -> dict[str, Any]:
+    def _completion_options(
+        self,
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
         options: dict[str, Any] = {
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
+            "temperature": self.temperature if temperature is None else temperature,
+            "max_tokens": self.max_tokens if max_tokens is None else max_tokens,
         }
+        if timeout is not None:
+            options["timeout"] = timeout
         if self.thinking_mode:
             options["extra_body"] = {"thinking": {"type": self.thinking_mode}}
+        if self.json_response_format:
+            options["response_format"] = {"type": "json_object"}
         return options

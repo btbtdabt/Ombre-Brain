@@ -100,6 +100,35 @@ fixed access token remains a resource-bound compatibility credential.
 
 ## Integration Batch Ledger
 
+### 2026-07-26 Gateway continuation, Persona JSON, and auth cache fixes
+
+This batch reviews `0b4a877..c758a4d` from Yinglianchun. P0luz `main`
+remains at `0582a3b`; the compatible authentication fixes are ported from
+P0luz's non-main `codex/integration-dashboard-auth-fixes` branch without
+advancing the primary baseline or importing its unreleased version metadata.
+
+| Source commit(s) | Disposition | Evidence |
+| --- | --- | --- |
+| Yinglianchun `f7fbfb6` | Ported into the modular Gateway | OpenAI-compatible and native Anthropic routes now retain the exact first-round stable/dynamic injection prefix through tool continuations. Snapshot lookup binds the original message prefix to the model/tool contract, keeps intermediate tool calls and results, expires stale entries, and clears only after a final assistant response. Compatibility tests cover single injection, protocol-tail preservation, contract mismatch, route enablement, and final-only cleanup. |
+| Yinglianchun `c758a4d` | Provider-neutral behavior ported; provider defaults superseded | Persona evaluator and conflict-scout requests use the author's provider-native JSON response option, including the author's focused conflict-scout token/timeout overrides. The option defaults on, remains configurable through YAML and the Dashboard configuration API, and can be disabled for incompatible providers. DeepSeek V4 model/base/thinking defaults are not imported because P0luz's modular defaults and the documented Claude/Gemini production routing contract remain authoritative. |
+| P0luz `a1819f8`, `64b3777` | Ported from the author's non-main integration branch | Dashboard and onboarding `/auth/status` requests explicitly bypass browser caches. The active backend already returned `Cache-Control: no-store`, so the port preserves the richer unified-Dashboard identity payload and retry/abort flow while closing the same stale-auth gap. |
+| P0luz `5e1b2d6` | Superseded by a compatible implementation | The unified Dashboard already displays `error`, then `detail`, then its localized fallback, which preserves the author's backend-login-error behavior and broader current API compatibility. |
+| P0luz `9ef00f4` | Intentionally not merged | This commit only records an unreleased 2.8.11 changelog/version transition on a non-main branch. Runtime fixes are ported independently; official P0luz version ownership remains on the recorded `main` baseline. |
+
+Local verification:
+
+- Focused compatibility suite: **120 passed / 0 failed**.
+- Full suite: **2739 passed / 95 skipped / 0 failed**.
+- Repository-wide Ruff and Dashboard/onboarding JavaScript syntax: **clean**.
+- All changed Python files: **0 Pyright errors / 0 warnings**. The whole-tree
+  debt audit remains **371 errors / 21 warnings**, unchanged from the recorded
+  baseline.
+- Docker image `ombre-brain:upstream-audit-20260726` built successfully, and
+  the changed production modules compiled inside that image.
+
+The Yinglianchun baseline remains at `0b4a877` until this exact runtime commit
+passes isolated staging.
+
 ### 2026-07-25 P0luz 2.8.10 merge and Yinglianchun chat-memory policy port
 
 This batch reviews `65bf8c3..0582a3b` from P0luz and

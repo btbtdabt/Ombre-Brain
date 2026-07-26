@@ -3466,7 +3466,10 @@ async function checkAuth() {
     let lastError = null;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        resp = await fetch(DASHBOARD_PATH.api('/auth/status'), { signal: controller.signal });
+        resp = await fetch(DASHBOARD_PATH.api('/auth/status'), {
+          cache: 'no-store',
+          signal: controller.signal,
+        });
       } catch (e) {
         if (controller.signal.aborted) throw e;
         lastError = e;

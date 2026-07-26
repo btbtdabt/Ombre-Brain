@@ -356,6 +356,7 @@ def test_onboarding_page_has_file_contract_and_safe_json_parser() -> None:
     assert "readJsonSafe" in text
     assert "/api/onboarding/preflight" in text
     assert "/api/onboarding/apply" in text
+    assert "fetch('/auth/status', { cache: 'no-store' })" in text
     assert "已保存公网地址" in text
     assert "当前生效公网地址" in text
     assert "已保存鉴权模式" in text

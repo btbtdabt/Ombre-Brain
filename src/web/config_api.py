@@ -179,6 +179,7 @@ _CURRENT_SECTION_FIELDS: dict[str, frozenset[str]] = {
             "enabled",
             "event_recording_enabled",
             "conflict_nudge_enabled",
+            "json_response_format",
             "model",
             "base_url",
             "api_key",
@@ -1206,6 +1207,7 @@ def _normalize_current_section(
             "enabled",
             "event_recording_enabled",
             "conflict_nudge_enabled",
+            "json_response_format",
         },
         "dream": {
             "enabled",
@@ -1709,6 +1711,9 @@ def _current_public_config(config: Mapping[str, Any]) -> dict[str, Any]:
             ),
             "conflict_nudge_enabled": _parse_bool(
                 persona.get("conflict_nudge_enabled", False), default=False
+            ),
+            "json_response_format": _parse_bool(
+                persona.get("json_response_format", True), default=True
             ),
             "model": str(persona.get("model") or ""),
             "base_url": str(persona.get("base_url") or ""),

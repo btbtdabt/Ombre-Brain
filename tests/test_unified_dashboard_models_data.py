@@ -486,6 +486,7 @@ async def test_config_get_exposes_current_sections_but_never_plaintext_secrets(
             "persona": {
                 "enabled": True,
                 "model": "persona",
+                "json_response_format": False,
                 "api_key": "secret-persona-key",
             },
             "dream": {
@@ -533,6 +534,7 @@ async def test_config_get_exposes_current_sections_but_never_plaintext_secrets(
     assert response.status_code == 200
     assert payload["reranker"]["model"] == "rerank"
     assert payload["persona"]["model"] == "persona"
+    assert payload["persona"]["json_response_format"] is False
     assert payload["dream"]["model"] == "dream"
     assert payload["reflection"]["daily_chat_memory_mode"] == "review"
     assert payload["reflection"]["thinking_mode"] == "enabled"
@@ -620,6 +622,7 @@ async def test_config_post_validates_and_atomically_persists_current_sections_wi
                     "enabled": True,
                     "event_recording_enabled": False,
                     "conflict_nudge_enabled": True,
+                    "json_response_format": False,
                     "model": "persona-v2",
                     "base_url": "https://persona.example/v1",
                 },
@@ -703,6 +706,7 @@ async def test_config_post_validates_and_atomically_persists_current_sections_wi
     assert persisted["gateway"]["upstreams"][0]["gemini_auth"] == "bearer"
     assert persisted["persona"]["model"] == "persona-v2"
     assert persisted["persona"]["conflict_nudge_enabled"] is True
+    assert persisted["persona"]["json_response_format"] is False
     assert persisted["self_anchor"]["entry_bucket_id"] == "self-entry"
     assert "api_key" not in persisted["dehydration"]
     assert "new-runtime-secret" not in json.dumps(persisted)
@@ -1199,6 +1203,7 @@ def test_public_config_uses_runtime_defaults_and_inherited_credentials(
     assert public["persona"]["api_ready"] is True
     assert public["persona"]["has_own_api_key"] is False
     assert public["persona"]["conflict_nudge_enabled"] is False
+    assert public["persona"]["json_response_format"] is True
     assert public["dream"]["model"] == ""
     assert public["dream"]["base_url"] == ""
     assert public["dream"]["effective_model"] == "deepseek-v4-flash"

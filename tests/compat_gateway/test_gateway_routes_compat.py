@@ -1,4 +1,6 @@
 import asyncio
+import json
+from copy import deepcopy
 from types import MethodType
 
 from starlette.responses import JSONResponse
@@ -95,6 +97,7 @@ def _gateway_stream_service(gateway_module):
     service.default_session_id = "compat-session"
     service.upstream_default_model = "claude-opus-4-8-native"
     service.calls = []
+    service.prepare_kwargs = []
     service.upstream_trace_ids = {}
     service.debug_trace = TraceRecorder()
 
@@ -105,6 +108,7 @@ def _gateway_stream_service(gateway_module):
         return None
 
     async def prepare_payload(self, payload, session_id, **kwargs):
+        self.prepare_kwargs.append(kwargs)
         await asyncio.sleep(0.02)
         return payload, [], {}
 
@@ -207,6 +211,10 @@ def test_gateway_routes_apply_stream_keepalives_for_all_protocols(
         "anthropic": records[2]["trace_id"],
         "gemini": records[4]["trace_id"],
     }
+    assert [kwargs["manage_turn_snapshot"] for kwargs in service.prepare_kwargs] == [
+        True,
+        True,
+    ]
 
 
 def test_gateway_rejects_invalid_auth_before_starting_stream(gateway_module):
@@ -228,3 +236,144 @@ def test_gateway_rejects_invalid_auth_before_starting_stream(gateway_module):
     assert b"ombre-gateway-chat-start" not in response.content
     assert service.calls == []
     assert service.debug_trace.records == []
+
+
+def _turn_snapshot_service(gateway_module):
+    service = gateway_module.GatewayService.__new__(gateway_module.GatewayService)
+    service.pending_turn_injections = {}
+    service.turn_injection_snapshot_ttl_seconds = 3600.0
+    service.turn_injection_snapshot_max_per_session = 4
+    return service
+
+
+def test_gateway_turn_snapshot_reuses_one_injection_until_final_response(
+    gateway_module,
+):
+    service = _turn_snapshot_service(gateway_module)
+    source_messages = [
+        {"role": "system", "content": "chat application prompt"},
+        {"role": "user", "content": "查一下旧约定"},
+    ]
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "breath",
+                "parameters": {"type": "object"},
+            },
+        }
+    ]
+    prepared_payload = {
+        "model": "claude-opus-4-8",
+        "messages": service._inject_context_messages(
+            source_messages,
+            "stable recalled context",
+            "live recalled context",
+        ),
+        "tools": tools,
+    }
+
+    snapshot_key = service._remember_turn_injection_snapshot(
+        "session-a",
+        source_messages,
+        prepared_payload,
+        stable_context="stable recalled context",
+        dynamic_context="live recalled context",
+    )
+    continuation_messages = [
+        *deepcopy(source_messages),
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "breath", "arguments": '{"query":"旧约定"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call-1", "content": "约定内容"},
+    ]
+
+    found_key, snapshot = service._find_turn_injection_snapshot(
+        "session-a",
+        continuation_messages,
+        {
+            "model": "claude-opus-4-8",
+            "messages": continuation_messages,
+            "tools": tools,
+        },
+    )
+
+    assert found_key == snapshot_key
+    assert snapshot is not None
+    forwarded_messages = [
+        *deepcopy(snapshot["prepared_messages"]),
+        *deepcopy(continuation_messages[len(source_messages):]),
+    ]
+    serialized = json.dumps(forwarded_messages, ensure_ascii=False)
+    assert serialized.count("stable recalled context") == 1
+    assert serialized.count("live recalled context") == 1
+    assert "call-1" in serialized
+    assert "约定内容" in serialized
+
+    injection_debug = {
+        "turn_injection_snapshot": {
+            "snapshot_key": snapshot_key,
+        }
+    }
+    service._update_turn_injection_snapshot_after_assistant(
+        "session-a",
+        injection_debug,
+        continuation_messages[-2],
+    )
+    assert snapshot_key in service.pending_turn_injections["session-a"]
+
+    service._update_turn_injection_snapshot_after_assistant(
+        "session-a",
+        injection_debug,
+        {"role": "assistant", "content": "这是最后回复。"},
+    )
+    assert "session-a" not in service.pending_turn_injections
+    assert injection_debug["turn_injection_snapshot"]["cleared_after_response"] is True
+
+
+def test_gateway_turn_snapshot_requires_matching_model_and_tool_contract(
+    gateway_module,
+):
+    service = _turn_snapshot_service(gateway_module)
+    source_messages = [{"role": "user", "content": "查记忆"}]
+    tools = [{"type": "function", "function": {"name": "breath"}}]
+    prepared_payload = {
+        "model": "claude-opus-4-8",
+        "messages": service._inject_context_messages(
+            source_messages,
+            "stable",
+            "dynamic",
+        ),
+        "tools": tools,
+    }
+    service._remember_turn_injection_snapshot(
+        "session-contract",
+        source_messages,
+        prepared_payload,
+        stable_context="stable",
+        dynamic_context="dynamic",
+    )
+    continuation_messages = [
+        *source_messages,
+        {"role": "tool", "tool_call_id": "call-1", "content": "result"},
+    ]
+
+    _key, snapshot = service._find_turn_injection_snapshot(
+        "session-contract",
+        continuation_messages,
+        {
+            "model": "different-model",
+            "messages": continuation_messages,
+            "tools": tools,
+        },
+    )
+
+    assert snapshot is None

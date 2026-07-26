@@ -270,6 +270,25 @@ async def test_persona_llm_update_clips_deltas_and_records_event(test_config):
 
 
 @pytest.mark.asyncio
+async def test_persona_requests_provider_native_json_and_allows_opt_out(test_config):
+    enabled = PersonaStateEngine(_persona_config(test_config))
+    enabled.client = FakePersonaClient(_event_payload())
+
+    await enabled.update_from_exchange("session-json-enabled", "爱你", "我也爱你。")
+
+    assert enabled.client.calls[0]["response_format"] == {"type": "json_object"}
+
+    disabled = PersonaStateEngine(
+        _persona_config(test_config, json_response_format=False)
+    )
+    disabled.client = FakePersonaClient(_event_payload())
+
+    await disabled.update_from_exchange("session-json-disabled", "爱你", "我也爱你。")
+
+    assert "response_format" not in disabled.client.calls[0]
+
+
+@pytest.mark.asyncio
 async def test_persona_batches_ordinary_events_but_updates_state(test_config):
     cfg = _persona_config(test_config, event_batch_size=2)
     engine = PersonaStateEngine(cfg)
@@ -455,6 +474,10 @@ async def test_persona_conflict_nudge_is_optional_and_identity_aware(test_config
         }
     ]
     assert payload["latest_user_message"] == "算了，不想说了"
+    assert engine.client.calls[0]["temperature"] == 0.0
+    assert engine.client.calls[0]["max_tokens"] == 120
+    assert engine.client.calls[0]["timeout"] == engine.conflict_nudge_timeout_seconds
+    assert engine.client.calls[0]["response_format"] == {"type": "json_object"}
 
 
 @pytest.mark.asyncio
@@ -716,6 +739,7 @@ async def test_persona_dashboard_payload_lists_state_sessions_and_events(test_co
     assert payload["events"][0]["affect_delta"]["valence"] == pytest.approx(0.05)
     assert payload["config"]["event_recording_enabled"] is True
     assert payload["config"]["model"] == "deepseek-chat"
+    assert payload["config"]["json_response_format"] is True
 
 
 @pytest.mark.asyncio

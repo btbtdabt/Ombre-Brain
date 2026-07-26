@@ -71,6 +71,16 @@ def test_authenticated_work_stays_behind_the_authentication_promise() -> None:
     assert "window.OmbreDashboardAuthenticated !== true" in self_fab
 
 
+def test_auth_status_check_bypasses_browser_cache() -> None:
+    check_auth = _dashboard_section(
+        "async function checkAuth()",
+        "async function doSetup()",
+    )
+
+    assert "cache: 'no-store'" in check_auth
+    assert "signal: controller.signal" in check_auth
+
+
 def test_session_teardown_is_reusable_and_invalidates_sensitive_state() -> None:
     teardown = _dashboard_section(
         "async function clearAuthenticatedDashboardState()",

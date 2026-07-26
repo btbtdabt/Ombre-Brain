@@ -167,7 +167,7 @@ async function saveProfile() {
 
 async function boot() {
   try {
-    const auth = await fetch('/auth/status');
+    const auth = await fetch('/auth/status', { cache: 'no-store' });
     const authData = await readJsonSafe(auth);
     if (!authData.authenticated) { location.href = '/'; return; }
     const response = await fetch('/api/onboarding/profile');
