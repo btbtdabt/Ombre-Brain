@@ -140,7 +140,22 @@ Local verification completed so far:
   - Persona post-reply processing advanced the copied `main` session state on
     the successful Claude final response.
   - Fresh Brain and Gateway logs contained no error or warning entries.
-- Production alignment: **pending**.
+- Production alignment: **complete**.
+  - `fork/main` and the clean VPS production checkout were fast-forwarded to
+    the verified integration tree.
+  - A stopped-service archive of `/srv/ombre-brain` was created before cutover;
+    its stored SHA-256 checksum and tar manifest both verify successfully.
+  - Production Brain and Gateway passed loopback and public health checks, and
+    all 12 live SQLite databases returned `PRAGMA quick_check = ok`.
+  - The production Persona migration marker is present, with all 20 historical
+    session values preserved at `0.18`.
+  - The public production-alignment suite passed Claude 4.8, native Gemini 3.5,
+    relay completion/debug, native Claude MCP tool-loop, and model-routing
+    checks.
+  - Direct authenticated production MCP exposed 30 unique tools and successfully
+    called `pulse`; fresh production logs contained no error or warning entries.
+  - The previous `41b0b2d` Brain and Gateway containers remain stopped under
+    rollback names.
 
 ### 2026-07-22 P0luz 2.8.5 merge and Yinglianchun behavior port
 
