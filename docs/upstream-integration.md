@@ -8,8 +8,8 @@ verification evidence.
 
 ## Recorded Baselines
 
-- P0luz primary baseline: `v2.8.10` / `0582a3b`
-- Yinglianchun secondary baseline: `0b4a877`
+- P0luz primary baseline: `v2.8.11` / `ea5d8f5`
+- Yinglianchun secondary baseline: `c758a4d`
 - Historical deployed root runtime: `8e68a7d`
 - P0luz-base production cutover: `c806f78`
 
@@ -102,32 +102,57 @@ fixed access token remains a resource-bound compatibility credential.
 
 ### 2026-07-26 Gateway continuation, Persona JSON, and auth cache fixes
 
-This batch reviews `0b4a877..c758a4d` from Yinglianchun. P0luz `main`
-remains at `0582a3b`; the compatible authentication fixes are ported from
-P0luz's non-main `codex/integration-dashboard-auth-fixes` branch without
-advancing the primary baseline or importing its unreleased version metadata.
+This batch reviews `0b4a877..c758a4d` from Yinglianchun and
+`0582a3b..ea5d8f5` from P0luz. The authentication work first appeared on
+P0luz's `codex/integration-dashboard-auth-fixes` branch and was ported while
+the audit was in progress. When P0luz released the same work on `main` as
+2.8.11, its Git history, release metadata, and compatible tests were merged
+directly.
 
 | Source commit(s) | Disposition | Evidence |
 | --- | --- | --- |
 | Yinglianchun `f7fbfb6` | Ported into the modular Gateway | OpenAI-compatible and native Anthropic routes now retain the exact first-round stable/dynamic injection prefix through tool continuations. Snapshot lookup binds the original message prefix to the model/tool contract, keeps intermediate tool calls and results, expires stale entries, and clears only after a final assistant response. Compatibility tests cover single injection, protocol-tail preservation, contract mismatch, route enablement, and final-only cleanup. |
 | Yinglianchun `c758a4d` | Provider-neutral behavior ported; provider defaults superseded | Persona evaluator and conflict-scout requests use the author's provider-native JSON response option, including the author's focused conflict-scout token/timeout overrides. The option defaults on, remains configurable through YAML and the Dashboard configuration API, and can be disabled for incompatible providers. DeepSeek V4 model/base/thinking defaults are not imported because P0luz's modular defaults and the documented Claude/Gemini production routing contract remain authoritative. |
-| P0luz `a1819f8`, `64b3777` | Ported from the author's non-main integration branch | Dashboard and onboarding `/auth/status` requests explicitly bypass browser caches. The active backend already returned `Cache-Control: no-store`, so the port preserves the richer unified-Dashboard identity payload and retry/abort flow while closing the same stale-auth gap. |
-| P0luz `5e1b2d6` | Superseded by a compatible implementation | The unified Dashboard already displays `error`, then `detail`, then its localized fallback, which preserves the author's backend-login-error behavior and broader current API compatibility. |
-| P0luz `9ef00f4` | Intentionally not merged | This commit only records an unreleased 2.8.11 changelog/version transition on a non-main branch. Runtime fixes are ported independently; official P0luz version ownership remains on the recorded `main` baseline. |
+| P0luz `a1819f8`, `64b3777`, `ea5d8f5` | Merged from the author's released `main` | Dashboard and onboarding `/auth/status` requests explicitly bypass browser caches, and the backend returns `Cache-Control: no-store`. Conflict resolution keeps the unified Dashboard's path-aware URL handling, bounded retry/abort flow, authenticated identity payload, and session-generation protection while retaining the author's externally observable fix and tests. |
+| P0luz `5e1b2d6` | Merged with the richer current error contract | Login failures display `error`, then `detail`, then the localized fallback. This preserves the author's backend-error behavior without narrowing current API compatibility. |
+| P0luz `9ef00f4` | Merged as part of the official 2.8.11 release | Both version files and the P0luz changelog now carry the author's released 2.8.11 metadata. |
 
 Local verification:
 
-- Focused compatibility suite: **120 passed / 0 failed**.
-- Full suite: **2739 passed / 95 skipped / 0 failed**.
+- Focused Gateway/Persona compatibility suite: **120 passed / 0 failed**.
+- Focused P0luz 2.8.11 authentication/onboarding suite: **57 passed / 0 failed**.
+- Full suite: **2742 passed / 95 skipped / 0 failed**.
 - Repository-wide Ruff and Dashboard/onboarding JavaScript syntax: **clean**.
 - All changed Python files: **0 Pyright errors / 0 warnings**. The whole-tree
   debt audit remains **371 errors / 21 warnings**, unchanged from the recorded
   baseline.
-- Docker image `ombre-brain:upstream-audit-20260726` built successfully, and
-  the changed production modules compiled inside that image.
+- Local Docker image `ombre-brain:upstream-audit-20260726-p0-2811` built
+  successfully, reports version 2.8.11, and compiled the changed production
+  modules inside the image.
+- Exact integration commit `e9d5bb0` built on the VPS as
+  `ombre-brain:staging-e9d5bb0` and passed isolated staging.
+  - Brain and Gateway returned 200 on loopback-only ports using a fresh copy
+    of production config, buckets, and state.
+  - All 12 copied SQLite databases returned `PRAGMA quick_check = ok` before
+    and after boot.
+  - Authenticated Streamable HTTP MCP negotiated protocol `2025-03-26`,
+    exposed 30 unique tools, and successfully called the read-only `pulse`.
+  - The Dashboard auth-status route returned `Cache-Control: no-store`.
+  - Empty-state live tests returned 200 through native Anthropic, native
+    Gemini, and OpenAI-compatible Claude without exposing copied production
+    memory to providers.
+  - A real two-round Claude tool exchange produced one tool call, preserved
+    the author's first-round injection snapshot on continuation, consumed the
+    tool result, cleared the snapshot on the final answer, and did not run
+    Persona on the intermediate tool-call response.
+  - Persona completed both eligible exact-commit final replies with zero error
+    rows. Synthetic embedder and reranker checks returned a 3072-dimensional
+    vector and ranked the relevant document first.
+  - Fresh exact-commit Brain and Gateway logs contained no warning or error
+    entries.
 
-The Yinglianchun baseline remains at `0b4a877` until this exact runtime commit
-passes isolated staging.
+Both upstream baselines were advanced only after the local and isolated
+staging gates above passed.
 
 ### 2026-07-25 P0luz 2.8.10 merge and Yinglianchun chat-memory policy port
 
