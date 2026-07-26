@@ -8,8 +8,8 @@ verification evidence.
 
 ## Recorded Baselines
 
-- P0luz primary baseline: `v2.8.5` / `65bf8c3`
-- Yinglianchun secondary baseline: `9393232`
+- P0luz primary baseline: `v2.8.10` / `0582a3b`
+- Yinglianchun secondary baseline: `0b4a877`
 - Historical deployed root runtime: `8e68a7d`
 - P0luz-base production cutover: `c806f78`
 
@@ -103,8 +103,8 @@ fixed access token remains a resource-bound compatibility credential.
 ### 2026-07-25 P0luz 2.8.10 merge and Yinglianchun chat-memory policy port
 
 This batch reviews `65bf8c3..0582a3b` from P0luz and
-`9393232..0b4a877` from Yinglianchun. The recorded baselines remain unchanged
-until the exact integration commit passes staging.
+`9393232..0b4a877` from Yinglianchun. The recorded baselines advanced after
+the exact integration commit passed isolated staging.
 
 | Source commit(s) | Disposition | Evidence |
 | --- | --- | --- |
@@ -126,7 +126,21 @@ Local verification completed so far:
 - Dashboard JavaScript syntax and the local
   `ombre-brain:upstream-sync-20260725` Docker build: **clean**.
 - Independent final code review: **approved with no remaining findings**.
-- Staging and production alignment: **in progress**.
+- Isolated VPS staging: **passed** for exact runtime commit `053d864` and image
+  `ombre-brain:staging-053d864`.
+  - Brain and Gateway health checks returned 200 on loopback-only ports.
+  - All 12 copied SQLite databases returned `PRAGMA quick_check = ok`.
+  - The one-time `materialize_session_libido_v1` Persona migration repaired the
+    historical physical-NULL integrity warning while preserving all 20 stored
+    values at `0.18`.
+  - The project alignment checker passed the Claude 4.8 and native Gemini 3.5
+    routes with the expected token-selected model inventory.
+  - Authenticated Streamable HTTP MCP negotiated protocol `2025-03-26`, exposed
+    30 unique tools, and successfully called the read-only `pulse` tool.
+  - Persona post-reply processing advanced the copied `main` session state on
+    the successful Claude final response.
+  - Fresh Brain and Gateway logs contained no error or warning entries.
+- Production alignment: **pending**.
 
 ### 2026-07-22 P0luz 2.8.5 merge and Yinglianchun behavior port
 
