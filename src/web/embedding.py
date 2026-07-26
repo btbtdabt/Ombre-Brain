@@ -15,6 +15,7 @@ import os
 import httpx
 import json as _json_lib
 import threading
+from typing import Any, Protocol, cast
 
 from starlette.requests import Request
 from starlette.responses import Response
@@ -40,17 +41,19 @@ def _persist_embedding_yaml(updates: dict) -> None:
     """
     try:
         from utils import atomic_update_config_yaml
+    except ImportError:  # pragma: no cover - 包模式
+        from ..utils import atomic_update_config_yaml
 
-        def _mutate(save_config: dict) -> None:
-            sec = save_config.setdefault("embedding", {})
-            if not isinstance(sec, dict):
-                sec = {}
-                save_config["embedding"] = sec
-            sec.update(updates)
+    def _mutate(save_config: dict) -> None:
+        sec = save_config.setdefault("embedding", {})
+        if not isinstance(sec, dict):
+            sec = {}
+            save_config["embedding"] = sec
+        sec.update(updates)
 
-        atomic_update_config_yaml(_mutate)
-    except Exception as e:
-        logger.error(f"[migration] persist embedding to config.yaml failed: {e}")
+    # 写失败必须传播给迁移状态机。静默记录后返回会让已失败的配置发布被标记为
+    # completed，用户随后重启才发现仍在使用旧模型。
+    atomic_update_config_yaml(_mutate)
 
 
 _DEFAULT_OLLAMA_BASE = "http://ombre-ollama:11434"
@@ -71,6 +74,22 @@ _ollama_pull_request_state: contextvars.ContextVar[dict | None] = (
 _migration_request_state: contextvars.ContextVar[dict | None] = (
     contextvars.ContextVar("ombre_embedding_migration_request_state", default=None)
 )
+
+
+class _EmbeddingOutboxProtocol(Protocol):
+    running: bool
+
+    async def reconcile(
+        self,
+        *,
+        include_archive: bool = True,
+        buckets: list[dict[str, Any]] | None = None,
+    ) -> int: ...
+
+    def retry_now(self) -> object: ...
+    def status(self) -> dict[str, Any]: ...
+    async def stop(self) -> None: ...
+    async def start(self, *, reconcile: bool) -> object: ...
 
 
 def _reserve_ollama_pull() -> object | None:
@@ -325,7 +344,7 @@ async def _backfill_run() -> None:
         # Managed server runtimes have one durable writer for the derived
         # index. Reuse it so manual backfill, startup reconciliation, and
         # decay self-healing cannot race each other or bypass retry state.
-        outbox = sh.embedding_outbox
+        outbox = cast(_EmbeddingOutboxProtocol | None, sh.embedding_outbox)
         if outbox is not None and getattr(outbox, "running", False):
             queued = await outbox.reconcile(
                 buckets=all_buckets,
@@ -476,7 +495,7 @@ def register(mcp) -> None:
                 staging_db_path_for, reset_stale_migration_state, target_signature,
             )
         except ImportError:
-            from .migration_engine import (  # type: ignore
+            from ..migration_engine import (  # type: ignore
                 MigrationConfig, start_migration,
                 status_path_for as _mig_status_path_for,
                 staging_db_path_for, reset_stale_migration_state, target_signature,
@@ -582,7 +601,7 @@ def register(mcp) -> None:
             fetch_buckets=_fetch_buckets,
         )
 
-        outbox = sh.embedding_outbox
+        outbox = cast(_EmbeddingOutboxProtocol | None, sh.embedding_outbox)
         outbox_was_running = bool(
             outbox is not None and getattr(outbox, "running", False)
         )
@@ -633,6 +652,7 @@ def register(mcp) -> None:
                 logger.info(f"[migration] sh.embedding_engine swapped to backend={target_backend} format={req_api_format or '(unchanged)'}; persisted to config.yaml")
             except Exception as e:
                 logger.error(f"[migration] post-swap failed: {e}")
+                raise
             finally:
                 _restart_outbox()
 
@@ -642,7 +662,7 @@ def register(mcp) -> None:
         if request_state is None:  # pragma: no cover - decorator invariant
             raise RuntimeError("migration route lost its reservation")
         try:
-            if outbox_was_running:
+            if outbox_was_running and outbox is not None:
                 await outbox.stop()
             task = start_migration(
                 mig_cfg,
@@ -682,7 +702,7 @@ def register(mcp) -> None:
                 is_running,
             )
         except ImportError:
-            from .migration_engine import (  # type: ignore
+            from ..migration_engine import (  # type: ignore
                 status_path_for as _mig_status_path_for,
                 read_status as _mig_read_status,
                 is_running,
@@ -723,7 +743,7 @@ def register(mcp) -> None:
             from migration_engine import is_running as _mig_running  # type: ignore
         except ImportError:
             try:
-                from .migration_engine import is_running as _mig_running  # type: ignore
+                from ..migration_engine import is_running as _mig_running  # type: ignore
             except Exception:
                 _mig_running = lambda: False  # noqa: E731
         if _mig_running():

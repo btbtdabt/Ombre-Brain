@@ -433,7 +433,7 @@ class ReflectionEngine:
         self.diary_memory_extract_max_per_day = max(0, int(cfg.get("diary_memory_extract_max_per_day", 1)))
         self.diary_memory_extract_min_confidence = float(cfg.get("diary_memory_extract_min_confidence", 0.68))
         self.daily_chat_memory_mode = self._normalize_daily_chat_memory_mode(
-            cfg.get("daily_chat_memory_mode", "review")
+            cfg.get("daily_chat_memory_mode", "off")
         )
         self.daily_chat_memory_hour = max(0, min(23, int(cfg.get("daily_chat_memory_hour", 0))))
         self.daily_chat_memory_turn_limit = max(0, min(10000, int(cfg.get("daily_chat_memory_turn_limit", 0))))
@@ -4456,8 +4456,8 @@ class ReflectionEngine:
 
     @staticmethod
     def _normalize_daily_chat_memory_mode(value: Any) -> str:
-        mode = str(value or "review").strip().lower()
-        return mode if mode in DAILY_CHAT_MEMORY_MODES else "review"
+        mode = str(value or "off").strip().lower()
+        return mode if mode in DAILY_CHAT_MEMORY_MODES else "off"
 
     @staticmethod
     def _normalize_period(period: str) -> str:

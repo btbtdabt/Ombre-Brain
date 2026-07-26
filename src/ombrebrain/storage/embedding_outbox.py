@@ -1,13 +1,13 @@
-"""Durable write-behind queue for the derived embedding index.
+"""派生 embedding 索引的持久 write-behind 队列。
 
-Bucket Markdown is the source of truth.  This outbox stores only bucket IDs,
-content hashes, and retry metadata so an unavailable embedding provider can
-never block or roll back a memory write.
+Bucket Markdown 是真源。本 outbox 只保存 bucket ID、content/meaning 哈希与
+重试元数据；provider 不可用时不会阻塞或回滚记忆写入，也不复制记忆正文。
 """
 
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import json
 import logging
@@ -16,15 +16,18 @@ import threading
 import time
 import uuid
 from collections.abc import Iterable, Mapping
-from typing import Any
+from contextlib import AbstractAsyncContextManager, contextmanager
+from typing import Any, Awaitable, Callable, cast
 
 from utils import bucket_text_for_embedding, now_iso, parse_bool, positive_float
 
 
 logger = logging.getLogger("ombre_brain.embedding_outbox")
 
-_OUTBOX_VERSION = 1
+_OUTBOX_VERSION = 3
 _OUTBOX_FILENAME = ".embedding_outbox.json"
+_OUTBOX_LOCK_FILENAME = ".embedding_outbox.lock"
+_OUTBOX_LOCK_TIMEOUT_SECONDS = 30.0
 _DEFAULT_RETRY_BASE_SECONDS = 5.0
 _DEFAULT_RETRY_MAX_SECONDS = 300.0
 _DEFAULT_CIRCUIT_FAILURE_THRESHOLD = 3
@@ -32,10 +35,151 @@ _DEFAULT_CIRCUIT_BASE_SECONDS = 30.0
 _DEFAULT_CIRCUIT_MAX_SECONDS = 600.0
 _IDLE_POLL_SECONDS = 30.0
 
+_COMPONENT_KINDS = ("content", "meaning")
+_COMPONENT_RETRY_FIELDS = (
+    "attempts",
+    "next_attempt_at",
+    "last_attempt_at",
+    "last_error",
+    "queued_at",
+)
+
+_LOCAL_FILE_LOCKS_GUARD = threading.Lock()
+_LOCAL_FILE_LOCKS: dict[str, threading.RLock] = {}
+
+
+def _local_file_lock(path: str) -> threading.RLock:
+    normalized = os.path.normcase(os.path.abspath(path))
+    with _LOCAL_FILE_LOCKS_GUARD:
+        lock = _LOCAL_FILE_LOCKS.get(normalized)
+        if lock is None:
+            lock = threading.RLock()
+            _LOCAL_FILE_LOCKS[normalized] = lock
+        return lock
+
+
+@contextmanager
+def _exclusive_file_turn(path: str, timeout: float = _OUTBOX_LOCK_TIMEOUT_SECONDS):
+    """Serialize whole-file outbox read/modify/replace transactions.
+
+    The in-process lock covers multiple ``EmbeddingOutbox`` instances in one
+    interpreter.  The byte-range/flock lease covers independent processes that
+    share the same vault.  The sibling lock file is stable across replacement
+    of the JSON data file.
+    """
+
+    local_lock = _local_file_lock(path)
+    deadline = time.monotonic() + max(0.0, timeout)
+    local_acquired = local_lock.acquire(timeout=max(0.0, timeout))
+    if not local_acquired:
+        raise TimeoutError(f"timed out waiting for local outbox lease: {path}")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        flags = os.O_RDWR | os.O_CREAT
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        descriptor = os.open(path, flags, 0o600)
+        try:
+            handle = os.fdopen(descriptor, "r+b", buffering=0)
+        except Exception:
+            os.close(descriptor)
+            raise
+
+        acquired = False
+        busy_errnos = {
+            errno.EACCES,
+            errno.EAGAIN,
+            getattr(errno, "EWOULDBLOCK", errno.EAGAIN),
+        }
+
+        def is_busy(exc: OSError) -> bool:
+            return (
+                exc.errno in busy_errnos
+                or getattr(exc, "winerror", None) in {32, 33}
+            )
+
+        def try_acquire() -> bool:
+            try:
+                if os.name == "nt":  # pragma: no branch - platform-specific
+                    import msvcrt
+
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:  # pragma: no cover - exercised in Linux CI
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return True
+            except OSError as exc:
+                if is_busy(exc):
+                    return False
+                raise
+
+        def release() -> None:
+            if os.name == "nt":  # pragma: no branch - platform-specific
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:  # pragma: no cover - exercised in Linux CI
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+        try:
+            while True:
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() > 0:
+                    break
+                try:
+                    handle.write(b"\0")
+                    break
+                except OSError as exc:
+                    # Windows byte-range locking needs the target byte to
+                    # exist. Two processes may initialize a new sidecar at
+                    # once; retry only genuine sharing/lock contention.
+                    if os.name != "nt" or not is_busy(exc):
+                        raise
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            f"timed out initializing outbox lease: {path}"
+                        ) from exc
+                    time.sleep(0.01)
+            handle.seek(0)
+            while not acquired:
+                acquired = try_acquire()
+                if acquired:
+                    break
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"timed out waiting for outbox lease: {path}")
+                time.sleep(0.01)
+            yield
+        finally:
+            if acquired:
+                try:
+                    release()
+                except OSError as exc:
+                    logger.warning("Embedding outbox lease unlock failed: %s", exc)
+            try:
+                handle.close()
+            except OSError as exc:
+                logger.warning("Embedding outbox lease close failed: %s", exc)
+    finally:
+        local_lock.release()
+
 
 def content_hash(content: str) -> str:
     """Return the stable identity of the exact text represented by a vector."""
     return hashlib.sha256((content or "").encode("utf-8")).hexdigest()
+
+
+def _latest_meaning(metadata: dict[str, Any]) -> str:
+    values = metadata.get("meaning") or []
+    if isinstance(values, str):
+        values = [values]
+    if not isinstance(values, (list, tuple)):
+        return ""
+    normalized = [str(value).strip() for value in values if str(value).strip()]
+    return normalized[-1] if normalized else ""
 
 
 class EmbeddingOutbox:
@@ -52,6 +196,10 @@ class EmbeddingOutbox:
             _OUTBOX_FILENAME,
         )
         self._loaded_from_legacy = False
+        self._file_lock_path = os.path.join(
+            state_dir,
+            _OUTBOX_LOCK_FILENAME,
+        )
 
         embed_cfg = config.get("embedding", {}) or {}
         self.background_enabled = parse_bool(
@@ -104,8 +252,8 @@ class EmbeddingOutbox:
                     exc,
                 )
         self._event: asyncio.Event | None = None
-        self._loop: asyncio.AbstractEventLoop | None = None
         self._task: asyncio.Task | None = None
+        self._worker_loop: asyncio.AbstractEventLoop | None = None
         self._running = False
         self._starting = False
         self._processed = 0
@@ -118,6 +266,168 @@ class EmbeddingOutbox:
         # 过滤，永远拿不到向量），不该连累队列里所有其他合法待处理的记忆一起
         # 陪绑最长 10 分钟。见 _record_provider_failure()。
         self._last_failure_bucket_id = ""
+
+    @staticmethod
+    def _hash_field(kind: str) -> str:
+        return "meaning_hash" if kind == "meaning" else "content_hash"
+
+    @classmethod
+    def _component_pending(cls, item: dict[str, Any], kind: str) -> bool:
+        value = item.get(cls._hash_field(kind))
+        return isinstance(value, str) if kind == "meaning" else bool(value)
+
+    @staticmethod
+    def _component_field(kind: str, field: str) -> str:
+        return f"{kind}_{field}"
+
+    @classmethod
+    def _component_attempts(cls, item: dict[str, Any], kind: str) -> int:
+        try:
+            return max(
+                0,
+                int(item.get(cls._component_field(kind, "attempts")) or 0),
+            )
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
+    @classmethod
+    def _component_due_at(cls, item: dict[str, Any], kind: str) -> float:
+        try:
+            return max(
+                0.0,
+                float(
+                    item.get(cls._component_field(kind, "next_attempt_at"))
+                    or 0.0
+                ),
+            )
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+
+    @classmethod
+    def _normalize_item(cls, raw: dict[str, Any]) -> dict[str, Any]:
+        """Upgrade v1/v2 shared retry metadata to per-component state."""
+
+        item = dict(raw)
+        try:
+            legacy_attempts = max(0, int(item.get("attempts") or 0))
+        except (TypeError, ValueError, OverflowError):
+            legacy_attempts = 0
+        try:
+            legacy_due = max(0.0, float(item.get("next_attempt_at") or 0.0))
+        except (TypeError, ValueError, OverflowError):
+            legacy_due = 0.0
+        legacy_attempted = str(item.get("last_attempt_at") or "")
+        legacy_error = str(item.get("last_error") or "")
+        legacy_queued = str(
+            item.get("queued_at") or item.get("updated_at") or ""
+        )
+
+        for kind in _COMPONENT_KINDS:
+            if not cls._component_pending(item, kind):
+                cls._drop_component_state(item, kind)
+                continue
+            defaults = {
+                "attempts": legacy_attempts,
+                "next_attempt_at": legacy_due,
+                "last_attempt_at": legacy_attempted,
+                "last_error": legacy_error,
+                "queued_at": legacy_queued,
+            }
+            for field, default in defaults.items():
+                item.setdefault(cls._component_field(kind, field), default)
+        cls._refresh_aggregate(item)
+        return item
+
+    @classmethod
+    def _refresh_aggregate(cls, item: dict[str, Any]) -> None:
+        """Maintain legacy item-level status fields for API compatibility."""
+
+        pending = [
+            kind for kind in _COMPONENT_KINDS if cls._component_pending(item, kind)
+        ]
+        if not pending:
+            item.update(
+                attempts=0,
+                next_attempt_at=0.0,
+                last_attempt_at="",
+                last_error="",
+            )
+            return
+
+        queued_values = [
+            str(item.get(cls._component_field(kind, "queued_at")) or "")
+            for kind in pending
+        ]
+        queued_values = [value for value in queued_values if value]
+        if queued_values:
+            item["queued_at"] = min(queued_values)
+
+        states = []
+        for kind in pending:
+            states.append(
+                (
+                    cls._component_attempts(item, kind),
+                    cls._component_due_at(item, kind),
+                    str(
+                        item.get(cls._component_field(kind, "last_attempt_at"))
+                        or ""
+                    ),
+                    str(
+                        item.get(cls._component_field(kind, "last_error")) or ""
+                    ),
+                )
+            )
+        item["attempts"] = max(state[0] for state in states)
+        retry_times = [state[1] for state in states if state[1] > 0]
+        item["next_attempt_at"] = min(retry_times) if retry_times else 0.0
+        latest = max(states, key=lambda state: state[2])
+        item["last_attempt_at"] = latest[2]
+        item["last_error"] = latest[3]
+
+    @classmethod
+    def _drop_component_state(cls, item: dict[str, Any], kind: str) -> None:
+        item.pop(cls._hash_field(kind), None)
+        for field in _COMPONENT_RETRY_FIELDS:
+            item.pop(cls._component_field(kind, field), None)
+
+    @classmethod
+    def _queue_component(
+        cls,
+        item: dict[str, Any],
+        kind: str,
+        digest: str,
+        now: str,
+        *,
+        reset_retry: bool,
+    ) -> None:
+        hash_field = cls._hash_field(kind)
+        same_digest = item.get(hash_field) == digest
+        item[hash_field] = digest
+        queued_field = cls._component_field(kind, "queued_at")
+        if not same_digest or not item.get(queued_field):
+            item[queued_field] = now
+        if not same_digest or reset_retry:
+            item[cls._component_field(kind, "attempts")] = 0
+            item[cls._component_field(kind, "next_attempt_at")] = 0.0
+            item[cls._component_field(kind, "last_attempt_at")] = ""
+            item[cls._component_field(kind, "last_error")] = ""
+        else:
+            item.setdefault(cls._component_field(kind, "attempts"), 0)
+            item.setdefault(cls._component_field(kind, "next_attempt_at"), 0.0)
+            item.setdefault(cls._component_field(kind, "last_attempt_at"), "")
+            item.setdefault(cls._component_field(kind, "last_error"), "")
+        item["updated_at"] = now
+        cls._refresh_aggregate(item)
+
+    def _reload_for_update_locked(self) -> None:
+        self._items = self._load_items(strict=True)
+
+    def _refresh_from_disk_locked(self) -> None:
+        try:
+            self._items = self._load_items(strict=True)
+        except Exception as exc:
+            # Keep the last known in-memory snapshot on a transient read error.
+            logger.warning("Embedding outbox refresh failed: %s", exc)
 
     @property
     def running(self) -> bool:
@@ -134,30 +444,53 @@ class EmbeddingOutbox:
         if not bucket_id:
             return False
         if not (content or "").strip():
-            self.discard(bucket_id)
+            self._discard_component(bucket_id, "content")
             return False
 
         now = now_iso()
         digest = content_hash(content)
         with self._lock:
-            current = self._items.get(bucket_id) or {}
-            same_content = current.get("content_hash") == digest
-            attempts = int(current.get("attempts") or 0) if same_content else 0
-            queued_at = str(current.get("queued_at") or now) if same_content else now
-            if reset_retry:
-                attempts = 0
-            self._items[bucket_id] = {
-                "content_hash": digest,
-                "queued_at": queued_at,
-                "updated_at": now,
-                "attempts": attempts,
-                "next_attempt_at": 0.0 if reset_retry else float(
-                    current.get("next_attempt_at") or 0.0
-                ),
-                "last_attempt_at": str(current.get("last_attempt_at") or ""),
-                "last_error": "" if reset_retry else str(current.get("last_error") or ""),
-            }
-            self._persist_locked()
+            with _exclusive_file_turn(self._file_lock_path):
+                self._reload_for_update_locked()
+                item = dict(self._items.get(bucket_id) or {})
+                self._queue_component(
+                    item,
+                    "content",
+                    digest,
+                    now,
+                    reset_retry=reset_retry,
+                )
+                self._items[bucket_id] = item
+                self._persist_locked()
+        self._wake()
+        return True
+
+    def enqueue_meaning(
+        self,
+        bucket_id: str,
+        meaning_text: str,
+        *,
+        reset_retry: bool = True,
+    ) -> bool:
+        """只持久登记 meaning 的期望哈希，不在 outbox 中复制原文。"""
+        bucket_id = str(bucket_id or "").strip()
+        if not bucket_id:
+            return False
+        now = now_iso()
+        digest = content_hash(str(meaning_text or "").strip())
+        with self._lock:
+            with _exclusive_file_turn(self._file_lock_path):
+                self._reload_for_update_locked()
+                item = dict(self._items.get(bucket_id) or {})
+                self._queue_component(
+                    item,
+                    "meaning",
+                    digest,
+                    now,
+                    reset_retry=reset_retry,
+                )
+                self._items[bucket_id] = item
+                self._persist_locked()
         self._wake()
         return True
 
@@ -177,50 +510,116 @@ class EmbeddingOutbox:
 
         now = now_iso()
         with self._lock:
-            if bucket_id in self._items:
-                return True
-            self._items[bucket_id] = {
-                "content_hash": content_hash(content),
-                "queued_at": now,
-                "updated_at": now,
-                "attempts": 0,
-                "next_attempt_at": 0.0,
-                "last_attempt_at": "",
-                "last_error": "",
-            }
-            self._persist_locked()
+            with _exclusive_file_turn(self._file_lock_path):
+                self._reload_for_update_locked()
+                item = dict(self._items.get(bucket_id) or {})
+                if item.get("content_hash"):
+                    return True
+                self._queue_component(
+                    item,
+                    "content",
+                    content_hash(content),
+                    now,
+                    reset_retry=True,
+                )
+                self._items[bucket_id] = item
+                self._persist_locked()
         self._wake()
         return True
 
     def discard(self, bucket_id: str) -> bool:
         with self._lock:
-            if bucket_id not in self._items:
-                return False
-            self._items.pop(bucket_id, None)
-            self._persist_locked()
+            with _exclusive_file_turn(self._file_lock_path):
+                self._reload_for_update_locked()
+                if bucket_id not in self._items:
+                    return False
+                self._items.pop(bucket_id, None)
+                self._persist_locked()
         return True
+
+    def _discard_component(self, bucket_id: str, kind: str) -> bool:
+        """Remove one pending component without deleting its sibling task."""
+
+        with self._lock:
+            with _exclusive_file_turn(self._file_lock_path):
+                self._reload_for_update_locked()
+                item = self._items.get(bucket_id)
+                if not item or not self._component_pending(item, kind):
+                    return False
+                self._drop_component_state(item, kind)
+                if any(
+                    self._component_pending(item, sibling)
+                    for sibling in _COMPONENT_KINDS
+                ):
+                    item["updated_at"] = now_iso()
+                    self._refresh_aggregate(item)
+                else:
+                    self._items.pop(bucket_id, None)
+                self._persist_locked()
+        return True
+
+    def complete_content(self, bucket_id: str, content: str) -> None:
+        self._complete_component(bucket_id, content_hash(content), "content")
+
+    def complete_meaning(self, bucket_id: str, meaning_text: str) -> None:
+        self._complete_component(
+            bucket_id,
+            content_hash(str(meaning_text or "").strip()),
+            "meaning",
+        )
 
     def is_pending(self, bucket_id: str) -> bool:
         with self._lock:
+            self._refresh_from_disk_locked()
             return bucket_id in self._items
 
     def pending_ids(self) -> set[str]:
         """Return a snapshot of IDs awaiting derived-index work."""
         with self._lock:
+            self._refresh_from_disk_locked()
             return set(self._items)
 
     def status(self) -> dict[str, Any]:
         with self._lock:
+            self._refresh_from_disk_locked()
             items = [dict(item) for item in self._items.values()]
-        failed = [item for item in items if int(item.get("attempts") or 0) > 0]
+        failed = [
+            item
+            for item in items
+            if any(
+                self._component_attempts(item, kind) > 0
+                for kind in _COMPONENT_KINDS
+                if self._component_pending(item, kind)
+            )
+        ]
         next_retry = min(
-            (float(item.get("next_attempt_at") or 0.0) for item in items if item.get("next_attempt_at")),
+            (
+                self._component_due_at(item, kind)
+                for item in items
+                for kind in _COMPONENT_KINDS
+                if self._component_pending(item, kind)
+                and self._component_due_at(item, kind) > 0
+            ),
             default=0.0,
         )
         last_error = ""
         if failed:
-            latest = max(failed, key=lambda item: str(item.get("last_attempt_at") or ""))
-            last_error = str(latest.get("last_error") or "")
+            attempts = [
+                (
+                    str(
+                        item.get(self._component_field(kind, "last_attempt_at"))
+                        or ""
+                    ),
+                    str(
+                        item.get(self._component_field(kind, "last_error")) or ""
+                    ),
+                )
+                for item in failed
+                for kind in _COMPONENT_KINDS
+                if self._component_attempts(item, kind) > 0
+            ]
+            if attempts:
+                last_error = max(attempts, key=lambda value: value[0])[1]
         return {
             "running": self._running,
             "background_enabled": self.background_enabled,
@@ -254,12 +653,22 @@ class EmbeddingOutbox:
         self.reset_circuit()
         changed = 0
         with self._lock:
-            for item in self._items.values():
-                if float(item.get("next_attempt_at") or 0.0) > 0:
-                    item["next_attempt_at"] = 0.0
-                    changed += 1
-            if changed:
-                self._persist_locked()
+            with _exclusive_file_turn(self._file_lock_path):
+                self._reload_for_update_locked()
+                for item in self._items.values():
+                    item_changed = False
+                    for kind in _COMPONENT_KINDS:
+                        if not self._component_pending(item, kind):
+                            continue
+                        field = self._component_field(kind, "next_attempt_at")
+                        if self._component_due_at(item, kind) > 0:
+                            item[field] = 0.0
+                            item_changed = True
+                    if item_changed:
+                        self._refresh_aggregate(item)
+                        changed += 1
+                if changed:
+                    self._persist_locked()
         self._wake()
         return changed
 
@@ -286,7 +695,7 @@ class EmbeddingOutbox:
         if self._running or not self.background_enabled:
             return False
         self._running = True
-        self._loop = asyncio.get_running_loop()
+        self._worker_loop = asyncio.get_running_loop()
         self._event = asyncio.Event()
         if reconcile:
             try:
@@ -314,7 +723,7 @@ class EmbeddingOutbox:
                 pass
         self._task = None
         self._event = None
-        self._loop = None
+        self._worker_loop = None
 
     async def reconcile(
         self,
@@ -427,42 +836,43 @@ class EmbeddingOutbox:
         changed = False
         now = now_iso()
         with self._lock:
-            # Linearize the final index read with enqueue/complete. If a worker
-            # finished after the first snapshot, either its task still exists
-            # or this fresh read sees its vector, so it cannot be queued twice.
+            # Keep provider/SQLite reads outside the sidecar lease. Local
+            # completion is still serialized by ``self._lock``; a different
+            # process may cause a harmless duplicate queue entry, which is
+            # preferable to an Outbox -> Engine lock inversion.
             final_state = read_index_state()
             if final_state is None:
                 return 0
             content_ids, indexed_hashes, hashes_supported = final_state
-            for bucket_id, (_content, digest) in latest_current.items():
-                stored_hash = str(indexed_hashes.get(bucket_id) or "")
-                needs_index = bucket_id not in content_ids or (
-                    hashes_supported
-                    and bool(stored_hash)
-                    and stored_hash != digest
-                )
-                existing = self._items.get(bucket_id)
-                if not needs_index:
-                    continue
-                # A pending task may represent a bucket/content version newer
-                # than this snapshot.  Keep it untouched; the worker re-reads
-                # current Markdown and self-corrects stale hashes before write.
-                if existing is not None:
-                    continue
-                self._items[bucket_id] = {
-                    "content_hash": digest,
-                    "queued_at": now,
-                    "updated_at": now,
-                    "attempts": 0,
-                    "next_attempt_at": 0.0,
-                    "last_attempt_at": "",
-                    "last_error": "",
-                }
-                queued += 1
-                changed = True
+            with _exclusive_file_turn(self._file_lock_path):
+                self._reload_for_update_locked()
+                for bucket_id, (_content, digest) in latest_current.items():
+                    stored_hash = str(indexed_hashes.get(bucket_id) or "")
+                    needs_index = bucket_id not in content_ids or (
+                        hashes_supported
+                        and bool(stored_hash)
+                        and stored_hash != digest
+                    )
+                    existing = self._items.get(bucket_id)
+                    if not needs_index:
+                        continue
+                    # A pending content hash may be newer than this snapshot.
+                    if existing is not None and existing.get("content_hash"):
+                        continue
+                    item = dict(existing or {})
+                    self._queue_component(
+                        item,
+                        "content",
+                        digest,
+                        now,
+                        reset_retry=True,
+                    )
+                    self._items[bucket_id] = item
+                    queued += 1
+                    changed = True
 
-            if changed:
-                self._persist_locked()
+                if changed:
+                    self._persist_locked()
         if changed:
             self._wake()
         return queued
@@ -512,29 +922,211 @@ class EmbeddingOutbox:
                 logger.exception("Embedding outbox worker error: %s", exc)
                 await self._wait(0.1)
 
+    @classmethod
+    def _selected_component_kind(cls, item: dict[str, Any]) -> str:
+        selected = str(item.get("_component_kind") or "")
+        if selected in _COMPONENT_KINDS and cls._component_pending(item, selected):
+            return selected
+        candidates = [
+            kind for kind in _COMPONENT_KINDS if cls._component_pending(item, kind)
+        ]
+        if not candidates:
+            return ""
+        return min(
+            candidates,
+            key=lambda kind: (
+                cls._component_due_at(item, kind),
+                str(item.get(cls._component_field(kind, "queued_at")) or ""),
+                kind,
+            ),
+        )
+
+    def _current_component_snapshot(
+        self,
+        bucket_id: str,
+        kind: str,
+        digest: str,
+    ) -> dict[str, Any] | None:
+        """Revalidate a scheduled component after acquiring the derived turn."""
+
+        with self._lock:
+            self._refresh_from_disk_locked()
+            current = self._items.get(bucket_id)
+            if not current or current.get(self._hash_field(kind)) != digest:
+                return None
+            if self._component_due_at(current, kind) > time.time():
+                return None
+            snapshot = dict(current)
+            snapshot["_component_kind"] = kind
+            return snapshot
+
     async def _process(self, bucket_id: str, item: dict[str, Any], engine: Any) -> None:
+        kind = self._selected_component_kind(item)
+        if not kind:
+            return
+        raw_digest = item.get(self._hash_field(kind))
+        if (kind == "content" and not raw_digest) or (
+            kind == "meaning" and not isinstance(raw_digest, str)
+        ):
+            return
+        digest = str(raw_digest)
+
+        turn_factory = getattr(self.bucket_mgr, "_derived_index_turn", None)
+        if not callable(turn_factory):
+            await self._process_component(bucket_id, item, engine)
+            return
+        turn_factory_fn = cast(
+            Callable[[str], AbstractAsyncContextManager[Any]],
+            turn_factory,
+        )
+
+        try:
+            # The sidecar lease is deliberately not held across this await or
+            # the provider call. The derived lease orders all workers/processes
+            # for one bucket; once inside it, reload the durable CAS state so a
+            # stale scheduler snapshot cannot resurrect completed work.
+            async with turn_factory_fn(bucket_id):
+                current = self._current_component_snapshot(
+                    bucket_id, kind, digest
+                )
+                if current is None:
+                    return
+                await self._process_component(bucket_id, current, engine)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Embedding derived turn failed; component remains queued: "
+                "bucket=%s kind=%s error=%s",
+                bucket_id,
+                kind,
+                exc,
+            )
+            self._fail_component(bucket_id, digest, exc, kind)
+
+    async def _process_component(
+        self,
+        bucket_id: str,
+        item: dict[str, Any],
+        engine: Any,
+    ) -> None:
         bucket = await self.bucket_mgr.get(bucket_id)
         if not bucket:
+            try:
+                engine.delete_embedding(bucket_id)
+            except Exception:
+                pass
             self.discard(bucket_id)
             return
+        metadata = bucket.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        if metadata.get("deleted_at") or parse_bool(
+            metadata.get("tombstone"), default=False
+        ):
+            try:
+                engine.delete_embedding(bucket_id)
+            except Exception:
+                pass
+            self.discard(bucket_id)
+            return
+
+        selected_kind = self._selected_component_kind(item)
+        if not selected_kind:
+            return
+
+        desired_meaning_hash = item.get("meaning_hash")
+        if selected_kind == "meaning" and isinstance(desired_meaning_hash, str):
+            meaning_text = _latest_meaning(metadata)
+            digest = content_hash(meaning_text)
+            if digest != desired_meaning_hash:
+                self.enqueue_meaning(bucket_id, meaning_text)
+                return
+
+            try:
+                if meaning_text:
+                    generate_meaning = getattr(
+                        engine, "generate_and_store_meaning", None
+                    )
+                    if not callable(generate_meaning):
+                        self._complete_component(bucket_id, digest, "meaning")
+                        return
+                    generate_meaning_fn = cast(
+                        Callable[[str, str], Awaitable[bool]],
+                        generate_meaning,
+                    )
+                    ok = bool(await generate_meaning_fn(bucket_id, meaning_text))
+                else:
+                    clear_meaning = getattr(
+                        engine, "delete_meaning_embedding", None
+                    )
+                    if not callable(clear_meaning):
+                        self._complete_component(bucket_id, digest, "meaning")
+                        return
+                    clear_meaning(bucket_id)
+                    ok = True
+            except Exception as exc:
+                self._fail_component(bucket_id, digest, exc, "meaning")
+                return
+            if not ok:
+                self._fail_component(
+                    bucket_id,
+                    digest,
+                    "generate_and_store_meaning returned false",
+                    "meaning",
+                )
+                return
+
+            latest = await self.bucket_mgr.get(bucket_id)
+            if not latest:
+                try:
+                    engine.delete_embedding(bucket_id)
+                except Exception:
+                    pass
+                self.discard(bucket_id)
+                return
+            latest_metadata = latest.get("metadata") or {}
+            if not isinstance(latest_metadata, dict):
+                latest_metadata = {}
+            if latest_metadata.get("deleted_at") or parse_bool(
+                latest_metadata.get("tombstone"), default=False
+            ):
+                try:
+                    engine.delete_embedding(bucket_id)
+                except Exception:
+                    pass
+                self.discard(bucket_id)
+                return
+            latest_meaning = _latest_meaning(latest_metadata)
+            if content_hash(latest_meaning) != digest:
+                self.enqueue_meaning(bucket_id, latest_meaning)
+                return
+            self._complete_component(bucket_id, digest, "meaning")
+            return
+
         body = str(bucket.get("content") or "")
+        desired_content_hash = item.get("content_hash")
         if not body.strip():
-            self.discard(bucket_id)
+            if desired_content_hash:
+                self._complete_component(
+                    bucket_id, str(desired_content_hash), "content"
+                )
             return
-        queued_digest = str(item.get("content_hash") or "")
+        if not desired_content_hash:
+            return
         body_digest = content_hash(body)
         historical_text = bucket_text_for_embedding(bucket)
         historical_digest = content_hash(historical_text)
-        if queued_digest == body_digest:
+        if desired_content_hash == body_digest:
             content = body
             historical_format = False
-        elif queued_digest == historical_digest:
+        elif desired_content_hash == historical_digest:
             content = historical_text
             historical_format = True
         else:
             self.enqueue(bucket_id, body)
             return
-        digest = queued_digest
+        digest = str(desired_content_hash)
 
         try:
             ok = bool(await engine.generate_and_store(bucket_id, content))
@@ -561,45 +1153,85 @@ class EmbeddingOutbox:
         if content_hash(latest_content) != digest:
             self.enqueue(bucket_id, latest_content)
             return
-        self._complete(bucket_id, digest)
+        self._complete_component(bucket_id, digest, "content")
 
     def _complete(self, bucket_id: str, digest: str) -> None:
+        """兼容旧测试/调用点：确认 content 分量完成。"""
+        self._complete_component(bucket_id, digest, "content")
+
+    def _complete_component(self, bucket_id: str, digest: str, kind: str) -> None:
+        remaining = False
         with self._lock:
-            current = self._items.get(bucket_id)
-            if not current or current.get("content_hash") != digest:
-                return
-            self._items.pop(bucket_id, None)
-            self._processed += 1
-            self._last_success = now_iso()
-            self._persist_locked()
+            with _exclusive_file_turn(self._file_lock_path):
+                self._reload_for_update_locked()
+                current = self._items.get(bucket_id)
+                field = self._hash_field(kind)
+                if not current or current.get(field) != digest:
+                    return
+                self._drop_component_state(current, kind)
+                remaining = any(
+                    self._component_pending(current, sibling)
+                    for sibling in _COMPONENT_KINDS
+                )
+                if remaining:
+                    current["updated_at"] = now_iso()
+                    self._refresh_aggregate(current)
+                else:
+                    self._items.pop(bucket_id, None)
+                self._processed += 1
+                self._last_success = now_iso()
+                self._persist_locked()
         self.reset_circuit()
+        if remaining:
+            self._wake()
 
     def _fail(self, bucket_id: str, digest: str, error: Any) -> None:
+        """兼容旧调用点：记录 content 分量失败。"""
+        self._fail_component(bucket_id, digest, error, "content")
+
+    def _fail_component(
+        self,
+        bucket_id: str,
+        digest: str,
+        error: Any,
+        kind: str,
+    ) -> None:
         with self._lock:
-            current = self._items.get(bucket_id)
-            if not current or current.get("content_hash") != digest:
-                return
-            attempts = int(current.get("attempts") or 0) + 1
-            delay = min(
-                self.retry_max_seconds,
-                self.retry_base_seconds * (2 ** min(attempts - 1, 16)),
-            )
-            current.update(
-                attempts=attempts,
-                last_attempt_at=now_iso(),
-                updated_at=now_iso(),
-                last_error=str(error)[:300],
-                next_attempt_at=time.time() + delay,
-            )
-            self._persist_locked()
+            with _exclusive_file_turn(self._file_lock_path):
+                self._reload_for_update_locked()
+                current = self._items.get(bucket_id)
+                field = self._hash_field(kind)
+                if not current or current.get(field) != digest:
+                    return
+                attempts = self._component_attempts(current, kind) + 1
+                delay = min(
+                    self.retry_max_seconds,
+                    self.retry_base_seconds * (2 ** min(attempts - 1, 16)),
+                )
+                attempted_at = now_iso()
+                current[self._component_field(kind, "attempts")] = attempts
+                current[self._component_field(kind, "last_attempt_at")] = (
+                    attempted_at
+                )
+                current[self._component_field(kind, "last_error")] = str(error)[
+                    :300
+                ]
+                current[self._component_field(kind, "next_attempt_at")] = (
+                    time.time() + delay
+                )
+                current["updated_at"] = attempted_at
+                self._refresh_aggregate(current)
+                self._persist_locked()
         # 同一个桶连续失败不计入熔断计数：那是内容本身有毒的信号，不是供应商
         # 挂了的信号。只有失败发生在不同的桶身上，才可能是供应商级故障。
         if bucket_id != self._last_failure_bucket_id:
             self._last_failure_bucket_id = bucket_id
             self._record_provider_failure()
         logger.warning(
-            "Embedding queued for retry / embedding 将后台重试: bucket=%s attempt=%s delay=%.1fs error=%s",
+            "Embedding queued for retry / embedding 将后台重试: "
+            "bucket=%s kind=%s attempt=%s delay=%.1fs error=%s",
             bucket_id,
+            kind,
             attempts,
             delay,
             str(error)[:160],
@@ -637,20 +1269,36 @@ class EmbeddingOutbox:
     def _next_due(self) -> tuple[str, dict[str, Any] | None, float]:
         now = time.time()
         with self._lock:
+            self._refresh_from_disk_locked()
             if not self._items:
                 return "", None, _IDLE_POLL_SECONDS
-            ordered = sorted(
-                self._items.items(),
-                key=lambda pair: (
-                    float(pair[1].get("next_attempt_at") or 0.0),
-                    str(pair[1].get("queued_at") or ""),
-                    pair[0],
-                ),
-            )
-            bucket_id, item = ordered[0]
-            due_at = float(item.get("next_attempt_at") or 0.0)
+            candidates: list[tuple[float, str, str, str, dict[str, Any]]] = []
+            for bucket_id, item in self._items.items():
+                for kind in _COMPONENT_KINDS:
+                    if not self._component_pending(item, kind):
+                        continue
+                    candidates.append(
+                        (
+                            self._component_due_at(item, kind),
+                            str(
+                                item.get(
+                                    self._component_field(kind, "queued_at")
+                                )
+                                or item.get("queued_at")
+                                or ""
+                            ),
+                            bucket_id,
+                            kind,
+                            item,
+                        )
+                    )
+            if not candidates:
+                return "", None, _IDLE_POLL_SECONDS
+            due_at, _queued_at, bucket_id, kind, item = min(candidates)
             if due_at <= now:
-                return bucket_id, dict(item), 0.0
+                snapshot = dict(item)
+                snapshot["_component_kind"] = kind
+                return bucket_id, snapshot, 0.0
             return "", None, min(_IDLE_POLL_SECONDS, max(0.01, due_at - now))
 
     async def _wait(self, timeout: float) -> None:
@@ -664,12 +1312,19 @@ class EmbeddingOutbox:
 
     def _wake(self) -> None:
         event = self._event
-        loop = self._loop
-        if not event or not loop or loop.is_closed():
+        loop = self._worker_loop
+        if event is None:
             return
-        loop.call_soon_threadsafe(event.set)
+        try:
+            if loop is not None and loop.is_running():
+                loop.call_soon_threadsafe(event.set)
+            else:
+                event.set()
+        except RuntimeError:
+            # loop 正在关闭时任务仍保留在磁盘，下次 start() 会重新唤醒。
+            pass
 
-    def _load_items(self) -> dict[str, dict[str, Any]]:
+    def _load_items(self, *, strict: bool = False) -> dict[str, dict[str, Any]]:
         load_path = self.path
         same_path = os.path.normcase(os.path.abspath(self.path)) == os.path.normcase(
             os.path.abspath(self._legacy_path)
@@ -685,17 +1340,24 @@ class EmbeddingOutbox:
                 payload = json.load(handle)
             raw_items = payload.get("items", {}) if isinstance(payload, dict) else {}
             if not isinstance(raw_items, dict):
-                return {}
+                raise ValueError("embedding outbox items must be an object")
             items = {
-                str(bucket_id): dict(item)
+                str(bucket_id): self._normalize_item(item)
                 for bucket_id, item in raw_items.items()
-                if bucket_id and isinstance(item, dict) and item.get("content_hash")
+                if bucket_id
+                and isinstance(item, dict)
+                and (
+                    item.get("content_hash")
+                    or isinstance(item.get("meaning_hash"), str)
+                )
             }
             self._loaded_from_legacy = using_legacy
             return items
         except FileNotFoundError:
             return {}
         except Exception as exc:
+            if strict:
+                raise
             logger.warning("Embedding outbox is unreadable; rebuilding from buckets: %s", exc)
             return {}
 

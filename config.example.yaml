@@ -797,7 +797,7 @@ reflection:
   daily_hour: 4                   # generate daily impression after this local hour
   daily_min_memory_items: 5        # ordinary memory/update items required before daily impression writes
   daily_conversation_turn_limit: 12 # small short-term turn window for daily impression material
-  daily_chat_memory_mode: review   # review = pending candidates; auto = write selected Gateway chat memories; off = disabled
+  daily_chat_memory_mode: off      # off = disabled; review = pending candidates; auto = write selected Gateway chat memories
   daily_chat_memory_hour: 0        # organize the previous day's Gateway chats after local midnight
   daily_chat_memory_turn_limit: 0  # 0 = use all raw_events for that date; >0 caps restored turns
   daily_chat_memory_max_per_day: 10 # cap for selected long-term memory candidates

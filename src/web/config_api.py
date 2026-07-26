@@ -1766,7 +1766,7 @@ def _current_public_config(config: Mapping[str, Any]) -> dict[str, Any]:
                 _configured_value(reflection, "daily_conversation_turn_limit", 12)
             ),
             "daily_chat_memory_mode": str(
-                reflection.get("daily_chat_memory_mode") or "review"
+                reflection.get("daily_chat_memory_mode") or "off"
             ),
             "daily_chat_memory_turn_limit": int(
                 _configured_value(reflection, "daily_chat_memory_turn_limit", 0)
@@ -2101,10 +2101,10 @@ def _build_dependency_runtime_engine(
             else None
         )
         daily_chat_memory_mode = str(
-            reflection.get("daily_chat_memory_mode") or "review"
+            reflection.get("daily_chat_memory_mode") or "off"
         ).strip().lower()
         if daily_chat_memory_mode not in {"auto", "review", "off"}:
-            daily_chat_memory_mode = "review"
+            daily_chat_memory_mode = "off"
         return SimpleNamespace(
             enabled=enabled,
             auto_enabled=bool(reflection.get("auto_enabled", True)),
@@ -2599,6 +2599,36 @@ def _restore_config_runtime(
         sh.replace_embedding_engine(previous_embedding)
 
 
+def _bounded_config_int(value, field: str, low: int, high: int) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be an integer in [{low},{high}]")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(
+            f"{field} must be an integer in [{low},{high}]"
+        ) from exc
+    if isinstance(value, float) and (
+        not math.isfinite(value) or value != parsed
+    ):
+        raise ValueError(f"{field} must be an integer in [{low},{high}]")
+    if not low <= parsed <= high:
+        raise ValueError(f"{field} must be in [{low},{high}]")
+    return parsed
+
+
+def _bounded_config_float(value, field: str, low: float, high: float) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be a finite number in [{low},{high}]")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{field} must be a finite number in [{low},{high}]") from exc
+    if not math.isfinite(parsed) or not low <= parsed <= high:
+        raise ValueError(f"{field} must be a finite number in [{low},{high}]")
+    return parsed
+
+
 def _rebuild_embedding_runtime():
     """Rebuild and publish one embedding engine to every runtime holder."""
     try:
@@ -2638,6 +2668,10 @@ def _mask_mcp_token(token: str) -> str | None:
 
 
 def register(mcp) -> None:
+    # 该锁只保护本次路由注册实例，不绑定 asyncio 事件循环；这样同一处理器
+    # 被测试客户端从多个事件循环调用时，也能串行提交而不会触发跨循环错误。
+    mcp_token_commit_lock = threading.Lock()
+
     # MCP auth is bound into middleware and OAuth route visibility at process
     # startup. Keep the effective value separate from the desired persisted
     # value so the Dashboard cannot falsely claim a hot switch took effect.
@@ -2909,6 +2943,53 @@ def register(mcp) -> None:
                 return JSONResponse(
                     {"error": "surfacing must be an object"}, status_code=400
                 )
+            dehydration_payload = dict(body.get("dehydration") or {})
+            if "max_tokens" in dehydration_payload:
+                dehydration_payload["max_tokens"] = _bounded_config_int(
+                    dehydration_payload["max_tokens"],
+                    "dehydration.max_tokens",
+                    128,
+                    8192,
+                )
+            if "temperature" in dehydration_payload:
+                dehydration_payload["temperature"] = _bounded_config_float(
+                    dehydration_payload["temperature"],
+                    "dehydration.temperature",
+                    0.0,
+                    2.0,
+                )
+            if "timeout_seconds" in dehydration_payload:
+                dehydration_payload["timeout_seconds"] = _bounded_config_float(
+                    dehydration_payload["timeout_seconds"],
+                    "dehydration.timeout_seconds",
+                    1.0,
+                    600.0,
+                )
+
+            merge_threshold_value = (
+                _bounded_config_int(
+                    body["merge_threshold"], "merge_threshold", 0, 100
+                )
+                if "merge_threshold" in body
+                else None
+            )
+            host_port_value = (
+                _bounded_config_int(body["host_port"], "host_port", 1, 65535)
+                if "host_port" in body
+                else None
+            )
+
+            surfacing_values: dict[str, int] = {}
+            surfacing_payload = body.get("surfacing") or {}
+            for key, low, high in (
+                ("breath_max_results", 1, 50),
+                ("breath_max_tokens", 500, 20000),
+                ("feel_max_tokens", 500, 20000),
+            ):
+                if key in surfacing_payload:
+                    surfacing_values[key] = _bounded_config_int(
+                        surfacing_payload[key], f"surfacing.{key}", low, high
+                    )
             deployment_payload = body.get("deployment")
             if "deployment" in body and not isinstance(deployment_payload, dict):
                 return JSONResponse(
@@ -2964,6 +3045,29 @@ def register(mcp) -> None:
                 and "enabled" in sampling_payload
                 else None
             )
+            sampling_values: dict[str, int | float] = {}
+            if isinstance(sampling_payload, dict):
+                if "top_k" in sampling_payload:
+                    sampling_values["top_k"] = _bounded_config_int(
+                        sampling_payload["top_k"],
+                        "surfacing.sampling.top_k",
+                        1,
+                        50,
+                    )
+                if "sample_k" in sampling_payload:
+                    sampling_values["sample_k"] = _bounded_config_int(
+                        sampling_payload["sample_k"],
+                        "surfacing.sampling.sample_k",
+                        1,
+                        20,
+                    )
+                if "temperature" in sampling_payload:
+                    sampling_values["temperature"] = _bounded_config_float(
+                        sampling_payload["temperature"],
+                        "surfacing.sampling.temperature",
+                        0.1,
+                        5.0,
+                    )
         except ValueError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
 
@@ -3013,7 +3117,7 @@ def register(mcp) -> None:
 
         # --- Dehydration config ---
         if "dehydration" in body:
-            d = cast(dict[str, object], body["dehydration"])
+            d = dehydration_payload
             dehy = sh.config.setdefault("dehydration", {})
             for key in ("model", "base_url", "max_tokens", "temperature", "api_format", "timeout_seconds"):
                 if key in d:
@@ -3028,7 +3132,9 @@ def register(mcp) -> None:
                 dehydrator.model = dehy.get("model", dehydrator.model)
                 dehydrator.base_url = dehy.get("base_url", dehydrator.base_url)
                 dehydrator.max_tokens = int(dehy.get("max_tokens") or dehydrator.max_tokens)
-                dehydrator.temperature = float(dehy.get("temperature") or dehydrator.temperature)
+                configured_temperature = dehy.get("temperature")
+                if configured_temperature is not None:
+                    dehydrator.temperature = float(configured_temperature)
                 dehydrator.timeout_seconds = _positive_float(
                     dehy.get("timeout_seconds"), dehydrator.timeout_seconds
                 )
@@ -3103,12 +3209,9 @@ def register(mcp) -> None:
                     )
 
         # --- Merge threshold ---
-        if "merge_threshold" in body:
-            try:
-                sh.config["merge_threshold"] = int(body["merge_threshold"])
-                updated.append("merge_threshold")
-            except (TypeError, ValueError):
-                pass
+        if merge_threshold_value is not None:
+            sh.config["merge_threshold"] = merge_threshold_value
+            updated.append("merge_threshold")
 
         # MCP 鉴权开关、鉴权模式与公网地址都是启动期快照。它们只写入
         # config.yaml，不能提前发布到 sh.config；否则 OAuth/MCP 中间件仍使用
@@ -3119,28 +3222,16 @@ def register(mcp) -> None:
         # 裸机：写 config 后进程自重启即监听新端口（前端「保存并重启」）。
         # Docker：容器内端口由 Dockerfile 固定，host_port 仅供部署脚本读取注入
         # OMBRE_HOST_PORT，须重建容器才生效（前端会提示）。
-        if "host_port" in body:
-            try:
-                sh.config["host_port"] = int(body["host_port"])
-                updated.append("host_port")
-            except (TypeError, ValueError):
-                pass
+        if host_port_value is not None:
+            sh.config["host_port"] = host_port_value
+            updated.append("host_port")
 
         # --- Surfacing defaults (breath/feel token & result caps) ---
         if "surfacing" in body and isinstance(body["surfacing"], dict):
             sf = sh.config.setdefault("surfacing", {})
-            for key, lo, hi in (
-                ("breath_max_results", 1, 50),
-                ("breath_max_tokens", 500, 20000),
-                ("feel_max_tokens", 500, 20000),
-            ):
-                if key in body["surfacing"]:
-                    try:
-                        val = int(body["surfacing"][key])
-                        sf[key] = max(lo, min(hi, val))
-                        updated.append(f"surfacing.{key}")
-                    except (TypeError, ValueError):
-                        pass
+            for key, value in surfacing_values.items():
+                sf[key] = value
+                updated.append(f"surfacing.{key}")
 
         try:
             updated.extend(
@@ -3169,8 +3260,8 @@ def register(mcp) -> None:
                         sc_dehy = {}
                         save_config["dehydration"] = sc_dehy
                     for key in ("model", "base_url", "max_tokens", "temperature", "api_format", "timeout_seconds"):
-                        if key in body["dehydration"]:
-                            sc_dehy[key] = body["dehydration"][key]
+                        if key in dehydration_payload:
+                            sc_dehy[key] = dehydration_payload[key]
                     # Never persist api_key to yaml (use env var)
 
                 if "embedding" in body:
@@ -3186,11 +3277,8 @@ def register(mcp) -> None:
                     if embedding_backend is not None:
                         sc_emb["backend"] = embedding_backend
 
-                if "merge_threshold" in body:
-                    try:
-                        save_config["merge_threshold"] = int(body["merge_threshold"])
-                    except (TypeError, ValueError):
-                        pass
+                if merge_threshold_value is not None:
+                    save_config["merge_threshold"] = merge_threshold_value
 
                 if mcp_auth_value is not None:
                     save_config["mcp_require_auth"] = mcp_auth_value
@@ -3198,42 +3286,25 @@ def register(mcp) -> None:
                 if mcp_auth_mode_value is not None:
                     save_config["mcp_auth_mode"] = mcp_auth_mode_value
 
-                if "host_port" in body:
-                    try:
-                        save_config["host_port"] = int(body["host_port"])
-                    except (TypeError, ValueError):
-                        pass
+                if host_port_value is not None:
+                    save_config["host_port"] = host_port_value
 
                 if "surfacing" in body and isinstance(body["surfacing"], dict):
                     sc_sf = save_config.setdefault("surfacing", {})
                     if not isinstance(sc_sf, dict):
                         sc_sf = {}
                         save_config["surfacing"] = sc_sf
-                    for key in ("breath_max_results", "breath_max_tokens", "feel_max_tokens"):
-                        if key in body["surfacing"]:
-                            try:
-                                sc_sf[key] = int(body["surfacing"][key])
-                            except (TypeError, ValueError):
-                                pass
+                    for key, value in surfacing_values.items():
+                        sc_sf[key] = value
                     if "sampling" in body["surfacing"] and isinstance(body["surfacing"]["sampling"], dict):
                         sc_samp = sc_sf.setdefault("sampling", {})
                         if not isinstance(sc_samp, dict):
                             sc_samp = {}
                             sc_sf["sampling"] = sc_samp
-                        src_samp = body["surfacing"]["sampling"]
                         if sampling_enabled is not None:
                             sc_samp["enabled"] = sampling_enabled
-                        for key in ("top_k", "sample_k"):
-                            if key in src_samp:
-                                try:
-                                    sc_samp[key] = int(src_samp[key])
-                                except (TypeError, ValueError):
-                                    pass
-                        if "temperature" in src_samp:
-                            try:
-                                sc_samp["temperature"] = float(src_samp["temperature"])
-                            except (TypeError, ValueError):
-                                pass
+                        for key, value in sampling_values.items():
+                            sc_samp[key] = value
 
                 if deployment_public_url is not None:
                     sc_deployment = save_config.get("deployment")
@@ -3394,12 +3465,25 @@ def register(mcp) -> None:
             return err
 
         new_token = secrets.token_urlsafe(32)
-        sh.config["mcp_token"] = new_token
 
-        try:
-            atomic_update_config_yaml(lambda save_config: save_config.__setitem__("mcp_token", new_token))
-        except Exception as e:
-            return JSONResponse({"error": f"persist failed: {e}"}, status_code=500)
+        # 原生锁覆盖“落盘 + 发布”整个提交段，且临界区内没有 await；既避免
+        # 并发请求发生磁盘 B、运行态 A 的逆序，也不产生 asyncio 跨循环绑定。
+        with mcp_token_commit_lock:
+            try:
+                atomic_update_config_yaml(
+                    lambda save_config: save_config.__setitem__(
+                        "mcp_token", new_token
+                    )
+                )
+            except Exception as e:
+                return JSONResponse(
+                    {"error": f"persist failed: {e}"}, status_code=500
+                )
+
+            # 鉴权每次请求都直接读取 sh.config；必须先确认持久化成功，再发布运行态。
+            # 否则磁盘写失败时接口虽然返回 500，新 token 却已经即时生效，重启后又
+            # 回到旧 token，形成无法从响应判断的临时授权状态。
+            sh.config["mcp_token"] = new_token
 
         env_override = bool(os.environ.get("OMBRE_MCP_TOKEN", "").strip())
         return JSONResponse({

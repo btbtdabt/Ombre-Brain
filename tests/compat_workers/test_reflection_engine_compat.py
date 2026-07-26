@@ -16,6 +16,13 @@ def _config(worker_config):
     return worker_config
 
 
+def test_daily_chat_memory_defaults_to_off(worker_config):
+    engine = ReflectionEngine(_config(worker_config))
+
+    assert engine.daily_chat_memory_mode == "off"
+    assert engine._normalize_daily_chat_memory_mode("unknown") == "off"
+
+
 def test_reflection_prompts_preserve_non_template_affect_contract(worker_config):
     engine = ReflectionEngine(_config(worker_config))
 

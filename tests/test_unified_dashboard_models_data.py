@@ -301,6 +301,10 @@ def test_portrait_apply_now_is_described_as_process_local_not_saved() -> None:
 
     assert "Applied to this process." in source
     assert "Use Save to config for restart durability." in source
+    assert (
+        "{ path: 'reflection.daily_chat_memory_mode', label: 'Daily chat memory mode', "
+        "type: 'select', options: ['off', 'review', 'auto'], default: 'off' }"
+    ) in source
 
     for section in (
         "dehydration",

@@ -83,6 +83,9 @@ _MAX_UPDATE_MEMBER_BYTES = 16 * 1024 * 1024
 _MAX_UPDATE_TOTAL_BYTES = 128 * 1024 * 1024
 _MAX_UPDATE_COMPRESSION_RATIO = 500.0
 _MAX_UPDATE_MANIFEST_BYTES = 2 * 1024 * 1024
+_MAX_DEPENDENCY_MANIFEST_BYTES = 2 * 1024 * 1024
+_DEPENDENCY_MANIFEST_NAMES = ("requirements.txt", "requirements.lock.txt")
+_DEPENDENCY_ABSENCE_PREFIX = ".absent-"
 
 # A hot update mutates the live source tree and its single ``_prev`` rollback
 # point.  The reservation therefore has to be process-wide, rather than an
@@ -501,11 +504,18 @@ def _restore_from_prev(repo_root: str, prev_dir: str, src_root: str, frontend_ro
                     shutil.copy2(prev_ver, _vp)
                 except OSError:
                     pass
-        prev_requirements = os.path.join(prev_dir, "requirements.txt")
-        if os.path.isfile(prev_requirements):
-            shutil.copy2(
-                prev_requirements, os.path.join(repo_root, "requirements.txt")
+        for root_name in _DEPENDENCY_MANIFEST_NAMES:
+            previous = os.path.join(prev_dir, root_name)
+            current = os.path.join(repo_root, root_name)
+            absent_marker = os.path.join(
+                prev_dir, f"{_DEPENDENCY_ABSENCE_PREFIX}{root_name}"
             )
+            if os.path.isfile(previous):
+                shutil.copy2(previous, current)
+            elif os.path.isfile(absent_marker) and os.path.isfile(current):
+                # 本次更新可能给旧版运行目录首次补入 lock。回滚必须恢复“原本不存在”
+                # 的状态，否则下次更新会把失败版本的清单误当成当前基线。
+                os.remove(current)
         return True
     except Exception:
         return False
@@ -529,10 +539,18 @@ def _inspect_update_archive(archive_path: str) -> dict:
             version_bytes = None
         try:
             requirements_bytes = _read_bounded_zip_member(
-                zf, top + "requirements.txt", 2 * 1024 * 1024
+                zf, top + "requirements.txt", _MAX_DEPENDENCY_MANIFEST_BYTES
             )
         except KeyError:
             requirements_bytes = None
+        try:
+            requirements_lock_bytes = _read_bounded_zip_member(
+                zf,
+                top + "requirements.lock.txt",
+                _MAX_DEPENDENCY_MANIFEST_BYTES,
+            )
+        except KeyError:
+            requirements_lock_bytes = None
         return {
             "top": top,
             "target_version": (
@@ -542,6 +560,7 @@ def _inspect_update_archive(archive_path: str) -> dict:
             ),
             "version_bytes": version_bytes,
             "requirements_bytes": requirements_bytes,
+            "requirements_lock_bytes": requirements_lock_bytes,
             "plan": _plan_update_files(zf, top),
         }
 
@@ -563,10 +582,20 @@ def _backup_update_tree(
     shutil.copytree(src_root, os.path.join(prev_dir, "src"))
     if os.path.isdir(frontend_root):
         shutil.copytree(frontend_root, os.path.join(prev_dir, "frontend"))
-    for root_name in ("VERSION", "requirements.txt"):
+    for root_name in ("VERSION",):
         current = os.path.join(repo_root, root_name)
         if os.path.isfile(current):
             shutil.copy2(current, os.path.join(prev_dir, root_name))
+    for root_name in _DEPENDENCY_MANIFEST_NAMES:
+        current = os.path.join(repo_root, root_name)
+        if os.path.isfile(current):
+            shutil.copy2(current, os.path.join(prev_dir, root_name))
+        else:
+            marker = os.path.join(
+                prev_dir, f"{_DEPENDENCY_ABSENCE_PREFIX}{root_name}"
+            )
+            with open(marker, "wb"):
+                pass
 
 
 def _apply_update_files(
@@ -602,35 +631,102 @@ def _apply_update_files(
     return updated
 
 
-def _requirements_changed(repo_root: str, new_requirements: bytes | None) -> bool:
-    if new_requirements is None or not new_requirements.strip():
+def _normalize_dependency_manifest(data: bytes | None) -> bytes:
+    """只消除跨平台换行差异，不改写任何依赖或 hash 内容。"""
+
+    if not data:
+        return b""
+    return data.replace(b"\r\n", b"\n").replace(b"\r", b"\n").strip()
+
+
+def _read_dependency_baseline(repo_root: str, root_name: str) -> bytes | None:
+    """读取当前依赖基线；持久代码目录缺文件时回退镜像内置根目录。"""
+
+    roots = [os.path.abspath(repo_root)]
+    configured_image_root = os.environ.get("OMBRE_IMAGE_ROOT", "").strip()
+    if configured_image_root:
+        image_root = os.path.abspath(configured_image_root)
+        if image_root not in roots:
+            roots.append(image_root)
+    elif sh.in_docker():
+        image_root = os.path.abspath("/app")
+        if image_root not in roots:
+            roots.append(image_root)
+
+    for root in roots:
+        path = os.path.join(root, root_name)
+        if not os.path.isfile(path):
+            continue
+        with open(path, "rb") as handle:
+            data = handle.read(_MAX_DEPENDENCY_MANIFEST_BYTES + 1)
+        if len(data) > _MAX_DEPENDENCY_MANIFEST_BYTES:
+            raise ValueError(f"当前 {root_name} 超过 2 MiB 上限")
+        if data.strip():
+            return data
+    return None
+
+
+def _requirements_changed(
+    repo_root: str,
+    new_requirements: bytes | None,
+    new_requirements_lock: bytes | None = None,
+) -> bool:
+    """依据正式发布 lock 判断依赖是否变化，旧包缺 lock 时兼容原判定。"""
+
+    new_lock = _normalize_dependency_manifest(new_requirements_lock)
+    if new_lock:
+        old_lock = _read_dependency_baseline(repo_root, "requirements.lock.txt")
+        # 新包声明了正式发布 lock，就只能与同类型基线比较。基线缺失时不能拿
+        # requirements.txt 猜测传递依赖是否相同，必须按真实变化 fail closed。
+        return old_lock is None or (
+            new_lock != _normalize_dependency_manifest(old_lock)
+        )
+
+    new_source = _normalize_dependency_manifest(new_requirements)
+    if not new_source:
         return False
-    requirements_path = os.path.join(repo_root, "requirements.txt")
-    old_requirements = b""
-    if os.path.isfile(requirements_path):
-        with open(requirements_path, "rb") as handle:
-            old_requirements = handle.read(2 * 1024 * 1024 + 1)
-        if len(old_requirements) > 2 * 1024 * 1024:
-            raise ValueError("当前 requirements.txt 超过 2 MiB 上限")
-    return new_requirements.strip() != old_requirements.strip()
+    old_source = _read_dependency_baseline(repo_root, "requirements.txt")
+    return new_source != _normalize_dependency_manifest(old_source)
 
 
-def _install_update_requirements(requirements_path: str, data: bytes):
-    """Atomically store requirements and run pip without buffering its output."""
+def _sync_update_dependency_manifests(
+    repo_root: str,
+    requirements_bytes: bytes | None,
+    requirements_lock_bytes: bytes | None,
+) -> None:
+    """成功更新时同步根级依赖清单，使后续热更新拥有稳定本地基线。"""
+
+    for root_name, data in (
+        ("requirements.txt", requirements_bytes),
+        ("requirements.lock.txt", requirements_lock_bytes),
+    ):
+        if data is not None and data.strip():
+            _atomic_write_bytes(os.path.join(repo_root, root_name), data)
+
+
+def _install_update_requirements(
+    requirements_path: str,
+    data: bytes,
+    *,
+    require_hashes: bool = False,
+):
+    """原子保存依赖清单，并在工作线程中执行受约束的 pip 安装。"""
 
     import subprocess
 
     _atomic_write_bytes(requirements_path, data)
+    command = [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--no-cache-dir",
+    ]
+    if require_hashes:
+        command.append("--require-hashes")
+    command.extend(("-r", requirements_path))
     return subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "install",
-            "--no-cache-dir",
-            "-r",
-            requirements_path,
-        ],
+        command,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         timeout=600,
@@ -909,6 +1005,8 @@ def register(mcp) -> None:
                 )
                 plan = inspected["plan"]
                 target_version = inspected["target_version"]
+                requirements_bytes = inspected.get("requirements_bytes")
+                requirements_lock_bytes = inspected.get("requirements_lock_bytes")
 
                 # Refuse a valid-but-older archive before creating _prev or
                 # touching any runtime file.  Explicit release-channel users
@@ -979,14 +1077,18 @@ def register(mcp) -> None:
                 if inspected["version_bytes"] is not None:
                     yield f"data: 版本号已同步为 v{target_version}…\n\n"
 
-                # #4a ③：依赖变更 → best-effort pip install。  Comparing,
-                # writing, and the potentially ten-minute subprocess are all
-                # off-loop and remain protected from cancellation races.
+                # #4a ③：先判定并同步清单，再完成代码编译自检；只有这些可回滚步骤
+                # 全部成功后才允许 pip 改动解释器环境，避免后续失败留下半更新依赖。
+                requirements_changed = False
+                install_lock = False
+                install_name = ""
+                install_bytes = None
                 try:
                     requirements_changed = await _await_update_worker(
                         _requirements_changed,
                         repo_root,
-                        inspected["requirements_bytes"],
+                        requirements_bytes,
+                        requirements_lock_bytes,
                     )
                     if requirements_changed:
                         if not _pip_install_allowed():
@@ -1001,18 +1103,29 @@ def register(mcp) -> None:
                                 yield "data: ERROR:依赖发生变化且自动安装关闭，回滚失败，请手动恢复 _prev。\n\n"
                             return
 
-                        yield "data: 依赖清单有变化，正在 pip install…\n\n"
-                        pip_result = await _await_update_worker(
-                            _install_update_requirements,
-                            os.path.join(repo_root, "requirements.txt"),
-                            inspected["requirements_bytes"],
+                        install_lock = bool(
+                            requirements_lock_bytes
+                            and requirements_lock_bytes.strip()
                         )
-                        if pip_result.returncode != 0:
-                            restored = await _rollback_if_needed()
-                            state = "已回滚" if restored else "回滚失败"
-                            yield f"data: ERROR:依赖安装失败，{state}；服务不会重启。\n\n"
-                            return
-                        yield "data: 依赖安装完成…\n\n"
+                        install_name = (
+                            "requirements.lock.txt"
+                            if install_lock
+                            else "requirements.txt"
+                        )
+                        install_bytes = (
+                            requirements_lock_bytes
+                            if install_lock
+                            else requirements_bytes
+                        )
+                        if not install_bytes:
+                            raise ValueError("更新包缺少可安装的依赖清单")
+
+                    await _await_update_worker(
+                        _sync_update_dependency_manifests,
+                        repo_root,
+                        requirements_bytes,
+                        requirements_lock_bytes,
+                    )
                 except Exception as requirements_error:
                     restored = await _rollback_if_needed()
                     state = "已回滚" if restored else "回滚失败"
@@ -1032,6 +1145,27 @@ def register(mcp) -> None:
                         yield "data: ⚠️ 自动还原失败，请检查 _prev 备份目录并手动恢复。\n\n"
                     yield "data: ERROR:更新已中止（新代码自检失败，已回滚，未重启）\n\n"
                     return
+
+                if requirements_changed:
+                    yield "data: 依赖清单有变化，正在 pip install…\n\n"
+                    try:
+                        pip_result = await _await_update_worker(
+                            _install_update_requirements,
+                            os.path.join(repo_root, install_name),
+                            install_bytes,
+                            require_hashes=install_lock,
+                        )
+                    except Exception as requirements_error:
+                        restored = await _rollback_if_needed()
+                        state = "已回滚" if restored else "回滚失败"
+                        yield f"data: ERROR:依赖处理失败（{requirements_error}），{state}。\n\n"
+                        return
+                    if pip_result.returncode != 0:
+                        restored = await _rollback_if_needed()
+                        state = "已回滚" if restored else "回滚失败"
+                        yield f"data: ERROR:依赖安装失败，{state}；服务不会重启。\n\n"
+                        return
+                    yield "data: 依赖安装完成…\n\n"
 
                 # Remove the downloaded ZIP before handing the reservation to
                 # the restart task.  This also keeps failed/successful updates

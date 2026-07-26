@@ -160,7 +160,13 @@ async def test_import_merge_promotion_respects_high_importance_quota(
         target["score"] = 100
         return [target]
 
+    indexed_content = []
+
+    async def capture_content_index(indexed_id, content):
+        indexed_content.append((indexed_id, content))
+
     monkeypatch.setattr(bucket_mgr, "search", search_target)
+    monkeypatch.setattr(bucket_mgr, "_index_after_write", capture_content_index)
     engine = ImportEngine(
         test_config,
         bucket_mgr,
@@ -180,6 +186,7 @@ async def test_import_merge_promotion_respects_high_importance_quota(
     assert merged is True
     assert target["metadata"]["importance"] == 8
     assert "new imported event" in target["content"]
+    assert indexed_content == [(target_id, target["content"])]
     assert await count_high_importance(bucket_mgr=bucket_mgr) == 1
 
 

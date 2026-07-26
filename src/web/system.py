@@ -15,6 +15,7 @@ import asyncio
 from collections.abc import Iterable, Mapping
 import json
 import os
+import tempfile
 import time
 from typing import Any
 
@@ -138,19 +139,37 @@ def _probe_writable_dir(path: str) -> tuple[bool, str]:
         return False, "buckets_dir 未配置"
     if not os.path.isdir(path):
         return False, "目录不存在"
-    probe = os.path.join(path, ".ombre_diagnostics_probe")
+    probe = ""
+    fd = -1
     try:
-        with open(probe, "w", encoding="utf-8") as f:
+        fd, probe = tempfile.mkstemp(prefix=".ombre_diagnostics_probe_", dir=path)
+        handle = os.fdopen(fd, "w", encoding="utf-8")
+        fd = -1
+        with handle as f:
             f.write("ok")
-        os.remove(probe)
         return True, ""
     except Exception as e:
-        try:
-            if os.path.exists(probe):
-                os.remove(probe)
-        except Exception:
-            pass
         return False, str(e)
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            if probe:
+                os.remove(probe)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+
+
+def _build_isolated_vnext_preflight(policy: Any) -> dict[str, Any]:
+    """在隔离目录执行 vNext 诊断，不在用户 vault 创建 WAL 状态。"""
+    with tempfile.TemporaryDirectory(prefix="ombre-diagnostics-vnext-") as root:
+        runtime = LegacyRuntime.from_config({"buckets_dir": root, "policy": policy})
+        return VNextPreflightReportBuilder(runtime).build()
 
 
 def _build_diagnostics_observability_metrics(checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -784,7 +803,7 @@ async def build_system_diagnostics(
     ledger_reporter = getattr(sh.bucket_mgr, "ledger_integrity_report", None)
     if callable(ledger_reporter):
         try:
-            raw_ledger_report = ledger_reporter()
+            raw_ledger_report = await asyncio.to_thread(ledger_reporter)
             if not isinstance(raw_ledger_report, Mapping):
                 raise TypeError("ledger integrity report must be a mapping")
             ledger_report = dict(raw_ledger_report)
@@ -1145,8 +1164,10 @@ async def build_system_diagnostics(
 
     try:
         if buckets_dir:
-            runtime = LegacyRuntime.from_config({"buckets_dir": buckets_dir, "policy": cfg.get("policy", {})})
-            vnext_preflight = VNextPreflightReportBuilder(runtime).build()
+            vnext_preflight = await asyncio.to_thread(
+                _build_isolated_vnext_preflight,
+                cfg.get("policy", {}),
+            )
             checks.append(_check(
                 "vnext_preflight",
                 "vNext Preflight",

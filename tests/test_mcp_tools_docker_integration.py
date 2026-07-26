@@ -261,6 +261,38 @@ def test_all_tools_reject_schema_invalid_arguments(mcp_client, tool, arguments, 
     assert field.lower() in error_text.lower(), (tool, error_text)
 
 
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("breath", {}),
+        ("breath_search", {"query": "unknown-field-probe"}),
+        ("breath_advanced", {}),
+        ("hold", {"content": "unknown-field-probe", "test_data": True}),
+        ("grow", {"items": []}),
+        ("trace", {"bucket_id": "missing-unknown-field-probe"}),
+        ("anchor", {"bucket_id": "missing-unknown-field-probe"}),
+        ("release", {"bucket_id": "missing-unknown-field-probe"}),
+        ("pulse", {}),
+        ("plan", {"content": "unknown-field-probe"}),
+        ("letter_write", {"author": "user", "content": "unknown-field-probe"}),
+        ("letter_read", {}),
+        ("I", {"read": True}),
+        ("dream", {}),
+    ],
+)
+def test_all_tools_reject_unknown_arguments_before_execution(
+    mcp_client,
+    tool,
+    arguments,
+):
+    arguments = {**arguments, "unknown_contract_probe": True}
+    result = mcp_client.call_result(tool, arguments)
+
+    assert result.get("isError") is True, (tool, result)
+    error_text = mcp_client.result_text(result)
+    assert "unknown_contract_probe" in error_text, (tool, error_text)
+
+
 def test_breath_zero_argument_surface_contract(mcp_client):
     result = mcp_client.call("breath")
     assert result.strip()

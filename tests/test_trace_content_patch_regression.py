@@ -100,6 +100,39 @@ async def test_trace_patch_zero_or_multiple_matches_never_writes(trace_runtime):
 
 
 @pytest.mark.asyncio
+async def test_trace_patch_refreshes_appended_meaning_embedding(
+    trace_runtime,
+    monkeypatch,
+):
+    manager = trace_runtime
+    bucket_id = await manager.create(content="old body")
+    indexed_meaning = []
+
+    async def capture_meaning(target_id, meaning):
+        indexed_meaning.append((target_id, meaning))
+        return True
+
+    monkeypatch.setattr(
+        manager.embedding_engine,
+        "generate_and_store_meaning",
+        capture_meaning,
+        raising=False,
+    )
+
+    result = await trace_core(
+        bucket_id,
+        old_str="old body",
+        new_str="new body",
+        meaning_append="new perspective",
+    )
+    bucket = await manager.get(bucket_id)
+
+    assert "content=已局部替换" in result
+    assert bucket["metadata"]["meaning"] == ["new perspective"]
+    assert indexed_meaning == [(bucket_id, "new perspective")]
+
+
+@pytest.mark.asyncio
 async def test_trace_patch_supports_deletion_and_rejects_invalid_argument_pairs(
     trace_runtime,
 ):

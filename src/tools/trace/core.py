@@ -485,9 +485,9 @@ async def trace_core(
             if not success:
                 return f"修改失败: {bucket_id}"
 
-    # 注意：完整正文更新和局部替换都会在 BucketManager 内汇入
-    # _update_locked(content=...)，并投递 embedding outbox。这里不需要、也不应该
-    # 重复调用 generate_and_store，否则同一条内容会多打一次向量 API。
+    # 注意：完整正文更新和局部替换都会在 BucketManager 内先提交 Markdown，
+    # 释放桶租约后再投递 embedding outbox。这里不需要、也不应该重复调用
+    # generate_and_store，否则同一条内容会多打一次向量 API。
 
     # --- plan 桶人工/AI 显式 resolve → 联动 related_bucket / resolved_by ---
     # rule.md §1：plan 是承诺，承诺被显式放下，承载它的事件桶也不该再浮上来。

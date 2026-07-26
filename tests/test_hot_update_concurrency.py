@@ -6,9 +6,11 @@ import os
 import threading
 import zipfile
 from pathlib import Path
+from typing import cast
 
 import pytest
 from starlette.responses import StreamingResponse
+from starlette.types import Message, Receive, Scope, Send
 
 import web._shared as sh
 import web.meta as meta
@@ -175,11 +177,20 @@ async def _consume(response):
     return [chunk async for chunk in response.body_iterator]
 
 
-def _write_release_zip(destination, *, server_source="NEW_VALUE = 2\n"):
+def _write_release_zip(
+    destination,
+    *,
+    server_source="NEW_VALUE = 2\n",
+    version="2.7.1\n",
+    requirements="same-package==1\n",
+    requirements_lock=None,
+):
     top = "Ombre-Brain-main/"
     with zipfile.ZipFile(destination, "w") as archive:
-        archive.writestr(top + "VERSION", "2.7.1\n")
-        archive.writestr(top + "requirements.txt", "same-package==1\n")
+        archive.writestr(top + "VERSION", version)
+        archive.writestr(top + "requirements.txt", requirements)
+        if requirements_lock is not None:
+            archive.writestr(top + "requirements.lock.txt", requirements_lock)
         archive.writestr(top + "src/server.py", server_source)
         archive.writestr(top + "frontend/app.js", "// new\n")
 
@@ -251,6 +262,232 @@ async def test_successful_update_keeps_blocking_stages_off_loop_and_restarts(
     assert all(thread_id != loop_thread for thread_id in stage_threads.values())
 
     assert await asyncio.to_thread(restarted.wait, 2)
+    assert not meta._UPDATE_JOB_LOCK.locked()
+
+
+@pytest.mark.asyncio
+async def test_284_docker_code_dir_uses_image_lock_and_updates_without_pip(
+    monkeypatch, tmp_path
+):
+    repo = tmp_path / "repo"
+    image_root = tmp_path / "image"
+    (repo / "src").mkdir(parents=True)
+    (repo / "frontend").mkdir()
+    image_root.mkdir()
+    (repo / "src" / "server.py").write_text("OLD_VALUE = 1\n", encoding="utf-8")
+    (repo / "frontend" / "app.js").write_text("// old\n", encoding="utf-8")
+    (repo / "VERSION").write_text("2.8.4\n", encoding="utf-8")
+    (repo / "src" / "VERSION").write_text("2.8.4\n", encoding="utf-8")
+    old_requirements = "# MCP\r\nmcp>=1.0.0\r\n"
+    new_requirements = "# MCP\nmcp>=1.27,<2\n"
+    old_lock = "mcp==1.28.1 \\\r\n    --hash=sha256:abc\r\n"
+    new_lock = "mcp==1.28.1 \\\n    --hash=sha256:abc\n"
+    (image_root / "requirements.txt").write_text(
+        old_requirements, encoding="utf-8", newline=""
+    )
+    (image_root / "requirements.lock.txt").write_text(
+        old_lock, encoding="utf-8", newline=""
+    )
+
+    handler = _handler(monkeypatch)
+    monkeypatch.setattr(sh, "repo_root", str(repo))
+    monkeypatch.setattr(sh, "version", "2.8.4")
+    monkeypatch.setenv("OMBRE_IMAGE_ROOT", str(image_root))
+    monkeypatch.delenv("OMBRE_UPDATE_ALLOW_PIP", raising=False)
+
+    async def fake_download(_client, _url, destination):
+        await asyncio.to_thread(
+            _write_release_zip,
+            destination,
+            version="2.8.7\n",
+            requirements=new_requirements,
+            requirements_lock=new_lock,
+        )
+        return os.path.getsize(destination)
+
+    def unexpected_install(*_args, **_kwargs):
+        raise AssertionError("发布 lock 未变化时不应调用 pip")
+
+    restarted = threading.Event()
+    monkeypatch.setattr(meta, "_download_update_archive_to_file", fake_download)
+    monkeypatch.setattr(meta, "_install_update_requirements", unexpected_install)
+    monkeypatch.setattr(meta, "_restart_self", restarted.set)
+
+    response = await handler(object())
+    events = "".join(await _consume(response))
+
+    assert "data: RESTART" in events
+    assert "ERROR:" not in events
+    assert (repo / "src" / "server.py").read_text(encoding="utf-8") == "NEW_VALUE = 2\n"
+    assert (repo / "frontend" / "app.js").read_text(encoding="utf-8") == "// new\n"
+    assert (repo / "VERSION").read_text(encoding="utf-8") == "2.8.7\n"
+    assert (repo / "src" / "VERSION").read_text(encoding="utf-8") == "2.8.7\n"
+    assert (repo / "requirements.txt").read_bytes() == new_requirements.encode()
+    assert (repo / "requirements.lock.txt").read_bytes() == new_lock.encode()
+    assert await asyncio.to_thread(restarted.wait, 2)
+    assert not meta._UPDATE_JOB_LOCK.locked()
+
+
+@pytest.mark.asyncio
+async def test_changed_release_lock_with_pip_disabled_rolls_back_everything(
+    monkeypatch, tmp_path
+):
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "frontend").mkdir()
+    (repo / "src" / "server.py").write_text("OLD_VALUE = 1\n", encoding="utf-8")
+    (repo / "frontend" / "app.js").write_text("// old\n", encoding="utf-8")
+    (repo / "VERSION").write_text("2.8.7\n", encoding="utf-8")
+    (repo / "src" / "VERSION").write_text("2.8.7\n", encoding="utf-8")
+    (repo / "requirements.txt").write_text("package==1\n", encoding="utf-8")
+    (repo / "requirements.lock.txt").write_text("package==1\n", encoding="utf-8")
+
+    handler = _handler(monkeypatch)
+    monkeypatch.setattr(sh, "repo_root", str(repo))
+    monkeypatch.setattr(sh, "version", "2.8.7")
+    monkeypatch.delenv("OMBRE_UPDATE_ALLOW_PIP", raising=False)
+
+    async def fake_download(_client, _url, destination):
+        await asyncio.to_thread(
+            _write_release_zip,
+            destination,
+            version="2.8.8\n",
+            requirements="package==2\n",
+            requirements_lock="package==2\n",
+        )
+        return os.path.getsize(destination)
+
+    install_called = False
+
+    def unexpected_install(*_args, **_kwargs):
+        nonlocal install_called
+        install_called = True
+        raise AssertionError("pip 关闭时不应调用安装器")
+
+    monkeypatch.setattr(meta, "_download_update_archive_to_file", fake_download)
+    monkeypatch.setattr(meta, "_install_update_requirements", unexpected_install)
+    restarted = threading.Event()
+    monkeypatch.setattr(meta, "_restart_self", restarted.set)
+
+    response = await handler(object())
+    events = "".join(await _consume(response))
+
+    assert "ERROR:新版依赖清单有变化" in events
+    assert "data: RESTART" not in events
+    assert install_called is False
+    assert (repo / "src" / "server.py").read_text(encoding="utf-8") == "OLD_VALUE = 1\n"
+    assert (repo / "frontend" / "app.js").read_text(encoding="utf-8") == "// old\n"
+    assert (repo / "VERSION").read_text(encoding="utf-8") == "2.8.7\n"
+    assert (repo / "src" / "VERSION").read_text(encoding="utf-8") == "2.8.7\n"
+    assert (repo / "requirements.txt").read_text(encoding="utf-8") == "package==1\n"
+    assert (repo / "requirements.lock.txt").read_text(encoding="utf-8") == "package==1\n"
+    assert restarted.is_set() is False
+    assert not meta._UPDATE_JOB_LOCK.locked()
+
+
+@pytest.mark.asyncio
+async def test_partial_dependency_manifest_sync_failure_rolls_back_handler_state(
+    monkeypatch, tmp_path
+):
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "frontend").mkdir()
+    (repo / "src" / "server.py").write_text("OLD_VALUE = 1\n", encoding="utf-8")
+    (repo / "frontend" / "app.js").write_text("// old\n", encoding="utf-8")
+    (repo / "VERSION").write_text("2.8.7\n", encoding="utf-8")
+    (repo / "src" / "VERSION").write_text("2.8.7\n", encoding="utf-8")
+    (repo / "requirements.txt").write_text("package>=1\n", encoding="utf-8")
+    (repo / "requirements.lock.txt").write_text("package==1\n", encoding="utf-8")
+
+    handler = _handler(monkeypatch)
+    monkeypatch.setattr(sh, "repo_root", str(repo))
+    monkeypatch.setattr(sh, "version", "2.8.7")
+
+    async def fake_download(_client, _url, destination):
+        await asyncio.to_thread(
+            _write_release_zip,
+            destination,
+            version="2.8.8\n",
+            requirements="package>=1  # refreshed\n",
+            requirements_lock="package==1\n",
+        )
+        return os.path.getsize(destination)
+
+    def partial_sync(repo_root, requirements_bytes, _requirements_lock_bytes):
+        meta._atomic_write_bytes(
+            os.path.join(repo_root, "requirements.txt"), requirements_bytes
+        )
+        raise OSError("synthetic lock manifest write failure")
+
+    restarted = threading.Event()
+    monkeypatch.setattr(meta, "_download_update_archive_to_file", fake_download)
+    monkeypatch.setattr(meta, "_sync_update_dependency_manifests", partial_sync)
+    monkeypatch.setattr(meta, "_restart_self", restarted.set)
+
+    response = await handler(object())
+    events = "".join(await _consume(response))
+
+    assert "ERROR:依赖处理失败" in events
+    assert "data: RESTART" not in events
+    assert (repo / "src" / "server.py").read_text(encoding="utf-8") == "OLD_VALUE = 1\n"
+    assert (repo / "frontend" / "app.js").read_text(encoding="utf-8") == "// old\n"
+    assert (repo / "VERSION").read_text(encoding="utf-8") == "2.8.7\n"
+    assert (repo / "src" / "VERSION").read_text(encoding="utf-8") == "2.8.7\n"
+    assert (repo / "requirements.txt").read_text(encoding="utf-8") == "package>=1\n"
+    assert (repo / "requirements.lock.txt").read_text(encoding="utf-8") == "package==1\n"
+    assert restarted.is_set() is False
+    assert not meta._UPDATE_JOB_LOCK.locked()
+
+
+@pytest.mark.asyncio
+async def test_compile_failure_happens_before_allowed_pip_install(
+    monkeypatch, tmp_path
+):
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "frontend").mkdir()
+    (repo / "src" / "server.py").write_text("OLD_VALUE = 1\n", encoding="utf-8")
+    (repo / "frontend" / "app.js").write_text("// old\n", encoding="utf-8")
+    (repo / "VERSION").write_text("2.8.7\n", encoding="utf-8")
+    (repo / "src" / "VERSION").write_text("2.8.7\n", encoding="utf-8")
+    (repo / "requirements.txt").write_text("package>=1\n", encoding="utf-8")
+    (repo / "requirements.lock.txt").write_text("package==1\n", encoding="utf-8")
+
+    handler = _handler(monkeypatch)
+    monkeypatch.setattr(sh, "repo_root", str(repo))
+    monkeypatch.setattr(sh, "version", "2.8.7")
+    monkeypatch.setenv("OMBRE_UPDATE_ALLOW_PIP", "1")
+
+    async def fake_download(_client, _url, destination):
+        await asyncio.to_thread(
+            _write_release_zip,
+            destination,
+            server_source="def broken(:\n",
+            version="2.8.8\n",
+            requirements="package>=2\n",
+            requirements_lock="package==2\n",
+        )
+        return os.path.getsize(destination)
+
+    install_called = False
+
+    def unexpected_install(*_args, **_kwargs):
+        nonlocal install_called
+        install_called = True
+        raise AssertionError("代码自检失败后不应再执行 pip")
+
+    monkeypatch.setattr(meta, "_download_update_archive_to_file", fake_download)
+    monkeypatch.setattr(meta, "_install_update_requirements", unexpected_install)
+
+    response = await handler(object())
+    events = "".join(await _consume(response))
+
+    assert "新代码自检未通过" in events
+    assert "data: RESTART" not in events
+    assert install_called is False
+    assert (repo / "src" / "server.py").read_text(encoding="utf-8") == "OLD_VALUE = 1\n"
+    assert (repo / "requirements.txt").read_text(encoding="utf-8") == "package>=1\n"
+    assert (repo / "requirements.lock.txt").read_text(encoding="utf-8") == "package==1\n"
     assert not meta._UPDATE_JOB_LOCK.locked()
 
 
@@ -337,8 +574,15 @@ async def test_asgi_send_failure_releases_unstarted_stream(monkeypatch):
         yield "never reached"
 
     response = meta._UpdateStreamingResponse(body(), reservation)
+    async def receive() -> Message:
+        return {"type": "http.disconnect"}
+
+    async def send(_message: Message) -> None:
+        return None
+
+    scope: Scope = {"type": "http"}
     with pytest.raises(RuntimeError, match="send failure"):
-        await response({}, None, None)
+        await response(scope, cast(Receive, receive), cast(Send, send))
 
     next_reservation = meta._UpdateJobReservation()
     assert next_reservation.acquire()

@@ -421,7 +421,7 @@ _wsh.init_runtime(
 # 所有可能含 PII 的字段（content / 信件正文等）只记 length，不记内容。
 # =============================================================
 def _fmt_log_val(v: object) -> str:
-    """日志 value 的安全格式化：bool/int/float 原样；str 截 40 字符并去换行；其它转 str。"""
+    """日志 value 的安全格式化：文本只记长度，绝不记录用户原文。"""
     if v is None:
         return "_"
     if isinstance(v, bool):
@@ -429,8 +429,7 @@ def _fmt_log_val(v: object) -> str:
     if isinstance(v, (int, float)):
         return str(v)
     if isinstance(v, str):
-        s = v.replace("\n", "\\n").replace(" ", "_")
-        return s if len(s) <= 40 else s[:37] + "..."
+        return f"str_len:{len(v)}"
     return type(v).__name__
 
 
@@ -450,9 +449,31 @@ def _log_op_ok(op: str, result: object) -> None:
     logger.info(f"op={op} phase=ok bytes={size}")
 
 
+def _safe_exception_type(exc: BaseException) -> str:
+    """只保留可安全写入响应与日志的 ASCII 异常类型名。"""
+    raw_type = type(exc).__name__
+    safe_type = "".join(
+        char
+        for char in raw_type
+        if char.isascii() and (char.isalnum() or char == "_")
+    )[:80]
+    return safe_type or "Exception"
+
+
 def _log_op_err(op: str, exc: BaseException) -> None:
-    # 用 .exception 让 traceback 进 server.log，便于事后定位
-    logger.exception(f"op={op} phase=err err={type(exc).__name__}:{exc}")
+    logger.error(
+        "op=%s phase=err err_type=%s detail=hidden",
+        op,
+        _safe_exception_type(exc),
+    )
+
+
+def _safe_exception_detail(exc: BaseException) -> str:
+    """异常对外或持久化前只保留类型与泛化说明。"""
+    return (
+        f"{_safe_exception_type(exc)}: 工具执行失败；"
+        "异常正文已隐藏，以保护密钥、本机路径与调用内容。"
+    )
 
 
 async def _with_notice(
@@ -465,8 +486,8 @@ async def _with_notice(
     职责（统一错误规范）：
     1. 入口：begin_warnings() 初始化本调用的 W/I channel。
     2. 出口：拼接顺序 = [删除通知] + [工具正文] + [本调用产生的 W/I 提示].
-    3. 异常：捕获后 record OB-E004，返回标准格式（含最近 15 条 log），
-       不让 MCP 协议层看到裸异常字符串。
+    3. 异常：捕获后 record OB-E004，响应、持久错误与日志只保留异常类型和
+       泛化说明，不能复制异常正文或 traceback。
     4. 任务A：op 非空时，在 entry/ok/err 三处打结构化日志。
     """
     if op:
@@ -479,10 +500,19 @@ async def _with_notice(
             _log_op_err(op, e)
         # OB-E004：MCP 工具执行异常 —— 不静默，给 LLM 一个能看懂的字符串
         try:
-            record_error("OB-E004", f"{type(e).__name__}: {e}")
-            err_str = format_error("OB-E004", f"{type(e).__name__}: {e}")
+            detail = _safe_exception_detail(e)
+            record_error("OB-E004", detail)
+            err_str = format_error(
+                "OB-E004",
+                detail,
+                include_logs=False,
+            )
         except Exception:
-            err_str = f"❌ [OB-E004] MCP 工具执行异常\n{type(e).__name__}: {e}"
+            try:
+                fallback_detail = _safe_exception_detail(e)
+            except Exception:
+                fallback_detail = "Exception: 工具执行失败；异常正文已隐藏。"
+            err_str = f"❌ [OB-E004] MCP 工具执行异常\n{fallback_detail}"
         # 仍把通道里已累计的提示拼上
         try:
             extras = format_warnings_suffix(pop_warnings())

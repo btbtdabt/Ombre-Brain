@@ -54,14 +54,14 @@ class ToolSpec:
     handler: ToolHandler
     description: str
     advertised_schema: dict[str, Any] | None = None
-    forbid_extra_args: bool = False
+    forbid_extra_args: bool = True
 
 
 def _tool(
     handler: ToolHandler,
     *,
     advertised_schema: dict[str, Any] | None = None,
-    forbid_extra_args: bool = False,
+    forbid_extra_args: bool = True,
 ) -> ToolSpec:
     return ToolSpec(
         name=handler.__name__,
@@ -135,10 +135,9 @@ TOOL_MANIFEST = (
             "title": "breathArguments",
             "type": "object",
         },
-        forbid_extra_args=True,
     ),
     *(
-        _tool(handler, forbid_extra_args=handler is trace)
+        _tool(handler)
         for handler in (
             breath_search,
             breath_advanced,

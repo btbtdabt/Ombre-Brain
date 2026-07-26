@@ -2,6 +2,8 @@ import asyncio
 import hashlib
 import json
 import sqlite3
+import time
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -627,12 +629,12 @@ async def test_poison_item_does_not_trip_circuit_or_block_other_items(tmp_path):
         circuit_base_seconds=5,
         circuit_max_seconds=5,
     )
-    poison_bucket_id_holder: list[str] = []
+    poison_content = "这条内容永远生成不出向量"
 
     class LazyPoisonEngine(RecordingEngine):
         async def generate_and_store(self, bucket_id, content):
             self.calls.append((bucket_id, content))
-            if poison_bucket_id_holder and bucket_id == poison_bucket_id_holder[0]:
+            if content == poison_content:
                 return False
             self.hashes[bucket_id] = content_hash(content)
             return True
@@ -644,8 +646,7 @@ async def test_poison_item_does_not_trip_circuit_or_block_other_items(tmp_path):
 
     await outbox.start(reconcile=False)
     try:
-        poison_id = await manager.create(content="这条内容永远生成不出向量")
-        poison_bucket_id_holder.append(poison_id)
+        await manager.create(content=poison_content)
 
         # 毒药桶自己反复重试很多次（远超 circuit_failure_threshold=2），
         # 熔断绝不能因此打开。
@@ -661,6 +662,252 @@ async def test_poison_item_does_not_trip_circuit_or_block_other_items(tmp_path):
         assert good_id in engine.hashes
     finally:
         await outbox.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancel_after_meaning_commit_survives_outbox_reload(
+    tmp_path,
+    monkeypatch,
+):
+    """请求在 Markdown 提交后取消，meaning 期望状态仍可由新 loop/进程恢复。"""
+    config = _config(tmp_path)
+
+    class MeaningEngine(RecordingEngine):
+        def __init__(self):
+            super().__init__()
+            self.meaning_calls = []
+
+        async def generate_and_store_meaning(self, bucket_id, meaning):
+            self.meaning_calls.append((bucket_id, meaning))
+            return True
+
+        def delete_meaning_embedding(self, bucket_id):
+            self.meaning_calls.append((bucket_id, ""))
+
+    engine = MeaningEngine()
+    manager = BucketManager(config, embedding_engine=engine)
+    bucket_id = await manager.create("durable meaning base")
+    outbox = EmbeddingOutbox(config, manager, engine)
+    manager.attach_embedding_outbox(outbox)
+
+    async def cancel_after_commit(*_args, **_kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(manager, "_index_after_update", cancel_after_commit)
+    with pytest.raises(asyncio.CancelledError):
+        await manager.update(bucket_id, meaning=["survives request loop"])
+
+    persisted = json.loads(
+        (tmp_path / "vault" / ".embedding_outbox.json").read_text("utf-8")
+    )
+    pending = persisted["items"][bucket_id]
+    assert pending.get("meaning_hash") == content_hash("survives request loop")
+    assert "survives request loop" not in json.dumps(persisted, ensure_ascii=False)
+
+    restarted = EmbeddingOutbox(config, manager, engine)
+    assert await restarted.process_once() is True
+    assert engine.meaning_calls == [(bucket_id, "survives request loop")]
+    assert restarted.is_pending(bucket_id) is False
+
+
+@pytest.mark.asyncio
+async def test_meaning_failure_does_not_starve_content_component(tmp_path):
+    bucket_id = "two-components"
+    content = "content must still be indexed"
+    meaning = "provider rejects this meaning"
+
+    class Manager:
+        async def get(self, requested_id):
+            assert requested_id == bucket_id
+            return {
+                "id": bucket_id,
+                "content": content,
+                "metadata": {"meaning": [meaning]},
+            }
+
+    class ComponentEngine(RecordingEngine):
+        def __init__(self):
+            super().__init__()
+            self.meaning_calls = []
+
+        async def generate_and_store_meaning(self, requested_id, text):
+            self.meaning_calls.append((requested_id, text))
+            return False
+
+    engine = ComponentEngine()
+    outbox = EmbeddingOutbox(
+        _config(
+            tmp_path,
+            retry_base_seconds=60,
+            retry_max_seconds=60,
+            circuit_failure_threshold=99,
+        ),
+        Manager(),
+        engine,
+    )
+    outbox.enqueue_meaning(bucket_id, meaning)
+    outbox.enqueue(bucket_id, content)
+
+    meaning_item = dict(outbox._items[bucket_id])
+    meaning_item["_component_kind"] = "meaning"
+    await outbox._process(bucket_id, meaning_item, engine)
+    failed = dict(outbox._items[bucket_id])
+    meaning_due = failed["meaning_next_attempt_at"]
+    assert failed["meaning_attempts"] == 1
+    assert meaning_due > time.time()
+
+    # The content component is independently due even though meaning is in a
+    # long retry backoff. Processing content must not reset meaning's failure.
+    assert await outbox.process_once() is True
+    assert engine.calls == [(bucket_id, content)]
+    assert engine.meaning_calls == [(bucket_id, meaning)]
+    remaining = outbox._items[bucket_id]
+    assert "content_hash" not in remaining
+    assert remaining["meaning_hash"] == content_hash(meaning)
+    assert remaining["meaning_attempts"] == 1
+    assert remaining["meaning_next_attempt_at"] == meaning_due
+
+
+def test_multiple_instances_merge_whole_file_updates_and_component_cas(tmp_path):
+    config = _config(tmp_path)
+    engine = RecordingEngine()
+
+    class Manager:
+        pass
+
+    first = EmbeddingOutbox(config, Manager(), engine)
+    second = EmbeddingOutbox(config, Manager(), engine)
+
+    # Both instances loaded the same empty snapshot before either write. Every
+    # RMW must reload under the shared sidecar lease instead of replacing the
+    # other instance's item set.
+    first.enqueue("content-only", "first content")
+    second.enqueue_meaning("meaning-only", "first meaning")
+    second.enqueue_meaning("combined", "combined meaning")
+    first.enqueue("combined", "combined content")
+
+    reloaded = EmbeddingOutbox(config, Manager(), engine)
+    assert reloaded.pending_ids() == {
+        "content-only",
+        "meaning-only",
+        "combined",
+    }
+    combined = reloaded._items["combined"]
+    assert combined["content_hash"] == content_hash("combined content")
+    assert combined["meaning_hash"] == content_hash("combined meaning")
+
+    # A stale instance completing one component and another instance failing
+    # its sibling must merge both CAS mutations without resurrecting or
+    # deleting unrelated work.
+    first.complete_content("combined", "combined content")
+    second._fail_component(
+        "combined",
+        content_hash("combined meaning"),
+        "meaning failed",
+        "meaning",
+    )
+    final = EmbeddingOutbox(config, Manager(), engine)
+    assert final.pending_ids() == {
+        "content-only",
+        "meaning-only",
+        "combined",
+    }
+    combined = final._items["combined"]
+    assert "content_hash" not in combined
+    assert combined["meaning_hash"] == content_hash("combined meaning")
+    assert combined["meaning_attempts"] == 1
+
+
+@pytest.mark.asyncio
+async def test_old_instance_observes_and_processes_new_instance_task(tmp_path):
+    bucket_id = "written-by-new-instance"
+    content = "durable shared task"
+
+    class Manager:
+        async def get(self, requested_id):
+            assert requested_id == bucket_id
+            return {"id": bucket_id, "content": content, "metadata": {}}
+
+    config = _config(tmp_path)
+    engine = RecordingEngine()
+    old = EmbeddingOutbox(config, Manager(), engine)
+    new = EmbeddingOutbox(config, Manager(), engine)
+    new.enqueue(bucket_id, content)
+
+    assert old.status()["pending"] == 1
+    assert await old.process_once() is True
+    assert engine.calls == [(bucket_id, content)]
+    assert EmbeddingOutbox(config, Manager(), engine).pending_ids() == set()
+
+
+@pytest.mark.asyncio
+async def test_worker_revalidates_component_inside_derived_turn(tmp_path):
+    bucket_id = "stale-worker"
+    content = "already completed elsewhere"
+
+    class Manager:
+        def __init__(self):
+            self.turns = 0
+
+        @asynccontextmanager
+        async def _derived_index_turn(self, requested_id):
+            assert requested_id == bucket_id
+            self.turns += 1
+            yield
+
+        async def get(self, _requested_id):
+            pytest.fail("stale work must be rejected before reading the bucket")
+
+    config = _config(tmp_path)
+    engine = RecordingEngine()
+    manager = Manager()
+    outbox = EmbeddingOutbox(config, manager, engine)
+    outbox.enqueue(bucket_id, content)
+    _, stale_item, _ = outbox._next_due()
+    assert stale_item is not None
+
+    other = EmbeddingOutbox(config, manager, engine)
+    other.complete_content(bucket_id, content)
+    await outbox._process(bucket_id, stale_item, engine)
+
+    assert manager.turns == 1
+    assert engine.calls == []
+    assert outbox.status()["pending"] == 0
+
+
+def test_v2_shared_retry_state_migrates_to_each_pending_component(tmp_path):
+    config = _config(tmp_path)
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    queued_at = "2026-01-01T00:00:00"
+    retry_at = time.time() + 30
+    (vault / ".embedding_outbox.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "items": {
+                    "legacy": {
+                        "content_hash": content_hash("legacy content"),
+                        "meaning_hash": content_hash("legacy meaning"),
+                        "queued_at": queued_at,
+                        "updated_at": queued_at,
+                        "attempts": 2,
+                        "next_attempt_at": retry_at,
+                        "last_attempt_at": queued_at,
+                        "last_error": "legacy failure",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    outbox = EmbeddingOutbox(config, object(), RecordingEngine())
+    item = outbox._items["legacy"]
+    for kind in ("content", "meaning"):
+        assert item[f"{kind}_attempts"] == 2
+        assert item[f"{kind}_next_attempt_at"] == retry_at
+        assert item[f"{kind}_last_error"] == "legacy failure"
 
 
 def test_embedding_schema_migrates_and_records_content_hash(tmp_path):

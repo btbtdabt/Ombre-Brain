@@ -1,4 +1,6 @@
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
@@ -24,6 +26,9 @@ class FakeMCP:
 
 
 class FakeBucketManager:
+    def __init__(self):
+        self.ledger_thread_id = None
+
     async def get_stats(self):
         return {
             "permanent_count": 1,
@@ -32,6 +37,7 @@ class FakeBucketManager:
         }
 
     def ledger_integrity_report(self):
+        self.ledger_thread_id = threading.get_ident()
         return {
             "ok": True,
             "path": "buckets/_ledger/events.jsonl",
@@ -234,7 +240,9 @@ Diagnostics regression tests.
         "mcp_require_auth": False,
         "github_sync": {"repo": "owner/repo", "branch": "main", "path_prefix": "ombre"},
     })
-    monkeypatch.setattr(system.sh, "bucket_mgr", FakeBucketManager())
+    bucket_mgr = FakeBucketManager()
+    event_loop_thread_id = threading.get_ident()
+    monkeypatch.setattr(system.sh, "bucket_mgr", bucket_mgr)
     monkeypatch.setattr(system.sh, "decay_engine", FakeDecayEngine())
     monkeypatch.setattr(system.sh, "embedding_engine", StandbyEmbeddingEngine())
     monkeypatch.setattr(system.sh, "github_sync_instance", FakeGithubSync())
@@ -253,6 +261,10 @@ Diagnostics regression tests.
     payload = await system.build_system_diagnostics()
     by_id = {check["id"]: check for check in payload["checks"]}
 
+    assert bucket_mgr.ledger_thread_id is not None
+    assert bucket_mgr.ledger_thread_id != event_loop_thread_id
+    assert not (buckets_dir / ".ombrebrain-v3").exists()
+    assert list(buckets_dir.glob(".ombre_diagnostics_probe_*")) == []
     assert payload["ok"] is False
     assert payload["summary"]["error"] >= 2
     assert by_id["storage"]["status"] == "ok"
@@ -371,6 +383,56 @@ def test_public_tool_diagnostics_detect_live_registry_drift():
     assert snapshot["matches_manifest"] is False
     assert "hold" in snapshot["missing_tool_names"]
     assert snapshot["unexpected_tool_names"] == ["unexpected_tool"]
+
+
+def test_writable_probe_uses_unique_files_and_always_cleans_up(monkeypatch, tmp_path):
+    legacy_probe = tmp_path / ".ombre_diagnostics_probe"
+    legacy_probe.write_text("do-not-overwrite", encoding="utf-8")
+    observed_paths = []
+    observed_lock = threading.Lock()
+    real_mkstemp = system.tempfile.mkstemp
+
+    def recording_mkstemp(*args, **kwargs):
+        fd, path = real_mkstemp(*args, **kwargs)
+        with observed_lock:
+            observed_paths.append(path)
+        return fd, path
+
+    monkeypatch.setattr(system.tempfile, "mkstemp", recording_mkstemp)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(
+            pool.map(lambda _index: system._probe_writable_dir(str(tmp_path)), range(16))
+        )
+
+    assert results == [(True, "")] * 16
+    assert len(observed_paths) == 16
+    assert len(set(observed_paths)) == 16
+    assert all(not system.os.path.exists(path) for path in observed_paths)
+    assert legacy_probe.read_text(encoding="utf-8") == "do-not-overwrite"
+
+
+def test_writable_probe_cleans_up_when_opening_the_probe_fails(monkeypatch, tmp_path):
+    observed_paths = []
+    real_mkstemp = system.tempfile.mkstemp
+
+    def recording_mkstemp(*args, **kwargs):
+        fd, path = real_mkstemp(*args, **kwargs)
+        observed_paths.append(path)
+        return fd, path
+
+    def fail_fdopen(*_args, **_kwargs):
+        raise OSError("synthetic probe failure")
+
+    monkeypatch.setattr(system.tempfile, "mkstemp", recording_mkstemp)
+    monkeypatch.setattr(system.os, "fdopen", fail_fdopen)
+
+    writable, error = system._probe_writable_dir(str(tmp_path))
+
+    assert writable is False
+    assert "synthetic probe failure" in error
+    assert len(observed_paths) == 1
+    assert not system.os.path.exists(observed_paths[0])
 
 
 @pytest.mark.asyncio

@@ -5,16 +5,20 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+import errno
 import hashlib
 import os
 from pathlib import Path
 import re
 import threading
+from unittest.mock import MagicMock
 
 import frontmatter
 import pytest
 
 from bucket_manager import _filesystem_turn
+from tools import _common as common
+from tools import _runtime as rt
 from utils import parse_iso_datetime
 
 
@@ -36,6 +40,72 @@ async def test_filesystem_turn_hashes_key_and_does_not_steal_aged_live_lease(
                 pytest.fail("a live kernel lease must not be stolen by file age")
 
     assert not (tmp_path / "outside").exists()
+
+
+@pytest.mark.asyncio
+async def test_filesystem_turn_propagates_non_contention_os_error(
+    tmp_path,
+    monkeypatch,
+):
+    """不支持或损坏的锁系统调用不能伪装成普通竞争。"""
+    base = str(tmp_path / "vault")
+    unsupported = getattr(errno, "EOPNOTSUPP", errno.ENOSYS)
+    calls = 0
+
+    def fail_lock(*_args):
+        nonlocal calls
+        calls += 1
+        raise OSError(unsupported, "filesystem leases are unsupported")
+
+    if os.name == "nt":
+        import msvcrt
+
+        monkeypatch.setattr(msvcrt, "locking", fail_lock)
+    else:
+        import fcntl
+
+        monkeypatch.setattr(fcntl, "flock", fail_lock)
+
+    with pytest.raises(OSError) as caught:
+        async with _filesystem_turn(base, "unsupported-lock", timeout_seconds=0.05):
+            pytest.fail("a non-contention lock error must fail before entering")
+
+    assert caught.value.errno == unsupported
+    assert not isinstance(caught.value, TimeoutError)
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_filesystem_turn_releases_after_context_exception(tmp_path):
+    base = str(tmp_path / "vault")
+
+    with pytest.raises(RuntimeError, match="body failed"):
+        async with _filesystem_turn(base, "exception-release"):
+            raise RuntimeError("body failed")
+
+    async with _filesystem_turn(base, "exception-release", timeout_seconds=0.05):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_filesystem_turn_releases_after_task_cancellation(tmp_path):
+    base = str(tmp_path / "vault")
+    entered = asyncio.Event()
+    wait_forever = asyncio.Event()
+
+    async def holder():
+        async with _filesystem_turn(base, "cancel-release"):
+            entered.set()
+            await wait_forever.wait()
+
+    task = asyncio.create_task(holder())
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    async with _filesystem_turn(base, "cancel-release", timeout_seconds=0.05):
+        pass
 
 
 def test_filesystem_turn_serializes_independent_event_loops(tmp_path):
@@ -135,6 +205,350 @@ async def test_concurrent_create_override_never_overwrites_same_id(bucket_mgr):
         (await bucket_mgr.get(first))["content"],
         (await bucket_mgr.get(second))["content"],
     } == {"first body", "second body"}
+
+
+@pytest.mark.asyncio
+async def test_update_releases_bucket_turn_before_waiting_for_derived_index(
+    bucket_mgr,
+    monkeypatch,
+):
+    """慢 embedding provider 不得继续占用持久桶租约。"""
+    bucket_id = await bucket_mgr.create("meaning base", domain=["race"])
+    indexing_started = asyncio.Event()
+    release_indexing = asyncio.Event()
+
+    async def slow_meaning_index(_bucket_id, _meaning):
+        indexing_started.set()
+        await release_indexing.wait()
+
+    monkeypatch.setattr(bucket_mgr, "_sync_meaning_embedding", slow_meaning_index)
+    update_task = asyncio.create_task(
+        bucket_mgr.update(bucket_id, meaning_append="new perspective")
+    )
+    await asyncio.wait_for(indexing_started.wait(), timeout=1)
+
+    acquired = False
+    try:
+        async with _filesystem_turn(
+            str(bucket_mgr.base_dir),
+            f"bucket-{bucket_id}",
+            timeout_seconds=0.05,
+        ):
+            acquired = True
+    finally:
+        release_indexing.set()
+
+    assert acquired is True
+    assert await asyncio.wait_for(update_task, timeout=1) is True
+
+
+@pytest.mark.asyncio
+async def test_concurrent_updates_cannot_finish_with_stale_derived_content(
+    bucket_mgr,
+):
+    bucket_id = await bucket_mgr.create("initial", domain=["race"])
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    completed: list[str] = []
+
+    class OrderedEngine:
+        enabled = True
+
+        def __init__(self):
+            self.hashes = {}
+
+        def get_content_hash(self, requested_id):
+            return self.hashes.get(requested_id, "")
+
+        async def generate_and_store(self, requested_id, content):
+            if content == "first update":
+                first_started.set()
+                await release_first.wait()
+            completed.append(content)
+            self.hashes[requested_id] = hashlib.sha256(
+                content.encode("utf-8")
+            ).hexdigest()
+            return True
+
+    bucket_mgr.embedding_engine = OrderedEngine()
+    first = asyncio.create_task(bucket_mgr.update(bucket_id, content="first update"))
+    await asyncio.wait_for(first_started.wait(), timeout=1)
+    second = asyncio.create_task(bucket_mgr.update(bucket_id, content="second update"))
+
+    # 第二次 Markdown 提交不得等待第一次 provider 调用。
+    deadline = asyncio.get_running_loop().time() + 1
+    while (await bucket_mgr.get(bucket_id))["content"] != "second update":
+        if asyncio.get_running_loop().time() >= deadline:
+            pytest.fail("second Markdown update remained blocked by derived indexing")
+        await asyncio.sleep(0.01)
+
+    release_first.set()
+    assert await asyncio.gather(first, second) == [True, True]
+    assert completed[0] == "first update"
+    assert completed[-1] == "second update"
+    assert completed == ["first update", "second update"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_newer_update_still_converges_meaning_index(
+    bucket_mgr,
+    monkeypatch,
+):
+    """较新请求取消后，迟到的旧 provider 结果也不能成为最终 meaning。"""
+    bucket_id = await bucket_mgr.create("meaning cancellation base")
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    stored: list[str] = []
+
+    async def controlled_meaning_index(_bucket_id, meaning):
+        current = meaning[-1] if meaning else ""
+        if current == "meaning A":
+            first_started.set()
+            await release_first.wait()
+        stored.append(current)
+
+    monkeypatch.setattr(
+        bucket_mgr,
+        "_sync_meaning_embedding",
+        controlled_meaning_index,
+    )
+    first = asyncio.create_task(
+        bucket_mgr.update(bucket_id, meaning=["meaning A"])
+    )
+    await asyncio.wait_for(first_started.wait(), timeout=1)
+    newer = asyncio.create_task(
+        bucket_mgr.update(bucket_id, meaning=["meaning B"])
+    )
+
+    deadline = asyncio.get_running_loop().time() + 1
+    while (await bucket_mgr.get(bucket_id))["metadata"].get("meaning") != [
+        "meaning B"
+    ]:
+        if asyncio.get_running_loop().time() >= deadline:
+            pytest.fail("较新的 meaning 未在取消前提交到 Markdown")
+        await asyncio.sleep(0.01)
+
+    newer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await newer
+    release_first.set()
+    assert await asyncio.wait_for(first, timeout=1) is True
+
+    latest = await bucket_mgr.get(bucket_id)
+    assert latest["metadata"]["meaning"] == ["meaning B"]
+    assert stored[-1] == "meaning B"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_provider_wait_releases_derived_lease(
+    bucket_mgr,
+    monkeypatch,
+):
+    bucket_id = await bucket_mgr.create("cancel provider base")
+    provider_started = asyncio.Event()
+    wait_forever = asyncio.Event()
+
+    async def blocked_meaning_index(_bucket_id, _meaning):
+        provider_started.set()
+        await wait_forever.wait()
+
+    monkeypatch.setattr(
+        bucket_mgr,
+        "_sync_meaning_embedding",
+        blocked_meaning_index,
+    )
+    update = asyncio.create_task(
+        bucket_mgr.update(bucket_id, meaning=["cancelled meaning"])
+    )
+    await asyncio.wait_for(provider_started.wait(), timeout=1)
+    update.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await update
+
+    async with _filesystem_turn(
+        str(bucket_mgr.base_dir),
+        f"derived-index-{bucket_id}",
+        timeout_seconds=0.05,
+    ):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_hold_merge_releases_bucket_turn_before_derived_index(
+    bucket_mgr,
+    monkeypatch,
+):
+    """hold 合并路径不得在私有桶租约内等待 embedding。"""
+    old_content = "existing hold event"
+    new_content = "additional detail from the same event"
+    bucket_id = await bucket_mgr.create(old_content, domain=["race"])
+
+    async def find_target(*_args, **_kwargs):
+        bucket = await bucket_mgr.get(bucket_id)
+        assert bucket is not None
+        bucket["score"] = 100.0
+        return [bucket]
+
+    class SameEventJudge:
+        async def judge_same_event(self, *_args, **_kwargs):
+            return {"same_event": True, "confidence": 0.99, "reason": "same"}
+
+        def invalidate_cache(self, *_args, **_kwargs):
+            pass
+
+    indexing_started = asyncio.Event()
+    release_indexing = asyncio.Event()
+
+    async def slow_content_index(_bucket_id, _content):
+        indexing_started.set()
+        await release_indexing.wait()
+
+    monkeypatch.setattr(bucket_mgr, "search", find_target)
+    monkeypatch.setattr(bucket_mgr, "_index_after_write", slow_content_index)
+    monkeypatch.setattr(rt, "bucket_mgr", bucket_mgr, raising=False)
+    monkeypatch.setattr(rt, "embedding_engine", None, raising=False)
+    monkeypatch.setattr(rt, "dehydrator", SameEventJudge(), raising=False)
+    monkeypatch.setattr(rt, "config", {"merge_threshold": 75}, raising=False)
+    monkeypatch.setattr(rt, "logger", MagicMock(), raising=False)
+
+    merge_task = asyncio.create_task(
+        common.merge_or_create(
+            content=new_content,
+            tags=[],
+            importance=5,
+            domain=["race"],
+            valence=0.5,
+            arousal=0.3,
+            raw_merge=True,
+            source_tool="hold",
+        )
+    )
+    acquired = False
+    content_turn_acquired = False
+    target_turn_acquired = False
+    try:
+        await asyncio.wait_for(indexing_started.wait(), timeout=1)
+        async with _filesystem_turn(
+            str(bucket_mgr.base_dir),
+            f"bucket-{bucket_id}",
+            timeout_seconds=0.05,
+        ):
+            acquired = True
+
+        async def probe_outer_turns():
+            nonlocal content_turn_acquired, target_turn_acquired
+            async with common._content_turn(new_content):
+                content_turn_acquired = True
+            merge_key = hashlib.sha256(
+                bucket_id.encode("utf-8", errors="replace")
+            ).hexdigest()[: common._CONTENT_LOCK_KEY_HEX]
+            async with common._keyed_turn(f"merge-target-{merge_key}"):
+                target_turn_acquired = True
+
+        await asyncio.wait_for(probe_outer_turns(), timeout=0.2)
+    finally:
+        release_indexing.set()
+        result = await asyncio.wait_for(merge_task, timeout=1)
+
+    assert acquired is True
+    assert content_turn_acquired is True
+    assert target_turn_acquired is True
+    assert result == (bucket_id, True, "")
+    merged_bucket = await bucket_mgr.get(bucket_id)
+    assert merged_bucket is not None
+    assert merged_bucket["content"] == f"{old_content}\n\n---\n{new_content}"
+
+
+@pytest.mark.asyncio
+async def test_update_enqueues_outbox_after_releasing_bucket_turn(bucket_mgr):
+    bucket_id = await bucket_mgr.create("outbox lease base", domain=["race"])
+
+    class ProbingOutbox:
+        running = True
+
+        def enqueue(self, requested_id, _content, **_kwargs):
+            assert requested_id == bucket_id
+
+            async def acquire_same_bucket():
+                async with _filesystem_turn(
+                    str(bucket_mgr.base_dir),
+                    f"bucket-{bucket_id}",
+                    timeout_seconds=0.05,
+                ):
+                    return True
+
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                assert pool.submit(
+                    lambda: asyncio.run(acquire_same_bucket())
+                ).result(timeout=1)
+            return True
+
+        def enqueue_meaning(self, *_args, **_kwargs):
+            return True
+
+    bucket_mgr.attach_embedding_outbox(ProbingOutbox())
+    assert await bucket_mgr.update(bucket_id, content="outbox lease updated")
+
+
+@pytest.mark.asyncio
+async def test_hold_create_releases_content_and_quota_turns_before_indexing(
+    bucket_mgr,
+    monkeypatch,
+):
+    content = "new high importance hold outside coordination turns"
+    indexing_started = asyncio.Event()
+    release_indexing = asyncio.Event()
+
+    async def no_match(*_args, **_kwargs):
+        return []
+
+    async def slow_content_index(_bucket_id, _content):
+        indexing_started.set()
+        await release_indexing.wait()
+
+    monkeypatch.setattr(bucket_mgr, "search", no_match)
+    monkeypatch.setattr(bucket_mgr, "find_exact_content", lambda *_a, **_k: None)
+    monkeypatch.setattr(bucket_mgr, "_index_after_write", slow_content_index)
+    monkeypatch.setattr(rt, "bucket_mgr", bucket_mgr, raising=False)
+    monkeypatch.setattr(rt, "embedding_engine", None, raising=False)
+    monkeypatch.setattr(rt, "dehydrator", MagicMock(), raising=False)
+    monkeypatch.setattr(
+        rt,
+        "config",
+        {"merge_threshold": 75, "limits": {"high_importance_max": 100}},
+        raising=False,
+    )
+    monkeypatch.setattr(rt, "logger", MagicMock(), raising=False)
+
+    task = asyncio.create_task(
+        common.merge_or_create(
+            content=content,
+            tags=[],
+            importance=9,
+            domain=["race"],
+            valence=0.5,
+            arousal=0.3,
+            raw_merge=True,
+            source_tool="hold",
+        )
+    )
+    try:
+        await asyncio.wait_for(indexing_started.wait(), timeout=1)
+
+        async def probe_turns():
+            async with common._quota_turn("high_importance"):
+                pass
+            async with common._content_turn(content):
+                pass
+
+        await asyncio.wait_for(probe_turns(), timeout=0.2)
+    finally:
+        release_indexing.set()
+
+    bucket_id, merged, warning = await asyncio.wait_for(task, timeout=1)
+    assert bucket_id
+    assert merged is False
+    assert warning == ""
 
 
 @pytest.mark.asyncio

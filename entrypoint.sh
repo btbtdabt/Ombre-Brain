@@ -95,7 +95,10 @@ _restore_seed_swap() {
     rm -rf "$CODE_DIR/src" "$CODE_DIR/frontend" 2>/dev/null || true
     [ ! -d "$old_dir/src" ] || mv "$old_dir/src" "$CODE_DIR/src" 2>/dev/null || true
     [ ! -d "$old_dir/frontend" ] || mv "$old_dir/frontend" "$CODE_DIR/frontend" 2>/dev/null || true
-    [ ! -f "$old_dir/VERSION" ] || cp -a "$old_dir/VERSION" "$CODE_DIR/VERSION" 2>/dev/null || true
+    for root_file in VERSION requirements.txt requirements.lock.txt; do
+        rm -f "$CODE_DIR/$root_file" 2>/dev/null || true
+        [ ! -f "$old_dir/$root_file" ] || cp -a "$old_dir/$root_file" "$CODE_DIR/$root_file" 2>/dev/null || true
+    done
 }
 
 _seed_image_code() {
@@ -106,7 +109,12 @@ _seed_image_code() {
     mkdir -p "$stage" "$old_dir" 2>/dev/null || return 1
     cp -a "$IMAGE_ROOT/src" "$stage/src" 2>/dev/null || { rm -rf "$stage" "$old_dir"; return 1; }
     cp -a "$IMAGE_ROOT/frontend" "$stage/frontend" 2>/dev/null || { rm -rf "$stage" "$old_dir"; return 1; }
-    cp -a "$IMAGE_ROOT/VERSION" "$stage/VERSION" 2>/dev/null || true
+    for root_file in VERSION requirements.txt requirements.lock.txt; do
+        [ ! -f "$IMAGE_ROOT/$root_file" ] || cp -a "$IMAGE_ROOT/$root_file" "$stage/$root_file" 2>/dev/null || {
+            rm -rf "$stage" "$old_dir"
+            return 1
+        }
+    done
     [ -f "$stage/src/server.py" ] && [ -d "$stage/frontend" ] || {
         rm -rf "$stage" "$old_dir" 2>/dev/null
         return 1
@@ -124,7 +132,9 @@ _seed_image_code() {
             return 1
         }
     fi
-    [ ! -f "$CODE_DIR/VERSION" ] || cp -a "$CODE_DIR/VERSION" "$old_dir/VERSION" 2>/dev/null || true
+    for root_file in VERSION requirements.txt requirements.lock.txt; do
+        [ ! -f "$CODE_DIR/$root_file" ] || cp -a "$CODE_DIR/$root_file" "$old_dir/$root_file" 2>/dev/null || true
+    done
 
     mv "$stage/src" "$CODE_DIR/src" 2>/dev/null || {
         _restore_seed_swap "$old_dir"
@@ -136,7 +146,14 @@ _seed_image_code() {
         rm -rf "$stage" "$old_dir" 2>/dev/null
         return 1
     }
-    [ ! -f "$stage/VERSION" ] || cp -a "$stage/VERSION" "$CODE_DIR/VERSION" 2>/dev/null || true
+    for root_file in VERSION requirements.txt requirements.lock.txt; do
+        rm -f "$CODE_DIR/$root_file" 2>/dev/null || true
+        [ ! -f "$stage/$root_file" ] || cp -a "$stage/$root_file" "$CODE_DIR/$root_file" 2>/dev/null || {
+            _restore_seed_swap "$old_dir"
+            rm -rf "$stage" "$old_dir" 2>/dev/null || true
+            return 1
+        }
+    done
     rm -rf "$stage" 2>/dev/null || true
 
     # A previously healthy runtime becomes the crash rollback point for this image seed.
@@ -183,7 +200,10 @@ _bootstrap_code() {
         rm -rf "$CODE_DIR/src" "$CODE_DIR/frontend" 2>/dev/null
         cp -a "$CODE_DIR/_prev/src" "$CODE_DIR/src" 2>/dev/null || return 1
         cp -a "$CODE_DIR/_prev/frontend" "$CODE_DIR/frontend" 2>/dev/null || true
-        [ -f "$CODE_DIR/_prev/VERSION" ] && cp -a "$CODE_DIR/_prev/VERSION" "$CODE_DIR/VERSION" 2>/dev/null
+        for root_file in VERSION requirements.txt requirements.lock.txt; do
+            rm -f "$CODE_DIR/$root_file" 2>/dev/null || true
+            [ ! -f "$CODE_DIR/_prev/$root_file" ] || cp -a "$CODE_DIR/_prev/$root_file" "$CODE_DIR/$root_file" 2>/dev/null || return 1
+        done
         rm -rf "$CODE_DIR/_prev" 2>/dev/null
         FAILS=0
         echo 0 > "$CODE_DIR/.boot_fails" 2>/dev/null || true

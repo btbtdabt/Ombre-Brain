@@ -372,10 +372,10 @@ class CurrentSchedulers:
             1000,
         )
         mode = str(
-            reflection_cfg.get("daily_chat_memory_mode") or "review"
+            reflection_cfg.get("daily_chat_memory_mode") or "off"
         ).strip().lower()
         engine.daily_chat_memory_mode = (
-            mode if mode in {"auto", "review", "off"} else "review"
+            mode if mode in {"auto", "review", "off"} else "off"
         )
         engine.daily_chat_memory_hour = _int_between(
             reflection_cfg.get("daily_chat_memory_hour"), 0, 0, 23

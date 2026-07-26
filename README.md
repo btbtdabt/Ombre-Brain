@@ -671,6 +671,7 @@ docker compose -f deploy/docker-compose.yml up -d
 | `embedding.timeout_seconds` | 向量化请求超时秒数 | 国内服务器连云端 API 可设 `120` 或更高 |
 | `embedding.background_indexing` | 原文落盘后由耐久后台队列生成向量 | `true` |
 | `embedding.retry_base_seconds` / `retry_max_seconds` | 向量失败后的指数退避起点 / 上限 | `5` / `300` |
+| `reflection.daily_chat_memory_mode` | 当天聊天的自动记忆整理：`off` / `review` / `auto` | `off` |
 | `decay.lambda` | 衰减速率，越大越快忘 | `0.05` |
 | `merge_threshold` | 合并相似度阈值 (0-100) | `75` |
 | `hooks.token` | `/breath-hook` 的 HTTP token | 自托管公网建议设置 |

@@ -100,6 +100,34 @@ fixed access token remains a resource-bound compatibility credential.
 
 ## Integration Batch Ledger
 
+### 2026-07-25 P0luz 2.8.10 merge and Yinglianchun chat-memory policy port
+
+This batch reviews `65bf8c3..0582a3b` from P0luz and
+`9393232..0b4a877` from Yinglianchun. The recorded baselines remain unchanged
+until the exact integration commit passes staging.
+
+| Source commit(s) | Disposition | Evidence |
+| --- | --- | --- |
+| P0luz `7efe2dc` | Merged with the unified Dashboard session boundary | Successful setup, recovery, and login now enter the authenticated Dashboard through one reload boundary. This retains the current path-aware shell and fixes the same first-login stale-page failure without introducing a second in-place initializer. Auth-gated polling, deep links, sensitive-state cleanup, and network-panel visibility remain covered by the unified Dashboard regression tests. |
+| P0luz `e591aed` | Merged with current storage compatibility | Filesystem leases distinguish contention from broken locking, derived indexing runs after committed writes, imports preserve provenance while deferring index work, and the component outbox retains current `state_dir` migration compatibility. Provider-facing embedding caching no longer retains full bucket text. |
+| P0luz `0e83d46` | Merged except for the release-specific archive shortcut | Hot-update dependency comparison, legacy upgrade handling, entrypoint bootstrap, and integrity regressions are retained. The `/requirements.txt export-ignore` shortcut is intentionally superseded because this fork's release lock differs from P0luz's fixed 2.8.4 lock; source constraints and the hashed lock both remain in release archives so dependency changes fail closed. |
+| P0luz `4fb7714` | Merged | Meaning content is restored in the canonical memory detail view with escaped rendering. CI lock regeneration remains pinned to a fixed package-index cutoff. |
+| P0luz `0582a3b` | Merged into current module ownership | Storage/media race hardening, sanitized tool errors, atomic migration/config behavior, bounded API work, OAuth refresh handling, diagnostics offloading, strict MCP schemas, and the added regression coverage are retained. The canonical 30-tool manifest applies strict unknown-argument rejection to the complete public surface rather than duplicating tool definitions in `src/server.py`. |
+| Yinglianchun `0b4a877` | Policy port with richer engine retained | Automatic daily chat-memory extraction now defaults to `off` across the example config, runtime schedulers, API defaults, and Dashboard. Explicitly configured modes still use the modular candidate extraction, validation, and fallback pipeline; the legacy root runtime and wholesale prompt/heuristic removal are superseded by the active P0luz-base implementation. |
+
+Local verification completed so far:
+
+- Full suite: **2734 passed / 95 skipped / 0 failed**.
+- Repository-wide Ruff: **clean**.
+- Conflict-marker scan: **clean**.
+- All changed Python files: **0 Pyright errors / 0 warnings**. The whole-tree
+  debt audit is **371 errors / 21 warnings**, improved from the recorded
+  **388/21** baseline without weakening its configuration.
+- Dashboard JavaScript syntax and the local
+  `ombre-brain:upstream-sync-20260725` Docker build: **clean**.
+- Independent final code review: **approved with no remaining findings**.
+- Staging and production alignment: **in progress**.
+
 ### 2026-07-22 P0luz 2.8.5 merge and Yinglianchun behavior port
 
 | Source commit(s) | Disposition | Evidence |

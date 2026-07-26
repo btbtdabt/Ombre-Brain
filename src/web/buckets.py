@@ -11,6 +11,8 @@ web/buckets.py — 记忆桶管理 + 设置 + 锚点 + 自我认知读取
 ========================================
 """
 
+import math
+import threading
 from contextlib import AsyncExitStack
 from typing import Any, cast
 
@@ -88,6 +90,9 @@ async def rename_human_in_buckets(old: str, new: str) -> dict:
 
 
 def register(mcp) -> None:
+    # 每次路由注册使用一个原生提交锁，不与 asyncio 事件循环绑定；临界区内
+    # 不执行 await，因此既能跨测试事件循环串行化，也不会因持锁等待而死锁。
+    sampling_commit_lock = threading.Lock()
 
     @mcp.custom_route("/api/buckets", methods=["GET"])
     async def api_buckets(request: Request) -> Response:
@@ -715,8 +720,12 @@ def register(mcp) -> None:
         err = sh._require_auth(request)
         if err:
             return err
-        surfacing = sh.config.setdefault("surfacing", {})
-        sampling = surfacing.setdefault("sampling", {})
+        surfacing = sh.config.get("surfacing")
+        if not isinstance(surfacing, dict):
+            surfacing = {}
+        sampling = surfacing.get("sampling")
+        if not isinstance(sampling, dict):
+            sampling = {}
         if request.method == "GET":
             return JSONResponse({
                 "enabled": parse_bool(sampling.get("enabled", False), default=False),
@@ -728,52 +737,105 @@ def register(mcp) -> None:
             body = await sh._read_json_object(request)
         except Exception:
             return JSONResponse({"error": "invalid JSON body"}, status_code=400)
-        # Validate ranges; reject silently-corrupt inputs at the boundary
-        try:
-            if "enabled" in body:
-                sampling["enabled"] = parse_bool(body["enabled"])
-            if "top_k" in body:
-                tk = int(body["top_k"])
-                if not (1 <= tk <= 50):
-                    return JSONResponse({"error": "top_k must be in [1,50]"}, status_code=400)
-                sampling["top_k"] = tk
-            if "sample_k" in body:
-                sk = int(body["sample_k"])
-                if not (1 <= sk <= 20):
-                    return JSONResponse({"error": "sample_k must be in [1,20]"}, status_code=400)
-                sampling["sample_k"] = sk
-            if "temperature" in body:
-                t = float(body["temperature"])
-                if not (0.1 <= t <= 5.0):
-                    return JSONResponse({"error": "temperature must be in [0.1,5.0]"}, status_code=400)
-                sampling["temperature"] = t
-        except (ValueError, TypeError) as e:
-            return JSONResponse({"error": f"invalid field type: {e}"}, status_code=400)
+        # JSON 读取已经结束，以下原生锁临界区内没有 await。锁覆盖候选快照、
+        # 落盘和运行态发布，防止并发更新丢字段或出现磁盘/运行态逆序。
+        with sampling_commit_lock:
+            live_surfacing = sh.config.get("surfacing")
+            if not isinstance(live_surfacing, dict):
+                live_surfacing = {}
+            live_sampling = live_surfacing.get("sampling")
+            if not isinstance(live_sampling, dict):
+                live_sampling = {}
 
-        # --- 写回 config.yaml（iter 2.0 §10 U-03 修复：重启后设置不丢失）---
-        def _mutate_sampling(save_config: dict) -> None:
-            sf = save_config.setdefault("surfacing", {})
-            if not isinstance(sf, dict):
-                sf = {}
-                save_config["surfacing"] = sf
-            samp = sf.setdefault("sampling", {})
-            if not isinstance(samp, dict):
-                samp = {}
-                sf["sampling"] = samp
-            samp.update({
-                "enabled": sampling.get("enabled", False),
-                "top_k": sampling.get("top_k", 5),
-                "sample_k": sampling.get("sample_k", 2),
-                "temperature": sampling.get("temperature", 0.7),
-            })
-        try:
-            atomic_update_config_yaml(_mutate_sampling)
-        except Exception as e:
-            # 之前这里只 logger.warning、仍回 ok:True——用户看到"已保存"，
-            # 磁盘其实没落地，下次重启（崩溃/热更新）设置又变回旧值。如实报错。
-            return JSONResponse({"error": f"采样设置写入磁盘失败，未保存：{e}"}, status_code=500)
+            # 先在独立候选副本上完成全部校验。若逐字段发布，后续字段无效或
+            # config.yaml 写入失败时，运行态会残留一半新、一半旧的配置。
+            candidate = dict(live_sampling)
+            try:
+                if "enabled" in body:
+                    candidate["enabled"] = parse_bool(body["enabled"])
+                if "top_k" in body:
+                    if isinstance(body["top_k"], bool):
+                        raise ValueError("top_k must be an integer")
+                    tk = int(body["top_k"])
+                    if isinstance(body["top_k"], float) and body["top_k"] != tk:
+                        raise ValueError("top_k must be an integer")
+                    if not (1 <= tk <= 50):
+                        return JSONResponse(
+                            {"error": "top_k must be in [1,50]"}, status_code=400
+                        )
+                    candidate["top_k"] = tk
+                if "sample_k" in body:
+                    if isinstance(body["sample_k"], bool):
+                        raise ValueError("sample_k must be an integer")
+                    sk = int(body["sample_k"])
+                    if (
+                        isinstance(body["sample_k"], float)
+                        and body["sample_k"] != sk
+                    ):
+                        raise ValueError("sample_k must be an integer")
+                    if not (1 <= sk <= 20):
+                        return JSONResponse(
+                            {"error": "sample_k must be in [1,20]"},
+                            status_code=400,
+                        )
+                    candidate["sample_k"] = sk
+                if "temperature" in body:
+                    if isinstance(body["temperature"], bool):
+                        raise ValueError("temperature must be a number")
+                    temperature = float(body["temperature"])
+                    if not math.isfinite(temperature) or not (
+                        0.1 <= temperature <= 5.0
+                    ):
+                        return JSONResponse(
+                            {"error": "temperature must be in [0.1,5.0]"},
+                            status_code=400,
+                        )
+                    candidate["temperature"] = temperature
+            except (OverflowError, ValueError, TypeError) as e:
+                return JSONResponse(
+                    {"error": f"invalid field type: {e}"}, status_code=400
+                )
 
-        return JSONResponse({"ok": True, **sampling})
+            # 写回 config.yaml，保证重启后设置不丢失。
+            def _mutate_sampling(save_config: dict) -> None:
+                sf = save_config.setdefault("surfacing", {})
+                if not isinstance(sf, dict):
+                    sf = {}
+                    save_config["surfacing"] = sf
+                samp = sf.setdefault("sampling", {})
+                if not isinstance(samp, dict):
+                    samp = {}
+                    sf["sampling"] = samp
+                samp.update({
+                    "enabled": candidate.get("enabled", False),
+                    "top_k": candidate.get("top_k", 5),
+                    "sample_k": candidate.get("sample_k", 2),
+                    "temperature": candidate.get("temperature", 0.7),
+                })
+
+            try:
+                atomic_update_config_yaml(_mutate_sampling)
+            except Exception as e:
+                # 磁盘未落地就如实报错，不能让用户看到“已保存”。
+                return JSONResponse(
+                    {"error": f"采样设置写入磁盘失败，未保存：{e}"},
+                    status_code=500,
+                )
+
+            # 以磁盘写入成功为提交点；尽量保留原嵌套字典对象，因为浮现逻辑
+            # 可能持有这个对象的引用。
+            published_surfacing = sh.config.get("surfacing")
+            if not isinstance(published_surfacing, dict):
+                published_surfacing = {}
+                sh.config["surfacing"] = published_surfacing
+            published_sampling = published_surfacing.get("sampling")
+            if not isinstance(published_sampling, dict):
+                published_sampling = {}
+                published_surfacing["sampling"] = published_sampling
+            published_sampling.clear()
+            published_sampling.update(candidate)
+
+            return JSONResponse({"ok": True, **published_sampling})
 
 
     # ---- iter 2.0: /api/settings/human — 读写通知称呼（human 宏）----

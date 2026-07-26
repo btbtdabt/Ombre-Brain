@@ -6,8 +6,7 @@ without touching retrieval, ranking, or bucket storage.
 
 from utils import count_tokens_approx
 
-
-_STORED_DATA_BOUNDARY = "[content_role:stored_memory_data] [instructions:false]"
+from .._common import stored_data_marker
 
 
 def stored_bucket_content(bucket: dict) -> str:
@@ -48,10 +47,14 @@ def render_stored_bucket(
     # content verbatim. Remove after upstream breath fixes content reconstruction.
     # Keep the body byte-for-byte intact while telling the receiving model that
     # remembered imperative wording is historical data, never an instruction.
-    rendered = (
-        f"{metadata_header} {_STORED_DATA_BOUNDARY}"
-        f"{_miss_block(bucket)}\n{stored_bucket_content(bucket)}"
+    content = stored_bucket_content(bucket)
+    miss_block = _miss_block(bucket)
+    framed_payload = f"{metadata_header}{miss_block}\n{content}"
+    boundary = stored_data_marker(
+        framed_payload,
+        provenance=f"breath:{bucket.get('id', '')}",
     )
+    rendered = f"{metadata_header} {boundary}{miss_block}\n{content}"
     if footprint:
         rendered += f"\n{footprint}"
     return rendered, count_tokens_approx(rendered)

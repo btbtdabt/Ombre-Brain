@@ -25,6 +25,8 @@ permanent 目录，不衰减、不会被合并掉。
 from .. import _runtime as rt
 from .._common import check_pinned_quota, _quota_turn
 from .metadata import default_hold_analysis, normalize_hold_metadata
+from collections.abc import Awaitable, Callable
+from typing import cast
 
 
 async def store_pinned(
@@ -66,5 +68,14 @@ async def store_pinned(
             allow_embedding_fallback=True,
             meaning=meaning,
             media=media,
+            defer_derived_index=True,
+        )
+    post_index = getattr(rt.bucket_mgr, "_index_after_update", None)
+    if callable(post_index):
+        post_index_fn = cast(Callable[..., Awaitable[bool]], post_index)
+        await post_index_fn(
+            bucket_id,
+            content_changed=True,
+            meaning_changed=bool(meaning),
         )
     return f"📌钉选→{bucket_id} {','.join(str(d) for d in metadata.domains if d is not None)}"

@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 from identity import identity_names
+from stored_data import stored_data_marker
 from utils import strip_wikilinks
 
 
@@ -203,8 +204,13 @@ class LetterService:
             )[:10]
             stored_title = metadata.get("title") or metadata.get("name", "")
             title_suffix = f" · {stored_title}" if stored_title else ""
-            parts.append(
+            payload = (
                 f"[{item['id']}] {stored_author} · {stored_date}{title_suffix}\n"
                 + strip_wikilinks(item["content"])
+            )
+            parts.append(
+                stored_data_marker(payload, provenance=f"letter:{item['id']}")
+                + "\n"
+                + payload
             )
         return "=== 信件 ===\n" + "\n\n---\n\n".join(parts)

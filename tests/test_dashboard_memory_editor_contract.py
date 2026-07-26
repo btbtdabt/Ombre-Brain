@@ -77,7 +77,11 @@ async def test_bucket_detail_preserves_raw_content_and_separates_display_text(
     raw_content = "before [[Target|Alias]] and [[Target#Section]] after"
     bucket = {
         "id": "memory-1",
-        "metadata": {"name": "Linked memory", "type": "dynamic"},
+        "metadata": {
+            "name": "Linked memory",
+            "type": "dynamic",
+            "meaning": ["first meaning", "second meaning"],
+        },
         "content": raw_content,
     }
     manager = FakeBucketManager(bucket)
@@ -101,6 +105,10 @@ async def test_bucket_detail_preserves_raw_content_and_separates_display_text(
     )
     assert detail["content"] == raw_content
     assert detail["display_content"] == listed["content_preview"]
+    assert detail["metadata"]["meaning"] == [
+        "first meaning",
+        "second meaning",
+    ]
 
 
 def test_dashboard_uses_display_text_for_preview_and_raw_content_for_editor():
@@ -110,6 +118,58 @@ def test_dashboard_uses_display_text_for_preview_and_raw_content_for_editor():
     assert "esc(displayContent)" in source
     assert "_content_for_edit: b.content" in source
     assert "'<div class=\"detail-content\">' + esc(b.content)" not in source
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
+def test_dashboard_detail_renders_meaning_as_escaped_quote_blocks():
+    html = DASHBOARD.read_text(encoding="utf-8")
+    normalize_source = _dashboard_function(
+        "normalizeMeaningItems", "renderMeaningHtml"
+    )
+    render_start = html.index("function renderMeaningHtml(")
+    render_end = html.index("async function searchBuckets(", render_start)
+    render_source = html[render_start:render_end]
+    detail_source = _dashboard_function("showDetail", "bucketPin")
+    script = """
+function esc(value) {
+  return String(value == null ? '' : value).replace(/[&<>\"']/g, function(char) {
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[char];
+  });
+}
+""" + normalize_source + render_source + """
+const many = renderMeaningHtml([
+  '  first meaning  ',
+  '<img src=x onerror=alert(1)>',
+  '',
+  'second meaning',
+]);
+const legacy = renderMeaningHtml('  legacy string meaning  ');
+process.stdout.write(JSON.stringify({many, legacy, empty: renderMeaningHtml([])}));
+"""
+    completed = subprocess.run(
+        _node_eval_args(script),
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    rendered = json.loads(completed.stdout)
+
+    assert rendered["many"].count('class="meaning-quote"') == 3
+    assert rendered["many"].index("first meaning") < rendered["many"].index(
+        "second meaning"
+    )
+    assert "&lt;img src=x onerror=alert(1)&gt;" in rendered["many"]
+    assert "<img" not in rendered["many"]
+    assert "legacy string meaning" in rendered["legacy"]
+    assert rendered["empty"] == ""
+    assert 'class="meaning-block"' in rendered["many"]
+    assert ".meaning-block" in html
+    assert "border-left: 3px solid var(--accent);" in html
+    assert "var meaningHtml = renderMeaningHtml(meta.meaning);" in detail_source
+    assert detail_source.index("whyHtml +") < detail_source.index(
+        "meaningHtml +"
+    ) < detail_source.index("'<div class=\"detail-meta\">'")
 
 
 def test_dashboard_detail_does_not_render_an_editor_for_failed_bucket_fetch():

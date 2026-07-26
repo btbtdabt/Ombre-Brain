@@ -129,3 +129,33 @@ def test_models_data_embedding_migration_uses_the_canonical_provider_controls():
     assert "model: (document.getElementById('cfg-emb-model')" in html
     assert "authFetch(BASE + '/api/embedding/migrate'" in html
     assert "fetch(BASE + '/api/embedding/migrate'" not in html
+
+
+def test_split_embedding_save_keeps_the_complete_provider_tuple():
+    html = DASHBOARD.read_text(encoding="utf-8")
+    start = html.index("async function saveEmbeddingConfig(")
+    end = html.index("async function saveBucketDefaults()", start)
+    source = html[start:end]
+
+    assert "model: document.getElementById('cfg-emb-model').value" in source
+    assert "base_url: document.getElementById('cfg-emb-base-url').value" in source
+    assert "backend: document.getElementById('cfg-emb-backend').value" in source
+    assert "api_format: (document.getElementById('cfg-emb-format')" in source
+
+
+def test_config_load_and_split_editors_preserve_valid_zero_values():
+    html = DASHBOARD.read_text(encoding="utf-8")
+    load_start = html.index("async function loadConfig()")
+    save_start = html.index("async function saveBucketDefaults()", load_start)
+    load_source = html[load_start:save_start]
+    save_end = html.index("window.OmbreDashboardAuthReady", save_start)
+    bucket_source = html[save_start:save_end]
+    models_source = MODELS_DATA.read_text(encoding="utf-8")
+
+    assert "cfg.dehydration.temperature != null" in load_source
+    assert "cfg.merge_threshold != null" in load_source
+    assert "merge_threshold: safeNumber(" in bucket_source
+    assert "Number(control.value)" in models_source
+    assert "if (!Number.isFinite(parsed))" in models_source
+    assert "parseFloat(document.getElementById('cfg-dehy-temp').value) || 0.1" not in html
+    assert "parseInt(document.getElementById('cfg-merge').value) || 75" not in html

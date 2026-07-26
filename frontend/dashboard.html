@@ -401,6 +401,34 @@ window.OmbreDashboardPathEnv = window.OmbreDashboardCore.createPathEnv({ locatio
     overflow-y: auto;
     box-shadow: inset 3px 3px 6px var(--shadow-dark-subtle), inset -3px -3px 6px var(--shadow-light);
   }
+  .meaning-block {
+    margin: 8px 0 16px;
+    padding: 10px 14px;
+    border-left: 3px solid var(--accent);
+    background: var(--surface-solid);
+    color: var(--accent);
+    font-family: 'Cormorant Garamond', 'Noto Serif SC', serif;
+    line-height: 1.7;
+  }
+  .meaning-block-label {
+    margin-bottom: 5px;
+    color: var(--text-dim);
+    font-family: 'Share Tech Mono', 'Noto Sans SC', sans-serif;
+    font-size: 10px;
+    font-style: normal;
+    letter-spacing: 0.4px;
+  }
+  .meaning-quote {
+    margin: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-style: italic;
+  }
+  .meaning-quote + .meaning-quote {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+  }
 
   .config-section {
     margin-bottom: 28px;
@@ -3326,7 +3354,7 @@ function clearDashboardPasswordInputs() {
 
 async function clearAuthenticatedDashboardState() {
   if (dashboardSessionResetPromise) return dashboardSessionResetPromise;
-  dashboardSessionResetPromise = (async function resetAuthenticatedSession() {
+  const reset = (async function resetAuthenticatedSession() {
     window.OmbreDashboardAuthenticated = false;
     clearDashboardPasswordInputs();
     dashboardAuthenticatedTimers.forEach(function stopAuthenticatedTimer(timer) {
@@ -3365,7 +3393,12 @@ async function clearAuthenticatedDashboardState() {
     if (recoveryForm) recoveryForm.style.display = 'none';
     if (overlay) overlay.style.display = 'flex';
   })();
-  return dashboardSessionResetPromise;
+  dashboardSessionResetPromise = reset;
+  try {
+    return await reset;
+  } finally {
+    if (dashboardSessionResetPromise === reset) dashboardSessionResetPromise = null;
+  }
 }
 
 function reloadDashboardSession() {
@@ -3504,7 +3537,9 @@ async function doSetup() {
   const q = (document.getElementById('auth-setup-q')?.value || '').trim();
   const a = (document.getElementById('auth-setup-a')?.value || '').trim();
   if (q && a) {
-    await fetch(DASHBOARD_PATH.api('/auth/security-question'), { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({question: q, answer: a}) });
+    try {
+      await fetch(DASHBOARD_PATH.api('/auth/security-question'), { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({question: q, answer: a}) });
+    } catch (_) { /* 会话已建立；可选安全问题失败不阻塞 Dashboard。 */ }
   }
   await completeDashboardAuthentication();
 }
@@ -4589,53 +4624,65 @@ async function hardDeleteSelectedTests() {
   await loadBuckets();
 }
 
-document.querySelectorAll('.tab').forEach(tab => {
-  tab.addEventListener('click', () => {
-    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-    tab.classList.add('active');
-    const target = tab.dataset.tab;
-    document.getElementById('list-view').style.display = target === 'list' ? '' : 'none';
-    document.getElementById('breath-view').style.display = target === 'breath' ? '' : 'none';
-    document.getElementById('network-view').style.display = target === 'network' ? '' : 'none';
-    document.getElementById('plan-view').style.display = target === 'plan' ? '' : 'none';
-    document.getElementById('import-view').style.display = target === 'import' ? '' : 'none';
-    document.getElementById('logs-view').style.display = target === 'logs' ? '' : 'none';
-    document.getElementById('v3-debug-view').style.display = target === 'v3-debug' ? '' : 'none';
-    document.getElementById('settings-view').style.display = target === 'settings' ? '' : 'none';
-    document.getElementById('letters-view').style.display = target === 'letters' ? '' : 'none';
-    document.getElementById('anchors-view').style.display = target === 'anchors' ? '' : 'none';
-    document.getElementById('about-view').style.display = target === 'about' ? '' : 'none';
-    if (target !== 'network' && _netRAF) { cancelAnimationFrame(_netRAF); _netRAF = null; }
-    if (target === 'network') {
+function activateDashboardTab(tab) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  tab.classList.add('active');
+  const target = tab.dataset.tab;
+  const pending = [];
+  document.getElementById('list-view').style.display = target === 'list' ? '' : 'none';
+  document.getElementById('breath-view').style.display = target === 'breath' ? '' : 'none';
+  document.getElementById('network-view').style.display = target === 'network' ? '' : 'none';
+  document.getElementById('plan-view').style.display = target === 'plan' ? '' : 'none';
+  document.getElementById('import-view').style.display = target === 'import' ? '' : 'none';
+  document.getElementById('logs-view').style.display = target === 'logs' ? '' : 'none';
+  document.getElementById('v3-debug-view').style.display = target === 'v3-debug' ? '' : 'none';
+  document.getElementById('settings-view').style.display = target === 'settings' ? '' : 'none';
+  document.getElementById('letters-view').style.display = target === 'letters' ? '' : 'none';
+  document.getElementById('anchors-view').style.display = target === 'anchors' ? '' : 'none';
+  document.getElementById('about-view').style.display = target === 'about' ? '' : 'none';
+  if (target !== 'network' && _netRAF) { cancelAnimationFrame(_netRAF); _netRAF = null; }
+  if (target === 'network') {
+    pending.push(new Promise(function(resolve) {
       requestAnimationFrame(function loadVisibleNetwork() {
         var canvas = document.getElementById('network-canvas');
-        if (canvas && canvas.offsetWidth > 0 && canvas.offsetHeight > 0) loadNetwork();
+        if (!canvas || canvas.offsetWidth <= 0 || canvas.offsetHeight <= 0) {
+          resolve();
+          return;
+        }
+        Promise.resolve(loadNetwork()).then(resolve, resolve);
       });
-    }
-    if (target === 'plan') loadPlans();
-    if (target === 'import') { pollImportStatus(); loadImportResults(); }
-    if (target === 'logs') { loadLogs(); loadOBErrors(); }
-    if (target === 'v3-debug') loadV3Debug();
-    if (target === 'settings') {
-      // 任务D：合并 config + settings 后，切换到「设置」时一次性加载所有面板数据
-      loadSettingsStatus();
-      loadSystemDiagnostics();
-      loadHumanName();
-      loadConfig();
-      refreshEnvConfig();
-      loadGithubStatus();
-      loadSamplingSettings();
-      loadEnvVars();
-      loadHostVault();
-      loadLocalEmbStatus();
-      // MCP 面板同步初始化（不依赖异步请求）
-      const _mcpOriginEl = document.getElementById('mcp-local-origin');
-      if (_mcpOriginEl) _mcpOriginEl.textContent = location.origin;
-      renderMcpUrls();
-    }
-    if (target === 'letters') loadLetters();
-    if (target === 'anchors') loadAnchorsView();
-    if (target === 'about') loadAbout();
+    }));
+  }
+  if (target === 'plan') pending.push(loadPlans());
+  if (target === 'import') pending.push(pollImportStatus(), loadImportResults());
+  if (target === 'logs') pending.push(loadLogs(), loadOBErrors());
+  if (target === 'v3-debug') pending.push(loadV3Debug());
+  if (target === 'settings') {
+    pending.push(
+      loadSettingsStatus(),
+      loadSystemDiagnostics(),
+      loadHumanName(),
+      loadConfig(),
+      refreshEnvConfig(),
+      loadGithubStatus(),
+      loadSamplingSettings(),
+      loadEnvVars(),
+      loadHostVault(),
+      loadLocalEmbStatus()
+    );
+    const _mcpOriginEl = document.getElementById('mcp-local-origin');
+    if (_mcpOriginEl) _mcpOriginEl.textContent = location.origin;
+    renderMcpUrls();
+  }
+  if (target === 'letters') pending.push(loadLetters());
+  if (target === 'anchors') pending.push(loadAnchorsView());
+  if (target === 'about') pending.push(loadAbout());
+  return Promise.allSettled(pending);
+}
+
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    activateDashboardTab(tab);
   });
 });
 
@@ -5090,6 +5137,26 @@ function _localBucketMatches(query) {
   return name.concat(other);                          // 桶名匹配排最前
 }
 
+function normalizeMeaningItems(value) {
+  var values = Array.isArray(value)
+    ? value
+    : (typeof value === 'string' ? [value] : []);
+  return values.map(function(item) {
+    return typeof item === 'string' ? item.trim() : '';
+  }).filter(function(item) { return item.length > 0; });
+}
+
+function renderMeaningHtml(value) {
+  var items = normalizeMeaningItems(value);
+  if (!items.length) return '';
+  return '<section class="meaning-block" data-field="meaning" aria-label="Meaning / 为什么值得被想起">' +
+    '<div class="meaning-block-label">MEANING · 为什么值得被想起</div>' +
+    items.map(function(item) {
+      return '<blockquote class="meaning-quote">❝ ' + esc(item) + ' ❞</blockquote>';
+    }).join('') +
+  '</section>';
+}
+
 async function searchBuckets(query, signal) {
   var generation = ++bucketSearchGeneration;
   var seen = {}, merged = [];
@@ -5145,6 +5212,8 @@ async function showDetail(id) {
     panel.classList.toggle('anchor-mode', !!meta.anchor);
     // iter 1.8: why_remembered = 这条为什么被记得（展示不计分）
     var whyHtml = meta.why_remembered ? ('<div style="margin:8px 0 16px;padding:10px 14px;border-left:3px solid var(--accent);background:var(--surface-solid);font-style:italic;color:var(--accent);font-family:\'Cormorant Garamond\',\'Noto Serif SC\',serif;line-height:1.7;">❝ ' + esc(meta.why_remembered) + ' ❞</div>') : '';
+    // meaning 是可累积的体验锚点；兼容早期手写桶中的单字符串格式。
+    var meaningHtml = renderMeaningHtml(meta.meaning);
     var firstBadge = meta.first_of_kind ? '<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--accent);margin-left:8px;"><i data-lucide="sparkles" style="width:12px;height:12px;"></i>首次出现</span>' : '';
     var weightHtml = (meta.type === 'plan' && meta.weight != null) ? ('<div class="field"><label>承诺重量</label><span style="display:inline-block;width:80px;height:6px;background:var(--border);border-radius:3px;vertical-align:middle;overflow:hidden;"><span style="display:block;width:' + Math.round(meta.weight*100) + '%;height:100%;background:var(--accent);"></span></span> ' + (meta.weight*100).toFixed(0) + '% · ' + weightAnchorLabel(meta.weight) + '</div>') : '';
     // iter 1.9 D3: triggered_by 渲染成可跳转链接
@@ -5163,6 +5232,7 @@ async function showDetail(id) {
     content.innerHTML =
       '<h2>' + esc(meta.name || id) + firstBadge + '</h2>' +
       whyHtml +
+      meaningHtml +
       '<div class="detail-meta">' +
         '<div class="field"><label>ID</label>' + esc(id) + '</div>' +
         '<div class="field"><label>类型 / Type</label>' + esc(meta.type || 'dynamic') + '</div>' +
@@ -6689,7 +6759,7 @@ function _renderEmbMigrateStatus(s) {
     var sample = s.failed_items.slice(0, 3).map(function(it) { return esc(it.bucket_id) + ': ' + esc(it.error); }).join('<br>');
     html += '<br><span style="color:var(--negative,#c33)">失败样本（前 3）：<br>' + sample + '</span>';
   }
-  if (s.phase === 'failed' || (s.phase === 'completed' && s.failed_count > 0)) {
+  if (s.phase === 'failed' || s.phase === 'publish_failed' || (s.phase === 'completed' && s.failed_count > 0)) {
     if (s.tail_log && s.tail_log.length) {
       html += '<br><details style="margin-top:6px;"><summary>最近 15 行错误日志（点开复制给 AI 排查，不要发给作者）</summary>'
         + '<pre style="white-space:pre-wrap;font-size:11px;background:#222;color:#eee;padding:8px;border-radius:4px;max-height:240px;overflow:auto;">'
@@ -6708,7 +6778,11 @@ async function pollEmbMigrateStatus() {
     var d = await r.json();
     if (!d || !d.ok) return;
     _renderEmbMigrateStatus(d.status);
-    if (d.status && (d.status.phase === 'completed' || d.status.phase === 'failed') && !d.running) {
+    if (
+      d.status
+      && ['completed', 'failed', 'publish_failed'].includes(d.status.phase)
+      && !d.running
+    ) {
       // 停止轮询，刷新一次摘要
       if (_embMigratePollTimer) { clearInterval(_embMigratePollTimer); _embMigratePollTimer = null; }
       refreshEmbInfo();
@@ -7318,7 +7392,8 @@ async function loadConfig() {
     var dehyNotice = document.getElementById('dehy-key-notice');
     if (dehyNotice) dehyNotice.style.display = cfg.dehydration.api_key_masked ? 'none' : '';
     document.getElementById('cfg-dehy-maxtokens').value = cfg.dehydration.max_tokens || 1024;
-    document.getElementById('cfg-dehy-temp').value = cfg.dehydration.temperature || 0.1;
+    document.getElementById('cfg-dehy-temp').value = cfg.dehydration.temperature != null
+      ? cfg.dehydration.temperature : 0.1;
     document.getElementById('cfg-emb-enabled').value = cfg.embedding.enabled ? 'true' : 'false';
     document.getElementById('cfg-emb-model').value = cfg.embedding.model || '';
     var embFmtEl = document.getElementById('cfg-emb-format');
@@ -7336,7 +7411,8 @@ async function loadConfig() {
     // 加载当前 embedding 后端摘要 + 启动迁移轮询（只刷一次摘要，迁移状态独立轮询）
     refreshEmbInfo();
     refreshEnvConfig();
-    document.getElementById('cfg-merge').value = cfg.merge_threshold || 75;
+    document.getElementById('cfg-merge').value = cfg.merge_threshold != null
+      ? cfg.merge_threshold : 75;
     var mcpAuthEl = document.getElementById('cfg-mcp-auth');
     if (mcpAuthEl) {
       mcpAuthEl.value = cfg.mcp_require_auth
@@ -8143,18 +8219,15 @@ async function loadAbout() {
 
 // Re-render Lucide icons whenever DOM is ready (covers static markup)
 window.addEventListener('DOMContentLoaded', function() {
-  syncRestartRequirement();
   if (window.lucide) lucide.createIcons();
   updateChick(0);              // 小黄鸡蛋初始（loadBuckets 后会按真实总数更新）
   startPlaceholderRotation();  // 搜索框随机 placeholder
   whenDashboardAuthenticated(function startAuthenticatedChrome() {
-    // iter 2.0: refresh anchor counter on first load + every 30s
-    if (typeof refreshAnchorCounter === 'function') {
-      refreshAnchorCounter();
-      setDashboardAuthenticatedInterval(refreshAnchorCounter, 30000);
-    }
-    checkEmptyMemoryBanner();  // 零记忆时红色提示「可从 GitHub 恢复」
-    loadOwnerBadge();          // 多人共用时顶部显示记忆归属徽标（单人隐藏）
+    syncRestartRequirement();
+    refreshAnchorCounter();
+    setDashboardAuthenticatedInterval(refreshAnchorCounter, 30000);
+    checkEmptyMemoryBanner();
+    loadOwnerBadge();
   });
 });
 
@@ -9658,8 +9731,6 @@ async function deleteLetter(id) {
 // ── E/F 级错误自动弹窗 ────────────────────────────────────────
 // 每 60s 轮询 /api/errors/recent?min_level=E，若有新条目则弹窗提示。
 // 用 localStorage 存最后确认时间戳，避免重复打扰。
-var _errorAlertTimer = null;
-
 async function pollCriticalErrors() {
   try {
     const r = await authFetch(BASE + '/api/errors/recent?min_level=E&limit=20');
@@ -9719,12 +9790,11 @@ function goToLogsTab() {
   if (t) t.click();
 }
 
-// 启动后挂载。所有需要认证的轮询都等 auth/status 成功，退出或 401 时统一停止。
 whenDashboardAuthenticated(function startAuthenticatedPolling() {
   pollHeartbeat();
   pollCriticalErrors();
   setDashboardAuthenticatedInterval(pollHeartbeat, 15000);
-  _errorAlertTimer = setDashboardAuthenticatedInterval(pollCriticalErrors, 60000);
+  setDashboardAuthenticatedInterval(pollCriticalErrors, 60000);
   maybeShowOnboarding();
 });
 
@@ -9973,7 +10043,7 @@ function renderSelfEntries() {
   }).join('');
 }
 
-// 初始化：检测是否有条目，给 FAB 加小圆点
+// 认证成功后检测是否有条目，给 FAB 加小圆点
 (async function initSelfFab() {
   try {
     const authenticated = await window.OmbreDashboardAuthReady;
@@ -9981,10 +10051,10 @@ function renderSelfEntries() {
     const res = await authFetch('/api/self');
     if (res && res.ok) {
       const data = await res.json();
-      if (Array.isArray(data) && data.length > 0) {
-        document.getElementById('self-fab').classList.add('has-entries');
-        _selfEntries = data;
-      }
+      const hasEntries = Array.isArray(data) && data.length > 0;
+      const fab = document.getElementById('self-fab');
+      if (fab) fab.classList.toggle('has-entries', hasEntries);
+      _selfEntries = hasEntries ? data : [];
     }
   } catch (_) {}
 })();

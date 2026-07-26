@@ -66,9 +66,13 @@ _OAUTH_CLIENT_TTL = 86400 * 365
 # public attacker permanently consume the bounded registry.
 _OAUTH_CLIENT_PENDING_TTL = 3600
 _MAX_OAUTH_CLIENTS = 1024
+# 未授权注册应使用远小于长期已授权客户端的独立配额。与
+# _MAX_OAUTH_CLIENTS 分开计数，保持既有已授权客户端容量语义。
+_MAX_PENDING_OAUTH_CLIENTS = 128
 _MAX_OAUTH_CODES = 1024
 _MAX_REDIRECT_URIS = 10
 _MAX_REDIRECT_URI_CHARS = 2048
+_MAX_REDIRECT_URIS_TOTAL_CHARS = 4096
 _MAX_CLIENT_NAME_CHARS = 200
 _PKCE_PATTERN = _re.compile(r"^[A-Za-z0-9._~-]{43,128}$")
 _FORBIDDEN_REDIRECT_SCHEMES = {
@@ -507,6 +511,11 @@ def _normalize_client_registration(body: object) -> tuple[dict | None, str]:
         or any(not _valid_redirect_uri(uri) for uri in redirect_uris)
     ):
         return None, "redirect_uris must contain 1-10 safe absolute callback URIs"
+    if sum(len(uri) for uri in redirect_uris) > _MAX_REDIRECT_URIS_TOTAL_CHARS:
+        return None, (
+            "redirect_uris total length must not exceed "
+            f"{_MAX_REDIRECT_URIS_TOTAL_CHARS} characters"
+        )
     client_name = body.get("client_name", "MCP Client")
     if not isinstance(client_name, str):
         return None, "client_name must be a string"
@@ -1208,6 +1217,20 @@ def register(mcp) -> None:
                 if isinstance(key, str) and isinstance(value, dict)
             }
             _cleanup_oauth_clients_locked(now, candidate)
+            pending_count = sum(
+                1
+                for data in candidate.values()
+                if data.get("activated") is not True
+            )
+            if pending_count >= max(1, int(_MAX_PENDING_OAUTH_CLIENTS)):
+                return JSONResponse(
+                    {"error": "temporarily_unavailable"},
+                    status_code=429,
+                    headers={
+                        "Retry-After": "60",
+                        "Cache-Control": "no-store",
+                    },
+                )
             if len(candidate) >= max(1, int(_MAX_OAUTH_CLIENTS)):
                 if not _evict_oldest_pending_client_locked(candidate):
                     return JSONResponse(

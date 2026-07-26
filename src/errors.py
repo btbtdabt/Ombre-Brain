@@ -135,8 +135,8 @@ ERROR_CODES: dict[str, ErrorSpec] = {
         title_zh="MCP 工具执行异常",
         title_en="MCP tool execution exception",
         suggestion_zh=(
-            "查看下方异常详情与最近 15 条日志定位根因。"
-            "若是参数问题，按提示修正；若是后端故障，请重试或反馈。"
+            "异常正文已隐藏，以避免泄露密钥、本机路径或调用内容。"
+            "请在已认证 Dashboard 中按错误码与时间定位；若反复出现，请重试并反馈。"
         ),
     ),
 

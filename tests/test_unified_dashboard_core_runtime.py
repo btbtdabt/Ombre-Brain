@@ -697,9 +697,7 @@ for (const name of ['path.js', 'api.js', 'router.js', 'store.js', 'app-shell.js'
 
 def test_legacy_user_click_runs_side_effects_once_and_deep_links_still_activate() -> None:
     dashboard_source = DASHBOARD.read_text(encoding="utf-8")
-    listener_start = dashboard_source.index(
-        "document.querySelectorAll('.tab').forEach(tab => {"
-    )
+    listener_start = dashboard_source.index("function activateDashboardTab(tab) {")
     listener_end = dashboard_source.index("\nlet searchTimer;", listener_start)
     legacy_listener = dashboard_source[listener_start:listener_end]
     shell_source = UNIFIED_SHELL.read_text(encoding="utf-8").replace(
@@ -871,9 +869,7 @@ process.stdout.write(JSON.stringify({{
 
 def test_network_load_waits_until_the_unified_panel_is_visible() -> None:
     dashboard_source = DASHBOARD.read_text(encoding="utf-8")
-    listener_start = dashboard_source.index(
-        "document.querySelectorAll('.tab').forEach(tab => {"
-    )
+    listener_start = dashboard_source.index("function activateDashboardTab(tab) {")
     listener_end = dashboard_source.index("\nlet searchTimer;", listener_start)
     legacy_listener = dashboard_source[listener_start:listener_end]
     script = f"""
@@ -1091,9 +1087,7 @@ vm.runInContext(sources['unified-shell.js'], window, {{ filename: 'unified-shell
 
 def test_legacy_section_route_survives_reload_and_history_without_duplicate_loaders() -> None:
     dashboard_source = DASHBOARD.read_text(encoding="utf-8")
-    listener_start = dashboard_source.index(
-        "document.querySelectorAll('.tab').forEach(tab => {"
-    )
+    listener_start = dashboard_source.index("function activateDashboardTab(tab) {")
     listener_end = dashboard_source.index("\nlet searchTimer;", listener_start)
     legacy_listener = dashboard_source[listener_start:listener_end]
     shell_source = UNIFIED_SHELL.read_text(encoding="utf-8").replace(

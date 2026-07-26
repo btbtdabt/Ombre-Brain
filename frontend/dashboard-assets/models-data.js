@@ -309,7 +309,7 @@
       { path: 'reflection.daily_enabled', label: 'Daily reflection', type: 'checkbox', default: true },
       { path: 'reflection.daily_min_memory_items', label: 'Minimum daily memory items', type: 'number', min: 0, max: 100, step: 1, default: 5 },
       { path: 'reflection.daily_conversation_turn_limit', label: 'Conversation turn limit', type: 'number', min: 0, max: 80, step: 1, default: 12 },
-      { path: 'reflection.daily_chat_memory_mode', label: 'Daily chat memory mode', type: 'select', options: ['auto', 'review', 'off'], default: 'review' },
+      { path: 'reflection.daily_chat_memory_mode', label: 'Daily chat memory mode', type: 'select', options: ['off', 'review', 'auto'], default: 'off' },
       { path: 'reflection.daily_chat_memory_turn_limit', label: 'Daily chat memory turn limit', type: 'number', min: 0, max: 10000, step: 1, default: 0 },
       { path: 'reflection.memory_affect_anchor_enabled', label: 'Memory affect anchors', type: 'checkbox', default: false },
       { path: 'reflection.relationship_weather_affect_anchor_enabled', label: 'Relationship-weather affect anchors', type: 'checkbox', default: false },

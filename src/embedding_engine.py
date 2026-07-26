@@ -97,6 +97,13 @@ _QUERY_CACHE_MAXSIZE = 32
 _SEARCH_BATCH_ROWS = 32
 
 
+def _provider_input_identity(text: str) -> str:
+    """为服务商实际可见的输入生成有界缓存标识。"""
+
+    provider_text = text[:_MAX_INPUT_CHARS]
+    return hashlib.sha256(provider_text.encode("utf-8")).hexdigest()
+
+
 def _norm_model(name: str) -> str:
     """归一化模型名用于「同一性」比较。
 
@@ -371,7 +378,8 @@ class EmbeddingEngine:
 
     def __init__(self, config: dict):
         self.v3_runtime = None
-        # 进程内小容量 LRU：text -> embedding，去重短时间内的重复向量请求。
+        # 进程内小容量 LRU：provider 输入摘要 -> embedding。缓存键不能保留
+        # 完整桶正文，避免长记忆滞留在小内存实例中。
         self._query_cache: "OrderedDict[str, list[float]]" = OrderedDict()
         embed_cfg = config.get("embedding", {}) or {}
         self.max_chars = self._int_between(
@@ -747,14 +755,15 @@ class EmbeddingEngine:
     async def _generate_async(self, text: str) -> list[float]:
         if not self._backend:
             return []
-        cached = self._query_cache.get(text)
+        cache_identity = _provider_input_identity(text)
+        cached = self._query_cache.get(cache_identity)
         if cached is not None:
-            self._query_cache.move_to_end(text)
+            self._query_cache.move_to_end(cache_identity)
             return list(cached)
         embedding = await self._backend.generate_async(text)
         if embedding:
-            self._query_cache[text] = list(embedding)
-            self._query_cache.move_to_end(text)
+            self._query_cache[cache_identity] = list(embedding)
+            self._query_cache.move_to_end(cache_identity)
             if len(self._query_cache) > _QUERY_CACHE_MAXSIZE:
                 self._query_cache.popitem(last=False)
         return embedding
@@ -777,7 +786,8 @@ class EmbeddingEngine:
         normalized_kind = str(kind or "document")
         prepared = self._prepare_embedding_input(text, kind=normalized_kind)
         truncated = prepared[: self.max_chars]
-        cache_key = (normalized_kind, self.model, truncated)
+        input_identity = hashlib.sha256(truncated.encode("utf-8")).hexdigest()
+        cache_key = (normalized_kind, self.model, input_identity)
         cached = self._embedding_request_cache.get(cache_key)
         if cached is not None:
             self._embedding_request_cache.move_to_end(cache_key)
@@ -915,6 +925,23 @@ class EmbeddingEngine:
         try:
             rows = conn.execute("SELECT bucket_id FROM embeddings").fetchall()
             return [r[0] for r in rows]
+        finally:
+            conn.close()
+
+    def delete_meaning_embedding(self, bucket_id: str) -> None:
+        """清空 meaning 派生列，保留同桶的 content 向量。"""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                "UPDATE embeddings SET meaning_embedding = NULL WHERE bucket_id = ?",
+                (bucket_id,),
+            )
+            conn.execute(
+                "DELETE FROM embeddings WHERE bucket_id = ? "
+                "AND TRIM(embedding) = '' AND meaning_embedding IS NULL",
+                (bucket_id,),
+            )
+            conn.commit()
         finally:
             conn.close()
 
