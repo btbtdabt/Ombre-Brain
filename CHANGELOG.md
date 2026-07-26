@@ -2,6 +2,21 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`p0luz/ombre-brain:<VERSION>`）。
 
+## 2.8.11
+
+### 修复 / Fixed
+
+- `/auth/status` 响应明确禁止缓存，Dashboard 与安全部署向导请求该状态时也主动绕过 HTTP 缓存，避免浏览器或中间缓存复用过期的首次设置与登录状态。
+- Dashboard 登录失败时按现有 `/auth/login` 响应契约读取 `error` 字段并显示具体提示，避免将限流、服务繁忙等错误统一显示为“密码错误”。
+
+### 测试 / Tests
+
+- 补充服务端响应头、Dashboard 与安全部署向导请求缓存策略的回归测试，以及登录失败错误展示的用户可见 DOM 回归测试。
+
+### 版本 / Version
+
+- 根目录 `VERSION` 与热更新优先读取的 `src/VERSION` 同步更新为 `2.8.11`。
+
 ## 2.8.10
 
 ### 修复 / Fixed

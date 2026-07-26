@@ -230,6 +230,7 @@ def register(mcp) -> None:
     async def auth_status(request: Request) -> Response:
         """Return auth state (authenticated, setup_needed)."""
         from starlette.responses import JSONResponse
+
         authenticated = sh._is_authenticated(request)
         payload: dict[str, object] = {
             "authenticated": authenticated,

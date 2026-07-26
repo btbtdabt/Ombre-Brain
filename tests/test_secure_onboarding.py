@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 from collections.abc import Callable
+import shutil
+import subprocess
 from typing import Any
 
 import pytest
@@ -44,6 +46,15 @@ class JsonRequest:
 
 def _payload(response: Any) -> dict[str, Any]:
     return json.loads(response.body.decode("utf-8"))
+
+
+def _onboarding_section(start_marker: str, end_marker: str) -> str:
+    html = (Path(__file__).resolve().parents[1] / "frontend" / "onboarding.html").read_text(
+        encoding="utf-8"
+    )
+    start = html.index(start_marker)
+    end = html.index(end_marker, start)
+    return html[start:end]
 
 
 def test_profile_defaults_make_public_safe_and_local_simple() -> None:
@@ -369,3 +380,49 @@ def test_onboarding_page_has_file_contract_and_safe_json_parser() -> None:
     assert "saveMcpAddress()" in dashboard
     assert "deployment: {public_url: publicUrl}" in dashboard
     assert "(cfg.deployment || {}).public_url" in dashboard
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
+def test_onboarding_auth_status_bypasses_http_cache() -> None:
+    boot_source = (
+        _onboarding_section("async function readJsonSafe", "function optionsForSelection")
+        + _onboarding_section("async function boot()", "document.getElementById('public-url')")
+    )
+    script = r"""
+const fetchCalls = [];
+const location = {href:'unchanged'};
+async function fetch(url, options) {
+  fetchCalls.push({url, options: options ?? null});
+  if (url !== '/auth/status') throw new Error('unexpected fetch: ' + url);
+  return {
+    status: 200,
+    async text() { return JSON.stringify({authenticated:false}); },
+  };
+}
+""" + boot_source + r"""
+
+(async function() {
+  await boot();
+  process.stdout.write(JSON.stringify({fetchCalls, locationHref:location.href}));
+})().catch(error => {
+  console.error(error);
+  process.exit(1);
+});
+"""
+    node = shutil.which("node")
+    assert node is not None
+    completed = subprocess.run(
+        [node, "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    result = json.loads(completed.stdout)
+
+    assert result == {
+        "fetchCalls": [
+            {"url": "/auth/status", "options": {"cache": "no-store"}},
+        ],
+        "locationHref": "/",
+    }

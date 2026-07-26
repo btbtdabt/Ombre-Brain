@@ -81,6 +81,15 @@ def test_auth_status_check_bypasses_browser_cache() -> None:
     assert "signal: controller.signal" in check_auth
 
 
+def test_login_failure_prefers_backend_error_payload() -> None:
+    login = _dashboard_section(
+        "async function doLogin()",
+        "async function doLogout()",
+    )
+
+    assert "d.error || d.detail || '密码错误'" in login
+
+
 def test_session_teardown_is_reusable_and_invalidates_sensitive_state() -> None:
     teardown = _dashboard_section(
         "async function clearAuthenticatedDashboardState()",
