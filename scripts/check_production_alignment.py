@@ -361,7 +361,8 @@ def relay_checks(check: Check, relay_env: dict[str, str], relay_base: str) -> No
     body = {
         "model": EXPECTED["final_model"],
         "messages": [{"role": "user", "content": marker}],
-        "max_tokens": 16,
+        # Opus 5 can consume a tiny output budget before emitting visible text.
+        "max_tokens": 256,
         "stream": False,
     }
     status, payload = read_json(
