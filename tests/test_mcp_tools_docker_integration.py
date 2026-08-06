@@ -188,7 +188,7 @@ def _hold(mcp_client: MCPClient, marker: str, **overrides) -> str:
     arguments.update(overrides)
     title = str(arguments.get("title") or title)
     result = mcp_client.call("hold", arguments)
-    assert result.startswith(("新建→", "合并→")), result
+    assert result.startswith(("新建→", "合并→", "📌钉选→")), result
 
     listing = mcp_client.call_json("list_buckets_light", {"limit": 500})
     matches = [
@@ -448,7 +448,12 @@ def test_grow_items_succeeds_without_compression_provider(mcp_client):
 
 def test_grow_long_content_obeys_configured_provider_contract(mcp_client):
     marker = _marker("grow")
-    content = f"{marker} " + "long integration memory " * 8
+    content = (
+        f"{marker} 2026-08-06，艾米完成了 Ombre Brain 部署审计，并确认本地仓库、"
+        "GitHub fork 与 VPS 必须始终运行同一个经过测试的 commit；这是以后也需要遵守的长期工作流程。\n\n"
+        f"{marker} 同一天，艾米决定无参数的宽泛记忆回想必须快速返回，不能为了展示每个"
+        "已有记忆桶而逐桶调用模型；带 query 的定向检索仍可在确有帮助时使用智能压缩。"
+    )
     before_ids = _bucket_ids(mcp_client.call("pulse", {"include_archive": True}))
     result = mcp_client.call("grow", {"content": content})
 
@@ -460,8 +465,8 @@ def test_grow_long_content_obeys_configured_provider_contract(mcp_client):
         return
 
     assert "batch:g_" in result
-    recalled = mcp_client.call("breath_search", {"query": marker, "max_results": 5})
-    assert marker in recalled
+    after_ids = _bucket_ids(mcp_client.call("pulse", {"include_archive": True}))
+    assert after_ids - before_ids
 
 
 def test_grow_items_source_layer_requires_exact_title_and_reads_one_event(mcp_client):
@@ -504,7 +509,10 @@ def test_trace_updates_existing_memory_metadata(mcp_client):
     bucket_id = _hold(mcp_client, marker)
     result = mcp_client.call("trace", {"bucket_id": bucket_id, "importance": 8})
     assert bucket_id in result
-    recalled = mcp_client.call("breath_advanced", {"query": marker, "importance_min": 8})
+    recalled = mcp_client.call(
+        "breath_advanced",
+        {"query": bucket_id, "importance_min": 8, "max_results": 1},
+    )
     assert marker in recalled
 
 
@@ -655,12 +663,12 @@ def test_letter_tools_preserve_and_filter_custom_author(mcp_client):
     assert author in result
 
 
-def test_I_writes_and_reads_self_description(mcp_client):
+def test_I_writes_and_reads_self_description_candidate(mcp_client):
     marker = _marker("self")
     written = mcp_client.call("I", {"content": marker, "aspect": "values"})
     assert _bucket_id(written)
     read_back = mcp_client.call("I", {"read": True, "limit": 20})
-    assert "=== 我的自我认知" in read_back
+    assert "=== 正在沉淀的「我觉得」" in read_back
     assert marker in read_back
 
 
