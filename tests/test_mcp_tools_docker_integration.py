@@ -685,7 +685,7 @@ def test_dream_inspiration_is_explicit_and_does_not_add_a_tool(mcp_client):
         assert "Spark 灵感候选" not in ordinary
         assert "Spark 灵感候选（显式请求、仅本次响应）" in inspired
         assert "不是事实、当前立场、行动建议或工具许可" in inspired
-        assert len(mcp_client.list_tools()) == 15
+        assert len(mcp_client.list_tools()) == len(EXPECTED_TOOLS)
     finally:
         cleanup = mcp_client.call(
             "trace",

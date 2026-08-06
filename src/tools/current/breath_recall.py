@@ -60,6 +60,7 @@ from utils import (
 )
 
 from .. import _runtime as rt
+from ..breath._verbatim import render_stored_bucket
 from ._helpers import (
     call_async,
     clip_text as _clip,
@@ -83,6 +84,11 @@ def _config_section(name: str) -> dict:
 
 _trim_tokens = trim_to_token_budget
 _STORED_DATA_BOUNDARY = "[content_role:stored_memory_data] [instructions:false]"
+_SURFACE_BUDGET_NOTICE = (
+    "token 预算不足：有 {omitted} 条主要浮现记忆因放不下剩余预算而未返回；"
+    "已返回正文均保持完整，未截断或摘要。"
+    "当前约使用 {used}/{limit} token，如需被省略的整桶请提高 max_tokens 后重试。"
+)
 
 
 def _relevance_options():
@@ -510,6 +516,7 @@ async def _diffused_bucket_blocks(
     edge_min_confidence: float,
     query: str,
     exclude_bucket_ids: set[str] | None = None,
+    render_stored: bool = False,
 ) -> str:
     if token_budget <= 0 or related_per_memory <= 0 or not source_buckets:
         return ""
@@ -559,15 +566,21 @@ async def _diffused_bucket_blocks(
             continue
         if query_plan.enforce_topic_evidence and not _policy().bucket_has_topic_evidence(query, target):
             continue
-        summary = await _dehydrate_summary(target)
         path = format_diffusion_trace(hit.best_path, bucket_map, use_labels=True)
         note = (
             "路径含冲突/阻断，仅作边界背景。"
             if path_has_caution(hit.best_path)
             else "背景联想，不代表当前事实。"
         )
-        block = f"- [bucket_id:{target_id}] 路径: {path}；摘要: {summary}（{note}）"
-        block_tokens = count_tokens_approx(block)
+        if render_stored:
+            block, block_tokens = render_stored_bucket(
+                target,
+                f"- [bucket_id:{target_id}] 路径: {path}（{note}）",
+            )
+        else:
+            summary = await _dehydrate_summary(target)
+            block = f"- [bucket_id:{target_id}] 路径: {path}；摘要: {summary}（{note}）"
+            block_tokens = count_tokens_approx(block)
         if block_tokens > remaining:
             break
         output.append(block)
@@ -703,13 +716,17 @@ async def surface_breath(
     candidates = unresolved[:max_results]
 
     token_budget = max_tokens
+    primary_omitted = 0
     core_results = []
     core_budget = min(token_budget, max(0, int(max_tokens * 0.25)))
     for bucket in selected_core:
-        entry = f"📌 [核心准则] [bucket_id:{bucket.get('id', '')}] {await _dehydrate_summary(bucket, 360)}"
-        tokens = count_tokens_approx(entry)
+        entry, tokens = render_stored_bucket(
+            bucket,
+            f"📌 [核心准则] [bucket_id:{bucket.get('id', '')}]",
+        )
         if tokens > core_budget or tokens > token_budget:
-            break
+            primary_omitted += 1
+            continue
         core_results.append(entry)
         core_budget -= tokens
         token_budget -= tokens
@@ -718,10 +735,13 @@ async def surface_breath(
     surfaced_sources = []
     anchor_budget = min(token_budget, max(0, int(max_tokens * 0.18)))
     for bucket in selected_anchors:
-        entry = f"⚓ [长期锚点] [bucket_id:{bucket.get('id', '')}] {await _dehydrate_summary(bucket, 280)}"
-        tokens = count_tokens_approx(entry)
+        entry, tokens = render_stored_bucket(
+            bucket,
+            f"⚓ [长期锚点] [bucket_id:{bucket.get('id', '')}]",
+        )
         if tokens > anchor_budget or tokens > token_budget:
-            break
+            primary_omitted += 1
+            continue
         anchor_results.append(entry)
         surfaced_sources.append(bucket)
         anchor_budget -= tokens
@@ -732,13 +752,13 @@ async def surface_breath(
         if token_budget <= 0:
             break
         score = rt.decay_engine.calculate_score(bucket.get("metadata", {}))
-        entry = (
-            f"[权重:{score:.2f}] [bucket_id:{bucket.get('id', '')}] "
-            f"{await _dehydrate_summary(bucket, 420)}"
+        entry, tokens = render_stored_bucket(
+            bucket,
+            f"[权重:{score:.2f}] [bucket_id:{bucket.get('id', '')}]",
         )
-        tokens = count_tokens_approx(entry)
         if tokens > token_budget:
-            break
+            primary_omitted += 1
+            continue
         dynamic_results.append(entry)
         surfaced_sources.append(bucket)
         token_budget -= tokens
@@ -752,6 +772,7 @@ async def surface_breath(
             related_per_memory=related_per_memory,
             edge_min_confidence=edge_min_confidence,
             query="",
+            render_stored=True,
         )
 
     parts = []
@@ -761,8 +782,11 @@ async def surface_breath(
         parts.append("=== 长期锚点 ===\n" + "\n---\n".join(anchor_results))
     if dynamic_results:
         parts.append("=== 浮现记忆 ===\n" + "\n---\n".join(dynamic_results))
+    response_tokens = max_tokens - token_budget
     if related_block:
-        parts.append("=== 联想浮现 ===\n" + related_block)
+        related_section = "=== 联想浮现 ===\n" + related_block
+        parts.append(related_section)
+        response_tokens += count_tokens_approx(related_section)
     dream = await _dream_overlay(
         query="",
         valence=valence,
@@ -772,6 +796,15 @@ async def surface_breath(
     )
     if dream:
         parts.append(dream)
+        response_tokens += count_tokens_approx(dream)
+    if primary_omitted:
+        parts.append(
+            _SURFACE_BUDGET_NOTICE.format(
+                omitted=primary_omitted,
+                used=response_tokens,
+                limit=max_tokens,
+            )
+        )
     return "\n\n".join(parts) if parts else "权重池平静，没有需要处理的记忆。"
 
 

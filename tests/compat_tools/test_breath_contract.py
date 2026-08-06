@@ -144,6 +144,148 @@ async def test_breath_related_controls_change_direct_and_diffused_output(current
 
 
 @pytest.mark.asyncio
+async def test_parameter_free_breath_never_calls_dehydration_llm(
+    current_runtime,
+    monkeypatch,
+):
+    class ExplodingDehydrator:
+        def __init__(self):
+            self.calls = 0
+
+        async def dehydrate(self, _content: str, _metadata: dict) -> str:
+            self.calls += 1
+            raise AssertionError("broad breath must remain a zero-LLM read path")
+
+    source_id = await _bucket(
+        current_runtime,
+        "Broad surfacing source. " * 80,
+        "Broad Source",
+        importance=9,
+    )
+    related_id = await _bucket(
+        current_runtime,
+        "Graph-related stored memory. " * 60,
+        "Broad Related",
+        importance=4,
+    )
+    current_runtime["memory_edge_store"].add_edge(
+        source_id,
+        related_id,
+        "relates_to",
+        confidence=0.8,
+        reason="broad surfacing regression",
+    )
+    dehydrator = ExplodingDehydrator()
+    monkeypatch.setattr(runtime, "dehydrator", dehydrator)
+
+    result = await current.breath(
+        max_results=1,
+        max_tokens=10000,
+        include_related=True,
+        related_per_memory=1,
+        edge_min_confidence=0.5,
+    )
+
+    assert source_id in result
+    assert related_id in result
+    assert "=== 联想浮现 ===" in result
+    assert dehydrator.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_parameter_free_breath_reports_omissions_and_preserves_dream(
+    current_runtime,
+    monkeypatch,
+):
+    await _bucket(
+        current_runtime,
+        "Oversized protected memory. " * 500,
+        "Oversized Core",
+        importance=10,
+        extra_metadata={"protected": True},
+    )
+    await _bucket(
+        current_runtime,
+        "Oversized dynamic memory. " * 500,
+        "Oversized Dynamic",
+        importance=9,
+    )
+
+    class DreamSpy:
+        async def surface_for_breath(self, **_kwargs) -> str:
+            return "===== 梦境 =====\nBudget-safe dream"
+
+    monkeypatch.setattr(runtime, "dream_engine", DreamSpy())
+
+    result = await current.breath(
+        max_results=1,
+        max_tokens=40,
+        include_related=False,
+        include_core=True,
+        core_limit=1,
+    )
+
+    assert "===== 梦境 =====" in result
+    assert "token 预算不足" in result
+    assert "有 2 条主要浮现记忆" in result
+    assert "当前约使用 0/40 token" not in result
+    assert "权重池平静" not in result
+
+
+@pytest.mark.asyncio
+async def test_parameter_free_breath_keeps_ranked_related_prefix_under_budget(
+    current_runtime,
+):
+    source_id = await _bucket(
+        current_runtime,
+        "Small primary memory.",
+        "Primary",
+        importance=10,
+    )
+    strongest_id = await _bucket(
+        current_runtime,
+        "Oversized strongest related memory. " * 500,
+        "Strongest Related",
+        importance=4,
+    )
+    weaker_id = await _bucket(
+        current_runtime,
+        "Small weaker related memory.",
+        "Weaker Related",
+        importance=3,
+    )
+    edge_store = current_runtime["memory_edge_store"]
+    edge_store.add_edge(
+        source_id,
+        strongest_id,
+        "supports",
+        confidence=0.99,
+        reason="highest-ranked relation",
+    )
+    edge_store.add_edge(
+        source_id,
+        weaker_id,
+        "relates_to",
+        confidence=0.8,
+        reason="lower-ranked relation",
+    )
+
+    result = await current.breath(
+        max_results=1,
+        max_tokens=500,
+        include_related=True,
+        related_per_memory=2,
+        edge_min_confidence=0.5,
+        include_core=False,
+    )
+
+    assert source_id in result
+    assert strongest_id not in result
+    assert weaker_id not in result
+    assert "=== 联想浮现 ===" not in result
+
+
+@pytest.mark.asyncio
 async def test_breath_render_and_retrieval_modes_are_active(current_runtime):
     await _bucket(
         current_runtime,
