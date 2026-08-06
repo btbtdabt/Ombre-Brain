@@ -52,13 +52,13 @@ Normal final replies:
 
 - Base URL: `https://gateway.btombre.men/v1`
 - Relay API type: Anthropic Messages
-- Default model: `claude-opus-4-8-native`
-- OpenAI-compatible fallback model: `claude-opus-4-8`
+- Default model: `claude-opus-5-native`
+- OpenAI-compatible fallback model: `claude-opus-5`
 
 Gemini native route:
 
 - Base URL: `https://gateway.btombre.men/v1beta`
-- Model: `gemini-3.5-flash`
+- Model: `gemini-3.6-flash`
 
 The Gateway must preserve token-based Claude/Gemini routing, native Anthropic tool use, OpenAI compatibility, prompt/debug tracing, memory injection, and final-turn persona processing.
 

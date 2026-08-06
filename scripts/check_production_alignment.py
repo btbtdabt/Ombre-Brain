@@ -25,19 +25,25 @@ except ImportError as exc:  # pragma: no cover - operator-facing failure
 EXPECTED = {
     "gateway_base": "https://gateway.btombre.men",
     "relay_base": "https://nuojiji-relay.amydong.workers.dev",
-    "final_model": "claude-opus-4-8",
-    "native_final_model": "claude-opus-4-8-native",
-    "coordinator_model": "gemini-3.5-flash",
+    "final_model": "claude-opus-5",
+    "native_final_model": "claude-opus-5-native",
+    "auxiliary_model": "gemini-3.6-flash",
+    "embedding_model": "gemini-embedding-2-preview",
+    "reranker_model": "Qwen/Qwen3-Reranker-8B",
     "required_models": [
         "claude-opus-4-6",
         "claude-opus-4-8",
         "claude-opus-4-8-native",
+        "claude-opus-5",
+        "claude-opus-5-native",
         "claude-fable-5",
         "gemini-3.5-flash",
+        "gemini-3.6-flash",
     ],
     "proxy_claude_models": [
         "claude-opus-4-6",
         "claude-opus-4-8",
+        "claude-opus-5",
         "claude-fable-5",
     ],
 }
@@ -115,11 +121,50 @@ def config_gateway_checks(check: Check, config_path: Path) -> None:
         return
     loaded_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     cfg = loaded_config if isinstance(loaded_config, dict) else {}
+    for section in ("dehydration", "dream", "persona"):
+        value = cfg.get(section)
+        section_cfg = value if isinstance(value, dict) else {}
+        check.assert_true(
+            section_cfg.get("model") == EXPECTED["auxiliary_model"],
+            f"local {section}.model is gemini-3.6-flash",
+        )
+
+    portrait_value = cfg.get("portrait")
+    portrait = portrait_value if isinstance(portrait_value, dict) else {}
+    check.assert_true(
+        str(portrait.get("model") or "").strip() in {"", EXPECTED["auxiliary_model"]},
+        "local portrait.model is Gemini 3.6 or inherits dehydration",
+    )
+    reflection_value = cfg.get("reflection")
+    reflection = reflection_value if isinstance(reflection_value, dict) else {}
+    check.assert_true(
+        str(reflection.get("model") or "").strip() in {"", EXPECTED["auxiliary_model"]},
+        "local reflection.model is Gemini 3.6 or inherits persona/dehydration",
+    )
+    for key in ("daily_chat_memory_summary_model", "daily_chat_memory_candidate_model"):
+        check.assert_true(
+            str(reflection.get(key) or "").strip() in {"", EXPECTED["auxiliary_model"]},
+            f"local reflection.{key} is Gemini 3.6 or inherits dehydration",
+        )
+
+    embedding_value = cfg.get("embedding")
+    embedding = embedding_value if isinstance(embedding_value, dict) else {}
+    check.assert_true(
+        embedding.get("model") == EXPECTED["embedding_model"],
+        "local embedding keeps its specialized model",
+    )
+    reranker_value = cfg.get("reranker")
+    reranker = reranker_value if isinstance(reranker_value, dict) else {}
+    check.assert_true(
+        reranker.get("model") == EXPECTED["reranker_model"],
+        "local reranker keeps its specialized model",
+    )
+
     gateway_value = cfg.get("gateway")
     gateway = gateway_value if isinstance(gateway_value, dict) else {}
     check.assert_true(
         gateway.get("upstream_default_model") == EXPECTED["final_model"],
-        "local gateway upstream_default_model is claude-opus-4-8",
+        "local gateway upstream_default_model is claude-opus-5",
     )
 
     upstreams_value = gateway.get("upstreams")
@@ -134,7 +179,7 @@ def config_gateway_checks(check: Check, config_path: Path) -> None:
     )
     check.assert_true(
         anthropic.get("default_model") == EXPECTED["final_model"],
-        "local anthropic upstream default_model is claude-opus-4-8",
+        "local anthropic upstream default_model is claude-opus-5",
     )
     check.assert_true(
         set(EXPECTED["proxy_claude_models"]).issubset(set(anthropic.get("models") or [])),
@@ -145,12 +190,20 @@ def config_gateway_checks(check: Check, config_path: Path) -> None:
         "local native anthropic upstream uses Anthropic protocol",
     )
     check.assert_true(
+        anthropic_native.get("prompt_cache") == "anthropic_explicit",
+        "local native anthropic upstream uses explicit prompt caching",
+    )
+    check.assert_true(
+        anthropic_native.get("prompt_cache_retention") == "1h",
+        "local native anthropic upstream keeps stable cache entries for 1h",
+    )
+    check.assert_true(
         anthropic_native.get("base_url") == "https://api.anthropic.com/v1",
         "local native anthropic upstream base_url is official Anthropic /v1",
     )
     check.assert_true(
         anthropic_native.get("default_model") == EXPECTED["native_final_model"],
-        "local native anthropic upstream default_model is claude-opus-4-8-native",
+        "local native anthropic upstream default_model is claude-opus-5-native",
     )
     check.assert_true(
         any(
@@ -159,7 +212,7 @@ def config_gateway_checks(check: Check, config_path: Path) -> None:
             and item.get("upstream_model") == EXPECTED["final_model"]
             for item in (anthropic_native.get("models") or [])
         ),
-        "local native anthropic upstream maps native alias to Claude 4.8",
+        "local native anthropic upstream maps native alias to Claude Opus 5",
     )
     check.assert_true(
         gemini.get("base_url") == "https://gemini.amydong.workers.dev/v1",
@@ -170,9 +223,18 @@ def config_gateway_checks(check: Check, config_path: Path) -> None:
         "local gemini upstream native base_url is /v1beta",
     )
     check.assert_true(
-        gemini.get("default_model") == EXPECTED["coordinator_model"],
-        "local gemini upstream default_model is gemini-3.5-flash",
+        gemini.get("default_model") == EXPECTED["auxiliary_model"],
+        "local gemini upstream default_model is gemini-3.6-flash",
     )
+    check.assert_true(
+        EXPECTED["auxiliary_model"] in set(gemini.get("models") or []),
+        "local gemini upstream exposes gemini-3.6-flash",
+    )
+    for key in ("query_planner_model", "domain_sentinel_model"):
+        check.assert_true(
+            str(gateway.get(key) or "").strip() in {"", EXPECTED["auxiliary_model"]},
+            f"local gateway.{key} is Gemini 3.6 or inherits dehydration",
+        )
 
     routes_value = gateway.get("token_routes")
     routes = routes_value if isinstance(routes_value, list) else []
@@ -180,7 +242,7 @@ def config_gateway_checks(check: Check, config_path: Path) -> None:
         route for route in routes
         if isinstance(route, dict)
         and route.get("token_env") == "OMBRE_GATEWAY_GEMINI_TOKEN"
-        and route.get("default_model") == EXPECTED["coordinator_model"]
+        and route.get("default_model") == EXPECTED["auxiliary_model"]
     ]
     check.assert_true(bool(gemini_routes), "local gateway token_routes has Gemini token route")
 
@@ -208,12 +270,30 @@ def production_gateway_checks(check: Check, env: dict[str, str], gateway_base: s
     check.assert_true(status == 200, "production gateway /health is reachable")
     check.assert_true(
         gateway.get("upstream_default_model") == EXPECTED["final_model"],
-        "production gateway default model is Claude 4.8",
+        "production gateway default model is Claude Opus 5",
     )
     models = set(gateway.get("upstream_models") or [])
     check.assert_true(
         set(EXPECTED["required_models"]).issubset(models),
         "production gateway exposes Claude + Gemini models",
+    )
+    upstreams_value = gateway.get("upstreams")
+    upstreams = upstreams_value if isinstance(upstreams_value, list) else []
+    native_upstream = next(
+        (
+            item
+            for item in upstreams
+            if isinstance(item, dict) and item.get("name") == "anthropic-native"
+        ),
+        {},
+    )
+    check.assert_true(
+        native_upstream.get("prompt_cache") == "anthropic_explicit",
+        "production native Anthropic route uses explicit prompt caching",
+    )
+    check.assert_true(
+        native_upstream.get("prompt_cache_retention") == "1h",
+        "production native Anthropic route keeps stable cache entries for 1h",
     )
 
     status, payload = read_json(f"{gateway_base}/v1/models", token=default_token)
@@ -238,13 +318,27 @@ def production_gateway_checks(check: Check, env: dict[str, str], gateway_base: s
     )
     check.assert_true(status == 200, "production gateway Claude final route works with default token")
 
+    native_body = {
+        "model": EXPECTED["native_final_model"],
+        "messages": [{"role": "user", "content": "alignment check: reply ok only"}],
+        "max_tokens": 8,
+        "stream": False,
+    }
+    status, _payload = read_json(
+        f"{gateway_base}/v1/messages",
+        token=default_token,
+        method="POST",
+        body=native_body,
+    )
+    check.assert_true(status == 200, "production gateway native Claude Opus 5 route works")
+
     if gemini_token:
         gemini_body = {
             "contents": [{"role": "user", "parts": [{"text": "alignment check"}]}],
             "generationConfig": {"maxOutputTokens": 8, "temperature": 0.1},
         }
         status, _payload = read_json(
-            f"{gateway_base}/v1beta/models/{EXPECTED['coordinator_model']}:generateContent",
+            f"{gateway_base}/v1beta/models/{EXPECTED['auxiliary_model']}:generateContent",
             token=gemini_token,
             method="POST",
             body=gemini_body,
@@ -294,7 +388,7 @@ def relay_checks(check: Check, relay_env: dict[str, str], relay_base: str) -> No
     check.assert_true(final.get("apiType") == "claude", "relay final route uses Anthropic API type")
     check.assert_true(
         final.get("model") == EXPECTED["native_final_model"],
-        "relay final route uses native Claude 4.8 alias",
+        "relay final route uses native Claude Opus 5 alias",
     )
     check.assert_true(not latest.get("coordinator"), "relay main route has no coordinator debug block")
     check.assert_true(final.get("toolLoop") is True, "relay final route uses native Claude MCP tool loop")

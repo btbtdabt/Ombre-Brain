@@ -4019,7 +4019,7 @@ class GatewayService:
                     "token": gemini_token,
                     "default_model": os.environ.get(
                         "OMBRE_GATEWAY_GEMINI_DEFAULT_MODEL",
-                        "gemini-3.5-flash",
+                        "gemini-3.6-flash",
                     ).strip(),
                 }
             )

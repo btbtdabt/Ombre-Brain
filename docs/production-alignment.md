@@ -35,21 +35,31 @@ Expected models:
 claude-opus-4-6
 claude-opus-4-8
 claude-opus-4-8-native
+claude-opus-5
+claude-opus-5-native
 claude-fable-5
 gemini-3.5-flash
+gemini-3.6-flash
 ```
 
 Default OpenAI-compatible Claude model:
 
 ```text
-claude-opus-4-8
+claude-opus-5
 ```
 
 Relay final replies use the Anthropic native Gateway route:
 
 ```text
-claude-opus-4-8-native
+claude-opus-5-native
 ```
+
+Production explicitly configures dehydration, Dream, Persona, Reflection, and
+the Gateway Gemini token route with `gemini-3.6-flash`. Portrait, query planner,
+domain sentinel, semantic rescue, and daily-memory generation follow their
+existing dehydration/reflection fallback chains when dedicated model fields are
+empty, so their effective production model is also 3.6. Embedding and reranking
+remain on their specialized models.
 
 ## Ombre Runtime Files
 
@@ -57,19 +67,20 @@ claude-opus-4-8-native
 
 ```yaml
 gateway:
-  upstream_default_model: "claude-opus-4-8"
+  upstream_default_model: "claude-opus-5"
   token_routes:
     - name: "gemini"
       token_env: "OMBRE_GATEWAY_GEMINI_TOKEN"
-      default_model: "gemini-3.5-flash"
+      default_model: "gemini-3.6-flash"
   upstreams:
     - name: "anthropic"
       base_url: "https://claude-proxy.amydong.workers.dev/v1"
       api_key_env: "OMBRE_GATEWAY_ANTHROPIC_API_KEY"
-      default_model: "claude-opus-4-8"
+      default_model: "claude-opus-5"
       models:
         - "claude-opus-4-6"
         - "claude-opus-4-8"
+        - "claude-opus-5"
         - "claude-fable-5"
     - name: "anthropic-native"
       protocol: "anthropic"
@@ -78,8 +89,10 @@ gateway:
       anthropic_version: "2023-06-01"
       prompt_cache: "anthropic_explicit"
       prompt_cache_retention: "1h"
-      default_model: "claude-opus-4-8-native"
+      default_model: "claude-opus-5-native"
       models:
+        - id: "claude-opus-5-native"
+          upstream_model: "claude-opus-5"
         - id: "claude-opus-4-8-native"
           upstream_model: "claude-opus-4-8"
     - name: "gemini"
@@ -87,8 +100,9 @@ gateway:
       gemini_base_url: "https://gemini.amydong.workers.dev/v1beta"
       gemini_auth: "bearer"
       api_key_env: "OMBRE_GATEWAY_GEMINI_API_KEY"
-      default_model: "gemini-3.5-flash"
+      default_model: "gemini-3.6-flash"
       models:
+        - "gemini-3.6-flash"
         - "gemini-3.5-flash"
 ```
 
@@ -108,7 +122,7 @@ OMBRE_GATEWAY_GEMINI_API_KEY=<Gemini upstream/proxy token>
 ```text
 AGENT_FINAL_API_URL=https://gateway.btombre.men/v1
 AGENT_FINAL_API_KEY=<same value as OMBRE_GATEWAY_TOKEN>
-AGENT_FINAL_MODEL=claude-opus-4-8-native
+AGENT_FINAL_MODEL=claude-opus-5-native
 AGENT_FINAL_API_TYPE=claude
 AGENT_FINAL_OMBRE_SESSION_ID=main
 

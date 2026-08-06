@@ -87,7 +87,7 @@ def test_gateway_tokens_select_claude_openai_and_gemini_defaults(
     }
     assert service._auth_context_from_token("gemini-token") == {
         "name": "gemini",
-        "default_model": "gemini-3.5-flash",
+        "default_model": "gemini-3.6-flash",
     }
     assert service._auth_context_from_token("fallback-token") == {
         "name": "default",
