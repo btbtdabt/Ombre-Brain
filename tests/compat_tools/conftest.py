@@ -11,6 +11,7 @@ from entity_edges import EntityEdgeStore
 from letter_service import LetterService
 from memory_edges import MemoryEdgeStore
 from memory_moments import MemoryMomentStore
+from ombrebrain.storage.source_store import SourceStore
 from reminder_store import ReminderStore
 from tools import _runtime as runtime
 
@@ -127,6 +128,7 @@ def current_runtime(tmp_path: Path):
         "memory_edge_store": MemoryEdgeStore(config),
         "memory_moment_store": MemoryMomentStore(config),
         "entity_edge_store": EntityEdgeStore(config),
+        "source_store": SourceStore(str(buckets_dir)),
     }
     previous = {name: getattr(runtime, name, None) for name in managers}
     runtime.init(**managers)

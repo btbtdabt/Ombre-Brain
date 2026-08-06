@@ -215,8 +215,9 @@ def test_oversized_turn_is_split_with_overlap_and_custom_human_label():
 
     assert len(chunks) > 1
     assert chunks[0]["content"].startswith("[Amy] ")
-    assert _OVERLAP_CONTEXT_NOTICE in chunks[1]["content"]
-    assert "[Amy] " in chunks[1]["content"]
+    assert _OVERLAP_CONTEXT_NOTICE not in chunks[1]["content"]
+    assert _OVERLAP_CONTEXT_NOTICE in chunks[1]["llm_content"]
+    assert "[Amy] " in chunks[1]["llm_content"]
 
 
 def test_operit_parser_rejects_generic_memories_objects():

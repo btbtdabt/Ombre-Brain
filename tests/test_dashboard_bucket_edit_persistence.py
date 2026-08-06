@@ -45,8 +45,9 @@ class MutableBucketManager:
     async def get(self, bucket_id):
         return self.row if bucket_id == self.row["id"] else None
 
-    async def update(self, bucket_id, **updates):
+    async def update(self, bucket_id, *, event_actor="system", **updates):
         assert bucket_id == self.row["id"]
+        assert event_actor == "human"
         if self.on_update is not None:
             self.on_update(updates)
         self.updates.append(dict(updates))
@@ -184,6 +185,56 @@ async def test_dashboard_edit_rejects_unknown_fields_without_partial_write(monke
     assert payload["unknown_fields"] == ["future_field"]
     assert manager.updates == []
     assert manager.row["metadata"]["name"] == "Original memory"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_title_edit_atomically_updates_title_and_display_name(
+    monkeypatch,
+):
+    row = _row()
+    row["metadata"]["name"] = "2026-07-28 12-34-56 旧标题"
+    row["metadata"]["title"] = "旧标题"
+    manager = MutableBucketManager(row)
+    handler = _edit_handler(monkeypatch, manager)
+
+    response = await handler(JsonRequest("bucket-1", {"title": "新的精确标题"}))
+
+    payload = _json(response)
+    assert response.status_code == 200
+    assert payload["updated"] == ["name", "title"]
+    assert manager.updates == [{
+        "title": "新的精确标题",
+        "name": "2026-07-28 12-34-56 新的精确标题",
+    }]
+    assert row["metadata"]["title"] == "新的精确标题"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_rejects_oversized_title_without_partial_write(monkeypatch):
+    manager = MutableBucketManager(_row())
+    handler = _edit_handler(monkeypatch, manager)
+
+    response = await handler(JsonRequest("bucket-1", {"title": "长" * 121}))
+
+    assert response.status_code == 400
+    assert "120" in _json(response)["error"]
+    assert manager.updates == []
+
+
+@pytest.mark.asyncio
+async def test_historical_bucket_without_title_can_edit_other_fields(monkeypatch):
+    row = _row(importance=5)
+    row["metadata"].pop("title", None)
+    row["metadata"]["name"] = "2026-07-28 12-34-56"
+    manager = MutableBucketManager(row)
+    handler = _edit_handler(monkeypatch, manager)
+
+    response = await handler(JsonRequest("bucket-1", {"importance": 6}))
+
+    assert response.status_code == 200
+    assert _json(response)["updated"] == ["importance"]
+    assert manager.updates == [{"importance": 6}]
+    assert "title" not in row["metadata"]
 
 
 @pytest.mark.asyncio

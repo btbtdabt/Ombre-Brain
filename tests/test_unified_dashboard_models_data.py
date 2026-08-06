@@ -1602,7 +1602,7 @@ async def test_config_post_does_not_commit_secrets_when_dehydrator_reload_fails(
         )
     )
 
-    assert response.status_code == 500
+    assert response.status_code == 400
     assert env_writes == []
     assert secret_name not in os.environ
     assert "new-dehydration-secret" not in json.dumps(response_json(response))

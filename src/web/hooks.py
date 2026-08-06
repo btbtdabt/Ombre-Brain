@@ -15,7 +15,6 @@ web/hooks.py — breath 浮现挂载点（HTTP hook）
 """
 
 import asyncio
-import hmac
 import hashlib
 import json
 import os
@@ -103,7 +102,7 @@ def _is_hook_request_authorized(request) -> bool:
             _header_value(request, "x-ombre-hook-token"),
             auth[7:] if auth.startswith("Bearer ") else "",
         ]
-        if any(v and hmac.compare_digest(v, token) for v in supplied):
+        if any(v and sh._constant_time_text_equal(v, token) for v in supplied):
             return True
 
     try:
@@ -121,7 +120,10 @@ def _valid_hook_token(request) -> bool:
         _header_value(request, "x-ombre-hook-token"),
         auth[7:] if auth.startswith("Bearer ") else "",
     )
-    return any(value and hmac.compare_digest(value, token) for value in supplied)
+    return any(
+        value and sh._constant_time_text_equal(value, token)
+        for value in supplied
+    )
 
 
 def _hook_source_key(request) -> str:

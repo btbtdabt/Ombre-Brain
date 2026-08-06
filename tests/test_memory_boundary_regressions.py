@@ -208,6 +208,9 @@ async def test_hold_merge_appends_raw_text_and_never_calls_llm_merge(tmp_path, m
     assert result_id == bucket_id
     assert bucket is not None
     assert bucket["content"] == f"{old}\n\n---\n{new}"
+    update_event = list(manager.ledger_mirror.iter_events())[-1]
+    assert update_event["event_type"] == "TraceUpdated"
+    assert update_event["payload"]["event_actor"] == "llm"
 
 
 @pytest.mark.asyncio

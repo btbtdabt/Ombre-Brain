@@ -23,9 +23,10 @@ WORKDIR /app
 # 不需要 Tunnel 的用户可 `docker build --build-arg INSTALL_CLOUDFLARED=0 ...` 完全跳过。
 ARG INSTALL_CLOUDFLARED=1
 COPY deploy/fetch_cloudflared.py /tmp/fetch_cloudflared.py
-RUN if [ "$INSTALL_CLOUDFLARED" = "1" ]; then \
-        python /tmp/fetch_cloudflared.py /usr/local/bin/cloudflared \
-        && chmod +x /usr/local/bin/cloudflared; \
+RUN set -eu; \
+    if [ "$INSTALL_CLOUDFLARED" = "1" ]; then \
+        python /tmp/fetch_cloudflared.py /usr/local/bin/cloudflared; \
+        chmod +x /usr/local/bin/cloudflared; \
     else \
         echo "[build] INSTALL_CLOUDFLARED=0 → 跳过 cloudflared（Tunnel 一键管理将不可用）"; \
     fi; \

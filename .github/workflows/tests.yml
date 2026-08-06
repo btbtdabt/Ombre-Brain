@@ -94,6 +94,7 @@ jobs:
             -e OMBRE_COMPRESS_API_KEY=audit-key \
             -e OMBRE_COMPRESS_BASE_URL=http://ob-ci-llm:8080/v1 \
             -e OMBRE_MCP_REQUIRE_AUTH=false \
+            -e OMBRE_BIND_ADDRESS=127.0.0.1 \
             -e OMBRE_SETUP_TOKEN=docker-audit-setup-token \
             ombre-brain-ci:local
           for attempt in $(seq 1 60); do
@@ -105,7 +106,7 @@ jobs:
             sleep 1
           done
 
-      - name: Run canonical Docker MCP integration suite
+      - name: Run 15-tool Docker MCP integration suite
         env:
           OMBRE_DOCKER_INTEGRATION_URL: http://127.0.0.1:18084/mcp
           OMBRE_DOCKER_EXPECT_COMPRESSION_PROVIDER: "1"

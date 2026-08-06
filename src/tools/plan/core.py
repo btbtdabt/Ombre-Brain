@@ -82,6 +82,7 @@ async def plan_create(
         why_remembered=why_remembered,
         weight=weight,
         source_tool="plan",
+        event_actor="llm",
     )
     from .._common import append_plan_change_log
 

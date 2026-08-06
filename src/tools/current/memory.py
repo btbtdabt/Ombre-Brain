@@ -30,6 +30,7 @@ from .._common import (
 )
 from ..breath import dispatch as p0_breath_dispatch
 from ..dream import dispatch as p0_dream_dispatch
+from ..grow.core import grow_items as p0_grow_items
 from ..trace import dispatch as p0_trace_dispatch
 from ._helpers import (
     ai_author_name,
@@ -851,60 +852,15 @@ async def grow(
     source: str = "",
     title: str = "",
 ) -> str:
-    """把筛过的长片段拆成少量长期记忆；单条事实/承诺/偏好优先 hold，旧记忆补感受优先 comment_bucket。只有多个已筛选长期记忆点才用 grow，别塞整段流水账。保留原文称呼、昵称、互称、自称和原话，不要把临时称呼推成稳定画像事实。title 可选，短内容时传了就用你给的标题。普通记忆 content 的最小写入就是正文；只有确实需要结构化时才按需使用 ### moment、### original、### reflection；reflection 必须写成“我……”第一人称。不要写 ### affect_anchor、### followup 或 ### todo：长期回应变化写进 reflection，到时提醒用 reminder_create。feel 年轮只写第一人称正文，不写标题或任何 Markdown 分段。"""
+    """只有多个已筛选长期记忆点才用 grow；单条事实/承诺/偏好优先 hold，旧记忆补感受优先 comment_bucket。items 是已拆好的最终记忆正文；此时 content 可作为共享原文证据，item.source_ranges 用 1-based 行号标记该条事件的证据范围。保留原文称呼、昵称、互称、自称和原话。title 可选，短内容时传了就用给定标题。普通记忆 content 的最小写入就是正文；需要结构化时按需使用 ### moment、### original、### reflection，reflection 使用第一人称。到时提醒用 reminder_create。feel 年轮只写第一人称正文。"""
     await ensure_decay_started()
     content = str(content or "").strip()
     if items is not None:
-        if content or bool_value(auto) or str(source or "").strip() or str(title or "").strip():
-            return "items 预拆分模式不能同时传 content、auto、source 或 title。"
+        if bool_value(auto) or str(source or "").strip() or str(title or "").strip():
+            return "items 预拆分模式不能同时传 auto、source 或 title。"
         if error := check_grow_items_payload(items):
             return error
-        clean_items: list[dict] = []
-        for item in items:
-            if isinstance(item, str):
-                item_content = item.strip()
-                normalized = {"content": item_content}
-            elif isinstance(item, dict):
-                item_content = str(item.get("content") or "").strip()
-                normalized = {**item, "content": item_content}
-            else:
-                continue
-            if item_content:
-                clean_items.append(normalized)
-        if not clean_items:
-            return "items 为空或都不合法，未创建任何桶。"
-
-        batch_id = f"g_{uuid.uuid4().hex[:12]}"
-        results: list[str] = []
-        created = 0
-        for item in clean_items:
-            item_content = str(item["content"])
-            if error := check_content_size(item_content):
-                results.append(f"⚠️{item.get('name', '未命名')}: {error}")
-                continue
-            if contract_error := memory_write_contract_error(item_content):
-                results.append(
-                    f"⚠️{item.get('name', '未命名')}: {contract_error}"
-                )
-                continue
-            try:
-                bucket_id, display_name = await _grow_create_item(
-                    item,
-                    batch_id=batch_id,
-                )
-            except Exception:
-                results.append(f"⚠️{item.get('name', '未命名')}")
-                continue
-            results.append(f"📝{display_name}")
-            created += 1
-            asyncio.create_task(check_duplicate_for(bucket_id, item_content))
-        asyncio.create_task(
-            check_plan_resolution("\n".join(str(item["content"]) for item in clean_items))
-        )
-        return (
-            f"{len(clean_items)}条(预拆分·逐字)|新{created}合0 batch:{batch_id}\n"
-            + "\n".join(results)
-        )
+        return await p0_grow_items(items, source_content=content)
     if not content:
         return "内容为空，无法整理。"
     if error := check_grow_input_size(content):
@@ -1756,10 +1712,16 @@ async def entity_edge_backfill(
     return base
 
 
-async def dream(window_hours: int | None = None) -> str:
-    """无参数进入当前 introspection；传 window_hours 时读取 P0 时间窗梦境。"""
-    if window_hours is not None:
-        return await p0_dream_dispatch(window_hours=window_hours)
+async def dream(
+    window_hours: int | None = None,
+    inspiration: bool = False,
+) -> str:
+    """无参数进入当前 introspection；传 window_hours 或 inspiration=True 时读取 P0 时间窗梦境。inspiration=True 会追加只读、带来源且仅本次响应有效的 Spark 候选。"""
+    if window_hours is not None or inspiration:
+        return await p0_dream_dispatch(
+            window_hours=window_hours if window_hours is not None else 48,
+            inspiration=inspiration,
+        )
     result = await introspection()
     return "dream() 已改名为 introspection()。夜梦由后台小模型自动生成，不需要主动调用工具。\n\n" + result
 

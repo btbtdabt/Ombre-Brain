@@ -26,12 +26,17 @@ def _run_node(script: str) -> dict[str, Any]:
     completed = subprocess.run(
         [node, "-"],
         cwd=ROOT,
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
         encoding="utf-8",
         input=script,
     )
+    if completed.returncode:
+        pytest.fail(
+            "Dashboard Node probe failed:\n"
+            + (completed.stderr or completed.stdout or "no diagnostic output")
+        )
     return json.loads(completed.stdout)
 
 
@@ -756,7 +761,7 @@ const networkTab = element('', {{
 }});
 const tabs = [settingsTab, networkTab];
 const viewIds = [
-  'list-view', 'breath-view', 'network-view', 'plan-view', 'import-view',
+      'list-view', 'breath-view', 'network-view', 'plan-view', 'import-view', 'faq-view',
   'logs-view', 'v3-debug-view', 'settings-view', 'letters-view',
   'anchors-view', 'about-view', 'mcp-local-origin',
 ];
@@ -907,7 +912,7 @@ function element(id, tabName) {{
 
 const networkTab = element('network-tab', 'network');
 const elements = Object.fromEntries([
-  'list-view', 'breath-view', 'network-view', 'plan-view', 'import-view',
+  'list-view', 'breath-view', 'network-view', 'plan-view', 'import-view', 'faq-view',
   'logs-view', 'v3-debug-view', 'settings-view', 'letters-view',
   'anchors-view', 'about-view', 'mcp-local-origin', 'network-canvas',
 ].map((id) => [id, element(id)]));
@@ -1129,7 +1134,7 @@ const settingsTab = element('dashboard-tab-system-status', {{
   tab: 'settings', panelId: 'system-status', workspace: 'system',
 }});
 const viewIds = [
-  'list-view', 'breath-view', 'network-view', 'plan-view', 'import-view',
+  'list-view', 'breath-view', 'network-view', 'plan-view', 'import-view', 'faq-view',
   'logs-view', 'v3-debug-view', 'settings-view', 'letters-view',
   'anchors-view', 'about-view', 'mcp-local-origin',
 ];

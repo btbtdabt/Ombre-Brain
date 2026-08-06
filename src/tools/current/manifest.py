@@ -9,7 +9,7 @@ from functools import wraps
 from types import MappingProxyType
 from typing import Any, Awaitable, Callable, cast
 
-from .legacy import I, anchor, plan, release
+from .legacy import I, anchor, plan, release, source_read
 from .memory import (
     breath,
     breath_advanced,
@@ -101,15 +101,16 @@ CURRENT_TOOL_NAMES = (
     "introspection",
 )
 
-# P0 exposes these 14 names across its main and extra FastMCP surfaces.  The
-# current handler is canonical for every overlap; only the four non-overlapping
-# names need legacy adapters in this package.
+# P0 exposes these 15 names on its FastMCP surface. The current handler is
+# canonical for every overlap; non-overlapping names use focused adapters or
+# compatibility handlers in this package.
 P0_TOOL_NAMES = (
     "breath",
     "breath_search",
     "breath_advanced",
     "hold",
     "grow",
+    "source_read",
     "trace",
     "anchor",
     "release",
@@ -155,6 +156,7 @@ TOOL_MANIFEST = (
             darkroom_status,
             darkroom_release,
             grow,
+            source_read,
             profile_fact,
             trace,
             pulse,

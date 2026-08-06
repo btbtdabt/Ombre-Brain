@@ -1443,9 +1443,9 @@ window.OmbreDashboardPathEnv = window.OmbreDashboardCore.createPathEnv({ locatio
   }
   .embed-warn-btn:hover { background: rgba(184,151,98,0.18); }
 
-  /* ====== Settings health summary / compact until explicitly opened ====== */
+  /* ====== P1 常驻系统状态条 ====== */
   #status-banner {
-    position: sticky; top: 56px; z-index: 40;
+    position: sticky; top: var(--ob-header-height, 96px); z-index: 40;
     font-size: 12.5px; color: var(--text);
     background: rgba(253,252,240,0.85); backdrop-filter: blur(6px);
     border-bottom: 1px solid var(--border);
@@ -2131,11 +2131,15 @@ window.OmbreDashboardPathEnv = window.OmbreDashboardCore.createPathEnv({ locatio
       </div>
     </div>
 
-    <div id="import-errors" style="display:none;margin:12px 0;padding:12px;background:var(--surface);border-radius:8px;font-size:12px;color:var(--negative);max-height:120px;overflow-y:auto;"></div>
+    <div id="import-errors" style="display:none;margin:12px 0;padding:14px;background:rgba(190,90,65,.07);border:1px solid rgba(190,90,65,.35);border-radius:12px;font-size:12px;">
+      <div style="display:flex;align-items:center;gap:7px;color:var(--negative);font-weight:700;margin-bottom:10px;"><i data-lucide="circle-alert" style="width:16px;height:16px;"></i> 导入报错提醒 <span class="en">Import diagnostics</span></div>
+      <div id="import-error-list" style="display:flex;flex-direction:column;gap:9px;"></div>
+    </div>
 
     <div id="import-results-section" style="margin:20px 0;">
       <h3>已导入记忆 <span class="en">Imported</span> <button onclick="loadImportResults()" title="刷新 / Refresh" style="font-size:12px;padding:2px 8px;"><i data-lucide="refresh-cw"></i></button></h3>
       <div id="import-results-list" style="max-height:500px;overflow-y:auto;"></div>
+      <button id="import-results-more" type="button" onclick="loadMoreImportResults()" style="display:none;margin:10px auto 0;">加载更多 / Load more</button>
     </div>
 
     <hr style="border-color:var(--border);margin:24px 0;" />
@@ -2926,7 +2930,7 @@ window.OmbreDashboardPathEnv = window.OmbreDashboardCore.createPathEnv({ locatio
     <div class="config-section" id="sec-mcp" data-sgroup="advanced">
       <h3>MCP 配置 <span class="sec-en">MCP Setup</span></h3>
       <div style="font-size:12px;color:var(--text-dim);margin-bottom:16px;line-height:1.7;">
-        生成 Claude Desktop / claude.ai 的 MCP 连接配置。14 个工具全在一个端点 /mcp 上，只需连这一条。
+        生成 Claude Desktop / claude.ai 的 MCP 连接配置。15 个工具全在一个端点 /mcp 上，只需连这一条。
       </div>
       <div style="margin-bottom:16px;padding:12px 14px;border:1px solid var(--border);border-radius:11px;background:var(--surface-solid);font-size:12px;line-height:1.7;">
         不确定 OAuth、端口和持久目录怎么选？
@@ -2972,7 +2976,7 @@ window.OmbreDashboardPathEnv = window.OmbreDashboardCore.createPathEnv({ locatio
             <button onclick="copyMcpUrl('main')" title="复制 / Copy" style="padding:3px 8px;font-size:11px;white-space:nowrap;background:none;border:1px solid var(--border);border-radius:3px;cursor:pointer;color:var(--text-dim);"><i data-lucide="copy"></i></button>
           </div>
         </div>
-        <div style="margin-top:6px;font-size:11px;color:var(--text-light);">14 个工具已合并到单一连接器 /mcp，只需连这一条。</div>
+        <div style="margin-top:6px;font-size:11px;color:var(--text-light);">15 个工具已合并到单一连接器 /mcp，只需连这一条。</div>
         <div id="mcp-copy-msg" style="margin-top:4px;font-size:11px;color:var(--positive);min-height:16px;"></div>
       </div>
 
@@ -2993,22 +2997,23 @@ window.OmbreDashboardPathEnv = window.OmbreDashboardCore.createPathEnv({ locatio
         </div>
       </div>
 
-      <!-- MCP 鉴权模式（OAuth / 静态 Token / 关闭）-->
+      <!-- MCP 鉴权模式（OAuth / OAuth+Token / 静态 Token / 关闭）-->
       <div style="margin:18px 0;padding:14px;background:var(--surface-solid);border-radius:11px;box-shadow:inset 2px 2px 5px var(--shadow-dark-subtle),inset -2px -2px 4px var(--shadow-light);">
         <div style="font-weight:600;font-size:13px;margin-bottom:8px;">MCP 鉴权</div>
         <div class="config-row" style="align-items:center;">
           <label>连接鉴权</label>
           <select id="cfg-mcp-auth" onchange="onMcpAuthModeChange()" style="flex:1;max-width:440px;min-width:0;">
             <option value="oauth">开启 OAuth（Claude.ai 网页版 / Claude Code 远程需要）</option>
+            <option value="hybrid">OAuth + 静态 Token 共存（网页与第三方客户端同时连接）</option>
             <option value="token">静态 Token 鉴权（第三方 MCP 客户端，不走 OAuth）</option>
-            <option value="off">关闭 · 免认证直连（自有前端 / GPT / GLM）</option>
+            <option value="off">关闭 · 免认证直连（仅限已确认的本机回环边界）</option>
           </select>
           <button type="button" onclick="saveMcpAuth()" title="保存并写入 config.yaml / Save &amp; write to config.yaml" style="margin-left:8px;padding:0 12px;height:32px;font-size:12px;white-space:nowrap;display:inline-flex;align-items:center;gap:4px;"><i data-lucide="save"></i> 保存 Save</button>
           <span id="mcp-auth-msg" style="margin-left:8px;font-size:11px;"></span>
         </div>
         <div style="margin-top:6px;font-size:11px;color:var(--text-light);line-height:1.7;">
-          三选一，<b>不会叠加</b>：选 OAuth 就不认 Token，选 Token 就不认 OAuth。改动写入 config.yaml，<b>需重启服务后生效</b>。
-          关闭鉴权后任何能访问 /mcp 的人都能读写记忆；静态 Token 泄露也等同公开访问——<b>无论选哪种模式都请勿把服务直接暴露公网</b>（放内网，或在反代层另加一道鉴权）。
+          共存模式保留 OAuth 动态注册，并让同一 <code>Authorization: Bearer</code> 入口同时接受预置静态 Token；改动写入 config.yaml，<b>需重启服务后生效</b>。
+          关闭鉴权后任何能访问 /mcp 的人都能读写记忆，系统默认只允许已确认的本机回环边界。静态 Token 泄露也等同公开访问——<b>公网连接必须使用 HTTPS，并妥善保管凭据</b>。
         </div>
 
         <div id="mcp-token-panel" style="display:none;margin-top:12px;padding:12px;border:1px solid var(--border);border-radius:9px;">
@@ -3027,7 +3032,7 @@ window.OmbreDashboardPathEnv = window.OmbreDashboardCore.createPathEnv({ locatio
             </div>
             <div style="margin-top:10px;color:var(--text-light);">
               用法：请求头二选一 —— <code>Authorization: Bearer &lt;token&gt;</code> 或 <code>Ombre-MCP-Token: &lt;token&gt;</code>。
-              切换鉴权模式需重启生效；重新生成 Token <b>立即生效，无需重启</b>。
+               共存模式下 OAuth 客户端仍走授权流程；切换鉴权模式需重启生效。当前进程已处于 Token/共存模式时，重新生成 Token <b>立即生效，无需重启</b>。
             </div>
           </div>
         </div>
@@ -3407,10 +3412,30 @@ function reloadDashboardSession() {
 
 async function completeDashboardAuthentication() {
   clearDashboardPasswordInputs();
+  let sessionReady = false;
+  try {
+    const resp = await fetch(DASHBOARD_PATH.api('/auth/status'), {
+      cache: 'no-store',
+      credentials: 'same-origin'
+    });
+    if (resp.ok) {
+      const data = await resp.json();
+      sessionReady = data.authenticated === true;
+    }
+  } catch (_) { /* 统一在下方显示可操作的会话错误。 */ }
+  if (!sessionReady) {
+    window.OmbreDashboardAuthenticated = false;
+    document.body.dataset.authenticated = 'false';
+    document.getElementById('auth-overlay').style.display = 'flex';
+    showAuthError('验证已通过，但浏览器未建立登录会话。请检查 nginx 的 Host、X-Forwarded-Proto 与 Set-Cookie 转发。');
+    return false;
+  }
   window.OmbreDashboardAuthenticated = true;
   document.body.dataset.authenticated = 'true';
+  document.getElementById('auth-error').style.display = 'none';
   document.getElementById('auth-overlay').style.display = 'none';
   reloadDashboardSession();
+  return true;
 }
 
 async function handleDashboardUnauthorized() {
@@ -3418,8 +3443,7 @@ async function handleDashboardUnauthorized() {
   window.OmbreDashboardAuthReady = checkAuth();
   const authenticated = await window.OmbreDashboardAuthReady;
   // A second tab can refresh the session between the failed request and this
-  // status check. The authenticated DOM was already cleared above, so rebuild
-  // it from a clean document instead of leaving a signed-in blank dashboard.
+  // status check. Rebuild from a clean document if that happened.
   if (authenticated) reloadDashboardSession();
   return authenticated;
 }
@@ -3526,6 +3550,19 @@ function showAuthError(msg) {
   el.style.display = 'block';
 }
 
+async function readAuthFailure(resp, fallback) {
+  try {
+    const data = await resp.json();
+    const error = data && typeof data.error === 'string' ? data.error : '';
+    if (resp.status === 403 && error === 'Cross-origin request rejected') {
+      return '反向代理来源校验失败（HTTP 403）。请让 nginx 保留 Host、X-Forwarded-Host、X-Forwarded-Proto，并配置 OMBRE_TRUSTED_PROXY_CIDRS。';
+    }
+    return error || fallback || ('登录请求失败（HTTP ' + resp.status + '）');
+  } catch (_) {
+    return '登录请求失败（HTTP ' + resp.status + '）：反向代理未返回 OB 的 JSON 响应，请检查 nginx 是否完整转发 /auth/*。';
+  }
+}
+
 async function doSetup() {
   const p1 = document.getElementById('auth-setup-pwd').value;
   const p2 = document.getElementById('auth-setup-pwd2').value;
@@ -3580,12 +3617,22 @@ async function doRecover() {
 
 async function doLogin() {
   const pwd = document.getElementById('auth-login-pwd').value;
-  const resp = await fetch(DASHBOARD_PATH.api('/auth/login'), { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({password: pwd}) });
+  let resp;
+  try {
+    resp = await fetch(DASHBOARD_PATH.api('/auth/login'), {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      credentials: 'same-origin',
+      cache: 'no-store',
+      body: JSON.stringify({password: pwd})
+    });
+  } catch (_) {
+    return showAuthError('登录请求未到达 OB，请检查网络以及 nginx 是否完整转发 /auth/*。');
+  }
   if (resp.ok) {
     await completeDashboardAuthentication();
   } else {
-    const d = await resp.json().catch(() => ({}));
-    showAuthError(d.error || d.detail || '密码错误');
+    showAuthError(await readAuthFailure(resp, '登录失败（HTTP ' + resp.status + '）'));
   }
 }
 
@@ -3666,7 +3713,7 @@ async function loadTunnelStatus() {
   const authCaution = document.getElementById('tunnel-auth-caution');
   const tunnelActive = !!d.token_set;
   if (authDanger) authDanger.style.display = (tunnelActive && d.mcp_auth_required === false) ? '' : 'none';
-  if (authCaution) authCaution.style.display = (tunnelActive && d.mcp_auth_required !== false && d.mcp_auth_mode === 'token') ? '' : 'none';
+  if (authCaution) authCaution.style.display = (tunnelActive && d.mcp_auth_required !== false && (d.mcp_auth_mode === 'token' || d.mcp_auth_mode === 'hybrid')) ? '' : 'none';
   if (d.running) {
     _setTunnelUI(true, '已连接 / Connected', 'var(--positive, #9DC880)', '停止', '');
   } else {
@@ -4057,7 +4104,7 @@ async function loadSystemDiagnostics() {
   }
 }
 
-// ====== Settings health summary ======
+// ====== P1 常驻系统状态条 ======
 // 只有这几项对应用户能自己动手改的设置字段；其余（契约 / 开发类检查）一律「查看详情」跳到设置体检。
 const SB_ACTION_TARGETS = {
   embedding: { field: 'cfg-emb-api-key' },   // 向量化 Key
@@ -4114,8 +4161,31 @@ function toggleStatusBanner() {
   if (!b) return;
   if (b.getAttribute('data-state') === 'ok') { gotoDiagnostics(); return; }
   b.classList.toggle('open');
-  const trigger = b.querySelector('.sb-bar');
-  if (trigger) trigger.setAttribute('aria-expanded', b.classList.contains('open') ? 'true' : 'false');
+}
+
+// 顶栏会随窗口宽度、按钮换行和字体加载改变高度，状态条不能使用固定偏移。
+var _statusHeaderResizeObserver = null;
+function syncStatusBannerOffset() {
+  const header = document.querySelector('.header');
+  if (!header) return;
+  const height = Math.ceil(header.getBoundingClientRect().height);
+  document.documentElement.style.setProperty('--ob-header-height', height + 'px');
+}
+function watchStatusBannerOffset() {
+  const header = document.querySelector('.header');
+  if (!header) return;
+  syncStatusBannerOffset();
+  if (typeof ResizeObserver === 'function') {
+    _statusHeaderResizeObserver = new ResizeObserver(syncStatusBannerOffset);
+    _statusHeaderResizeObserver.observe(header);
+  } else {
+    window.addEventListener('resize', syncStatusBannerOffset);
+  }
+}
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', watchStatusBannerOffset, { once: true });
+} else {
+  watchStatusBannerOffset();
 }
 
 function renderStatusBannerCard(check) {
@@ -4628,59 +4698,63 @@ async function hardDeleteSelectedTests() {
 }
 
 function activateDashboardTab(tab) {
-  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-  tab.classList.add('active');
-  const target = tab.dataset.tab;
-  const pending = [];
-  document.getElementById('list-view').style.display = target === 'list' ? '' : 'none';
-  document.getElementById('breath-view').style.display = target === 'breath' ? '' : 'none';
-  document.getElementById('network-view').style.display = target === 'network' ? '' : 'none';
-  document.getElementById('plan-view').style.display = target === 'plan' ? '' : 'none';
-  document.getElementById('import-view').style.display = target === 'import' ? '' : 'none';
-  document.getElementById('logs-view').style.display = target === 'logs' ? '' : 'none';
-  document.getElementById('v3-debug-view').style.display = target === 'v3-debug' ? '' : 'none';
-  document.getElementById('settings-view').style.display = target === 'settings' ? '' : 'none';
-  document.getElementById('letters-view').style.display = target === 'letters' ? '' : 'none';
-  document.getElementById('anchors-view').style.display = target === 'anchors' ? '' : 'none';
-  document.getElementById('about-view').style.display = target === 'about' ? '' : 'none';
-  if (target !== 'network' && _netRAF) { cancelAnimationFrame(_netRAF); _netRAF = null; }
-  if (target === 'network') {
-    pending.push(new Promise(function(resolve) {
-      requestAnimationFrame(function loadVisibleNetwork() {
-        var canvas = document.getElementById('network-canvas');
-        if (!canvas || canvas.offsetWidth <= 0 || canvas.offsetHeight <= 0) {
-          resolve();
-          return;
-        }
-        Promise.resolve(loadNetwork()).then(resolve, resolve);
-      });
-    }));
-  }
-  if (target === 'plan') pending.push(loadPlans());
-  if (target === 'import') pending.push(pollImportStatus(), loadImportResults());
-  if (target === 'logs') pending.push(loadLogs(), loadOBErrors());
-  if (target === 'v3-debug') pending.push(loadV3Debug());
-  if (target === 'settings') {
-    pending.push(
-      loadSettingsStatus(),
-      loadSystemDiagnostics(),
-      loadHumanName(),
-      loadConfig(),
-      refreshEnvConfig(),
-      loadGithubStatus(),
-      loadSamplingSettings(),
-      loadEnvVars(),
-      loadHostVault(),
-      loadLocalEmbStatus()
-    );
-    const _mcpOriginEl = document.getElementById('mcp-local-origin');
-    if (_mcpOriginEl) _mcpOriginEl.textContent = location.origin;
-    renderMcpUrls();
-  }
-  if (target === 'letters') pending.push(loadLetters());
-  if (target === 'anchors') pending.push(loadAnchorsView());
-  if (target === 'about') pending.push(loadAbout());
-  return Promise.allSettled(pending);
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    const target = tab.dataset.tab;
+    const pending = [];
+    document.getElementById('list-view').style.display = target === 'list' ? '' : 'none';
+    document.getElementById('breath-view').style.display = target === 'breath' ? '' : 'none';
+    document.getElementById('network-view').style.display = target === 'network' ? '' : 'none';
+    document.getElementById('plan-view').style.display = target === 'plan' ? '' : 'none';
+    document.getElementById('import-view').style.display = target === 'import' ? '' : 'none';
+    document.getElementById('faq-view').style.display = target === 'faq' ? '' : 'none';
+    document.getElementById('logs-view').style.display = target === 'logs' ? '' : 'none';
+    document.getElementById('v3-debug-view').style.display = target === 'v3-debug' ? '' : 'none';
+    document.getElementById('settings-view').style.display = target === 'settings' ? '' : 'none';
+    document.getElementById('letters-view').style.display = target === 'letters' ? '' : 'none';
+    document.getElementById('anchors-view').style.display = target === 'anchors' ? '' : 'none';
+    document.getElementById('about-view').style.display = target === 'about' ? '' : 'none';
+    if (target !== 'network' && _netRAF) { cancelAnimationFrame(_netRAF); _netRAF = null; }
+    if (target === 'network') {
+      pending.push(new Promise(function(resolve) {
+        requestAnimationFrame(function loadVisibleNetwork() {
+          var canvas = document.getElementById('network-canvas');
+          if (!canvas || canvas.offsetWidth <= 0 || canvas.offsetHeight <= 0) {
+            resolve();
+            return;
+          }
+          Promise.resolve(loadNetwork()).then(resolve, resolve);
+        });
+      }));
+    }
+    if (target === 'plan') pending.push(loadPlans());
+    if (target === 'list') pending.push(loadBuckets());
+    if (target === 'import') pending.push(pollImportStatus(), loadImportResults());
+    if (target === 'logs') pending.push(loadLogs(), loadOBErrors());
+    if (target === 'v3-debug') pending.push(loadV3Debug());
+    if (target === 'settings') {
+      // 任务D：合并 config + settings 后，切换到「设置」时一次性加载所有面板数据
+      pending.push(
+        loadSettingsStatus(),
+        loadSystemDiagnostics(),
+        loadHumanName(),
+        loadConfig(),
+        refreshEnvConfig(),
+        loadGithubStatus(),
+        loadSamplingSettings(),
+        loadEnvVars(),
+        loadHostVault(),
+        loadLocalEmbStatus()
+      );
+      // MCP 面板同步初始化（不依赖异步请求）
+      const _mcpOriginEl = document.getElementById('mcp-local-origin');
+      if (_mcpOriginEl) _mcpOriginEl.textContent = location.origin;
+      renderMcpUrls();
+    }
+    if (target === 'letters') pending.push(loadLetters());
+    if (target === 'anchors') pending.push(loadAnchorsView());
+    if (target === 'about') pending.push(loadAbout());
+    return Promise.allSettled(pending);
 }
 
 document.querySelectorAll('.tab').forEach(tab => {
@@ -5064,12 +5138,9 @@ function _paintBuckets() {
     else if (b.resolved)     iconHtml = '<i data-lucide="moon"></i>';
     else                     iconHtml = '<i data-lucide="message-circle"></i>';
     var firstBadge = b.first_of_kind ? ' <i data-lucide="sparkles" title="首次出现" style="width:12px;height:12px;color:var(--accent);vertical-align:-1px;"></i>' : '';
-    var valence = Number(b.valence);
-    valence = Number.isFinite(valence) ? valence : 0.5;
-    var vPos = Math.max(0, Math.min(100, Math.round(valence * 100)));
-    var modelValence = Number(b.model_valence);
-    var modelV = Number.isFinite(modelValence) ? ' → V' + modelValence.toFixed(1) : '';
-    var bucketScore = Number(b.score);
+    var importedBadge = b.imported ? ' <span title="由对话导入" style="font-size:10px;color:var(--accent);border:1px solid var(--accent);border-radius:999px;padding:1px 5px;white-space:nowrap;">被导入</span>' : '';
+    var vPos = Math.round(b.valence * 100);
+    var modelV = b.model_valence != null ? ' → V' + b.model_valence.toFixed(1) : '';
     var activityTime = firstValidBucketTime(
       b.last_active_epoch_ms, b.last_active, b.created_epoch_ms, b.created
     );
@@ -5096,7 +5167,7 @@ function _paintBuckets() {
       '<div class="bucket-row-top">' +
         '<input class="bucket-select" type="checkbox" data-id="' + escAttr(b.id) + '" onclick="event.stopPropagation()" onchange="toggleBucketSelection(this.dataset.id,this.checked)"' + (selectedBucketIds.has(b.id) ? ' checked' : '') + '>' +
         '<span class="' + iconCls + '">' + iconHtml + '</span>' +
-        '<span class="name" title="' + escAttr(b.name) + '">' + esc(b.name) + firstBadge + '</span>' +
+        '<span class="name" title="' + escAttr(b.name) + '">' + esc(b.name) + firstBadge + importedBadge + '</span>' +
         '<div class="bucket-row-tags">' +
           domainHtml +
           emotionHtml +
@@ -5233,7 +5304,7 @@ async function showDetail(id) {
         '</ul></div>';
     }
     content.innerHTML =
-      '<h2>' + esc(meta.name || id) + firstBadge + '</h2>' +
+      '<h2>' + esc(meta.title || meta.name || id) + firstBadge + '</h2>' +
       whyHtml +
       meaningHtml +
       '<div class="detail-meta">' +
@@ -5245,11 +5316,12 @@ async function showDetail(id) {
         '<div class="field"><label>唤醒度 / Arousal</label>A' + safeArousal.toFixed(2) + '</div>' +
         '<div class="field"><label>模型视角 / Model view</label>' + (safeModelValence != null ? 'V' + safeModelValence.toFixed(2) : '—') + '</div>' +
         '<div class="field"><label>重要度 / Importance</label>' + safeImportance + '/10</div>' +
-        '<div class="field"><label>权重分 / Weight</label>' + (b.score != null ? b.score.toFixed(4) : '—') + '</div>' +
+        '<div class="field"><label>活跃度分 / Activity score</label>' + (b.score != null ? b.score.toFixed(4) : '—') + '</div>' +
         '<div class="field"><label>激活次数 / Activations</label>' + safeActivationCount + '</div>' +
         '<div class="field"><label>已解决 / Resolved</label>' + (meta.resolved ? _SV.ok : '—') + '</div>' +
         '<div class="field"><label>已消化 / Digested</label>' + (meta.digested ? _SV.ok : '—') + '</div>' +
         '<div class="field"><label>钉选 / Pinned</label>' + (meta.pinned ? _SV.ok : '—') + '</div>' +
+        '<div class="field"><label>导入来源 / Imported</label>' + (meta.imported || meta.source_tool === 'import' ? '被导入' : '—') + '</div>' +
         '<div class="field"><label>Anchor</label>' + (meta.anchor ? _SV.anchor+' 坐标系 / anchor' : '—') + '</div>' +
         '<div class="field"><label>创建 / Created</label>' + esc(meta.created || '—') + '</div>' +
         '<div class="field"><label>最后活跃 / Last active</label>' + esc(meta.last_active || '—') + '</div>' +
@@ -5277,8 +5349,23 @@ async function showDetail(id) {
 
 async function bucketPin(id) {
   try {
-    var res = await authFetch(BASE + '/api/bucket/' + encodeURIComponent(id) + '/pin', { method: 'POST' });
-    if (!res) return;
+    var current = (allBuckets || []).find(function(b) { return b.id === id; });
+    var body = {};
+    if (current && current.pinned) {
+      var rawImportance = prompt('解除钉选后，请设定新的 importance（1-10）：', '5');
+      if (rawImportance === null) return;
+      var nextImportance = Number(rawImportance);
+      if (!Number.isInteger(nextImportance) || nextImportance < 1 || nextImportance > 10) {
+        alert('importance 必须是 1-10 的整数。');
+        return;
+      }
+      body.importance = nextImportance;
+    }
+    var res = await authFetch(BASE + '/api/bucket/' + encodeURIComponent(id) + '/pin', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
     if (!res.ok) throw new Error(await res.text());
     await showDetail(id);
     await loadBuckets();
@@ -7313,10 +7400,14 @@ async function runGithubImport(force) {
     });
     var d = await readJsonSafe(res);
     if (d.ok) {
+      var restoredBuckets = Number.isInteger(d.buckets_imported) ? d.buckets_imported : (d.imported || 0);
+      var restoredSources = Number.isInteger(d.sources_imported) && d.sources_imported > 0
+        ? '，安装 ' + d.sources_imported + ' 份原文证据' : '';
       var extra = (d.skipped ? '，跳过 ' + d.skipped : '') + (d.truncated ? '（⚠️ 仓库文件过多被截断，部分未导入）' : '');
-      msg.innerHTML = _SV.ok + ' 导入完成：恢复 ' + (d.imported||0) + ' 条记忆' + extra
-        + (d.pre_import_backup ? '<br><span style="color:var(--text-light)">本地备份：<code>' + esc(d.pre_import_backup) + '</code></span>' : '');
-      msg.style.color = 'var(--success, green)';
+      msg.innerHTML = _SV.ok + ' 导入完成：恢复 ' + restoredBuckets + ' 条记忆' + restoredSources + extra
+        + (d.pre_import_backup ? '<br><span style="color:var(--text-light)">本地备份：<code>' + esc(d.pre_import_backup) + '</code></span>' : '')
+        + (d.integrity_warning ? '<br><span style="color:var(--negative)">' + _SV.warn + ' ' + esc(d.integrity_warning) + '</span>' : '');
+      msg.style.color = d.integrity_warning ? 'var(--accent)' : 'var(--success, green)';
       // 导入后自动重建向量（恢复的桶 embeddings.db 里还没有）
       if (typeof startBackfill === 'function') {
         msg.innerHTML += '<br>正在为恢复的记忆重建向量索引…';
@@ -7418,13 +7509,28 @@ async function loadConfig() {
       ? cfg.merge_threshold : 75;
     var mcpAuthEl = document.getElementById('cfg-mcp-auth');
     if (mcpAuthEl) {
-      mcpAuthEl.value = cfg.mcp_require_auth
-        ? (cfg.mcp_auth_mode === 'token' ? 'token' : 'oauth')
-        : 'off';
+      const configuredAuthMode = ['oauth', 'token', 'hybrid'].includes(cfg.mcp_auth_mode)
+        ? cfg.mcp_auth_mode : 'oauth';
+      mcpAuthEl.value = cfg.mcp_require_auth ? configuredAuthMode : 'off';
     }
     window._mcpTokenConfigured = !!cfg.mcp_token_configured;
     window._mcpTokenHint = cfg.mcp_token_hint || null;
     onMcpAuthModeChange();
+    var mcpNetwork = cfg.mcp_network_security || {};
+    var mcpAuthMsg = document.getElementById('mcp-auth-msg');
+    if (mcpAuthMsg && mcpNetwork.guard_active) {
+      mcpAuthMsg.style.color = 'var(--warning)';
+      mcpAuthMsg.textContent = '当前配置或环境变量请求关闭鉴权；当前生效：安全门禁已强制开启鉴权。'
+        + (mcpNetwork.reason ? ' 原因：' + mcpNetwork.reason : '');
+    } else if (mcpAuthMsg && mcpNetwork.override_active) {
+      mcpAuthMsg.style.color = 'var(--negative)';
+      mcpAuthMsg.textContent = '高风险：已显式允许非回环免鉴权。'
+        + (mcpNetwork.reason ? ' ' + mcpNetwork.reason : '')
+        + (mcpNetwork.auth_environment_override
+          ? ' OMBRE_MCP_REQUIRE_AUTH 仍由平台环境变量控制。' : '');
+    } else if (mcpAuthMsg) {
+      mcpAuthMsg.textContent = '';
+    }
     const publicUrl = String((cfg.deployment || {}).public_url || '');
     const publicMode = document.querySelector('input[name="mcp-mode"][value="public"]');
     const localMode = document.querySelector('input[name="mcp-mode"][value="local"]');
@@ -7539,7 +7645,7 @@ async function refreshEnvShadowWarning() {
     OMBRE_EMBED_MODEL: '向量化 Model',
     OMBRE_EMBED_API_KEY: '向量化 API Key',
     OMBRE_EMBED_TIMEOUT_SECONDS: '向量化 Timeout',
-    OMBRE_MCP_REQUIRE_AUTH: 'MCP OAuth 开关',
+    OMBRE_MCP_REQUIRE_AUTH: 'MCP 鉴权开关',
   };
   try {
     var r = await authFetch('/api/env-vars');
@@ -8337,13 +8443,12 @@ function renderImportPreflight(data) {
   }
   summary.style.color = data.can_start ? 'var(--text-dim)' : 'var(--warning)';
   summary.innerHTML =
-    '模式：<b>' + esc(data.import_mode || 'auto') + '</b>'
-    + ' · 格式：<b>' + esc(data.detected_format || 'unknown') + '</b>'
+    '格式：<b>' + esc(data.detected_format || 'unknown') + '</b>'
     + ' · 轮次：<b>' + (data.turns_count || 0) + '</b>'
     + ' · 分块：<b>' + (data.chunks_count || 0) + '</b>'
     + ' · 预计 API 调用：<b>' + (data.estimated_api_calls || 0) + '</b>'
     + ' · 大小：<b>' + Math.round((data.size_bytes || 0) / 1024) + ' KB</b>'
-    + (data.llm_required && !data.llm_ready ? '<br><span style="color:var(--negative)">压缩/打标 LLM 未就绪，暂不能导入。</span>' : '')
+    + (data.requires_llm !== false && !data.llm_ready ? '<br><span style="color:var(--negative)">压缩/打标 LLM 未就绪，暂不能导入。</span>' : '')
     + (data.import_running ? '<br><span style="color:var(--negative)">已有导入任务运行中，请完成后再开始。</span>' : '');
   const warnings = data.warnings || [];
   if (warn) {
@@ -8467,8 +8572,8 @@ function updateImportUI(s) {
   document.getElementById('import-progress-text').textContent = s.processed + '/' + s.total_chunks;
   document.getElementById('import-api-calls').textContent = s.api_calls;
   document.getElementById('import-created').textContent = s.memories_created;
-  document.getElementById('import-merged').textContent = s.memories_merged;
-  document.getElementById('import-duplicate-skipped').textContent = s.memories_duplicate_skipped || 0;
+  document.getElementById('import-merged').textContent = s.memories_merged || 0;
+  document.getElementById('import-duplicate-skipped').textContent = s.memories_duplicate_skipped || s.memories_skipped || 0;
   document.getElementById('import-raw').textContent = s.memories_raw;
   document.getElementById('import-embeddings-created').textContent = s.embeddings_created || 0;
   document.getElementById('import-embeddings-failed').textContent = s.embeddings_failed || 0;
@@ -8481,7 +8586,7 @@ function updateImportUI(s) {
   const taggingPct = s.tagging_total ? Math.round((s.tagging_processed || 0) / s.tagging_total * 100) : 0;
   document.getElementById('import-tagging-progress-bar').style.width = taggingPct + '%';
   document.getElementById('import-tagging-progress-text').textContent = (s.tagging_processed || 0) + '/' + (s.tagging_total || 0);
-  const statusMap = { running: _SV.clock+' 导入中…', paused: _SV.pause+' 已暂停', completed: _SV.ok+' 完成', error: _SV.err+' 出错' };
+  const statusMap = { running: _SV.clock+' 导入中…', paused: _SV.pause+' 已暂停', completed: _SV.ok+' 完成', partial: _SV.warn+' 部分完成', error: _SV.err+' 出错' };
   const operitPhaseMap = {
     raw: _SV.clock+' Operit 原文落盘中…',
     embedding: _SV.clock+' Embedding 排队中…',
@@ -8494,11 +8599,25 @@ function updateImportUI(s) {
   );
   document.getElementById('import-pause-btn').style.display = s.status === 'running' ? '' : 'none';
   if (s.status !== 'running') clearInterval(importPollTimer);
-  if (s.status === 'completed') loadImportResults();
+  if (s.status === 'completed' || s.status === 'partial') {
+    loadImportResults();
+    loadBuckets();
+  }
   const errDiv = document.getElementById('import-errors');
-  if (s.errors && s.errors.length) {
+  const errList = document.getElementById('import-error-list');
+  const diagnostics = Array.isArray(s.diagnostics) ? s.diagnostics : [];
+  if (diagnostics.length) {
     errDiv.style.display = '';
-    errDiv.textContent = s.errors.join('\n');
+    errList.innerHTML = diagnostics.map(function(item) {
+      const solution = item.solution
+        ? '<div style="margin-top:6px;color:var(--text-dim);"><b style="color:var(--text);">解决方案：</b>' + esc(item.solution) + '</div>'
+        : '<div style="margin-top:6px;color:var(--text-dim);">暂未匹配到通用解决方案，请复制下方具体报错进行排查。</div>';
+      return '<div style="padding:10px 11px;background:var(--surface-solid);border-radius:8px;box-shadow:inset 2px 2px 5px var(--shadow-dark-subtle),inset -2px -2px 4px var(--shadow-light);">'
+        + '<div style="font-weight:700;color:var(--negative);">' + esc(item.title || '导入处理出错') + '</div>'
+        + '<code style="display:block;margin-top:6px;white-space:pre-wrap;word-break:break-word;color:var(--negative);font-family:\'Share Tech Mono\',\'SF Mono\',Consolas,monospace;">' + esc(item.error || '') + '</code>'
+        + solution + '</div>';
+    }).join('');
+    if (typeof lucide !== 'undefined') lucide.createIcons();
   } else { errDiv.style.display = 'none'; }
 }
 
@@ -8507,9 +8626,26 @@ async function pauseImport() {
 }
 
 let importResultsLoadGeneration = 0;
+let importResultsNextOffset = 0;
+const IMPORT_RESULTS_PAGE_SIZE = 50;
+
+function updateImportResultsMoreButton(hasMore) {
+  const button = document.getElementById('import-results-more');
+  if (button) button.style.display = hasMore ? 'block' : 'none';
+}
+
+async function loadMoreImportResults() {
+  if (importResultsNextOffset === null) return true;
+  return loadImportResults({append:true, preserveScroll:true});
+}
+
 async function loadImportResults(options) {
   const container = document.getElementById('import-results-list');
+  if (!container) return false;
   const opts = options && typeof options === 'object' ? options : {};
+  const append = opts.append === true;
+  const offset = append ? importResultsNextOffset : 0;
+  if (append && offset === null) return true;
   const generation = ++importResultsLoadGeneration;
   const preserveScroll = opts.preserveScroll === true;
   const requestedScrollTop = Number(opts.scrollTop);
@@ -8517,9 +8653,10 @@ async function loadImportResults(options) {
     ? (Number.isFinite(requestedScrollTop) ? Math.max(0, requestedScrollTop) : container.scrollTop)
     : 0;
   container.setAttribute('aria-busy', 'true');
-  if (!preserveScroll) container.innerHTML = '<div class="loading">加载中… / Loading…</div>';
+  if (!append && !preserveScroll) container.innerHTML = '<div class="loading">加载中… / Loading…</div>';
   try {
-    const res = await authFetch(BASE + '/api/import/results?limit=30');
+    const query = '?limit=' + IMPORT_RESULTS_PAGE_SIZE + '&offset=' + Number(offset || 0);
+    const res = await authFetch(BASE + '/api/import/results' + query);
     if (!res) return false;
     const data = await readJsonSafe(res);
     if (generation !== importResultsLoadGeneration) return false;
@@ -8527,15 +8664,23 @@ async function loadImportResults(options) {
     if (!data || typeof data !== 'object' || Array.isArray(data) || !Array.isArray(data.buckets)) {
       throw new Error('导入结果响应无效 / Invalid import results response');
     }
-    if (!data.buckets || !data.buckets.length) {
-      container.innerHTML = '<p style="color:var(--text-dim)">暂无记忆桶</p>';
+
+    const nextOffset = Number(data.next_offset);
+    importResultsNextOffset = data.has_more && Number.isInteger(nextOffset) && nextOffset >= 0
+      ? nextOffset
+      : null;
+    updateImportResultsMoreButton(importResultsNextOffset !== null);
+
+    if (!data.buckets.length) {
+      if (!append) container.innerHTML = '<p style="color:var(--text-dim)">暂无已导入记忆</p>';
       if (preserveScroll) container.scrollTop = previousScrollTop;
       return true;
     }
-    container.innerHTML = data.buckets.map(b => `
+
+    const cards = data.buckets.map(b => `
       <div data-review-bucket-id="${escAttr(b.id)}" style="background:var(--surface);border-radius:12px;padding:14px;margin:8px 0;">
-        <div style="display:flex;justify-content:space-between;align-items:center;">
-          <b>${esc(b.name || b.id)}</b>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+          <b>${esc(b.name || b.id)} <span title="由对话导入" style="font-size:10px;color:var(--accent);border:1px solid var(--accent);border-radius:999px;padding:1px 5px;white-space:nowrap;">被导入</span></b>
           <span style="font-size:11px;color:var(--text-dim);">${esc(b.type)} | ${esc((b.domain||[]).join(','))} | imp:${Number(b.importance || 0)}</span>
         </div>
         <p style="font-size:13px;margin:6px 0;white-space:pre-wrap;">${esc(b.content)}</p>
@@ -8549,20 +8694,21 @@ async function loadImportResults(options) {
         </div>
       </div>
     `).join('');
+    if (append) container.insertAdjacentHTML('beforeend', cards);
+    else container.innerHTML = cards;
     if (preserveScroll) container.scrollTop = previousScrollTop;
     return true;
   } catch(e) {
     if (generation !== importResultsLoadGeneration) return false;
-    container.innerHTML = '<p style="color:var(--negative)">加载失败: ' + esc(e.message) + '</p>';
+    if (!append) container.innerHTML = '<p style="color:var(--negative)">加载失败: ' + esc(e.message) + '</p>';
+    updateImportResultsMoreButton(importResultsNextOffset !== null);
     return false;
   } finally {
     if (generation === importResultsLoadGeneration) container.removeAttribute('aria-busy');
   }
 }
-
 async function openImportedBucketEditor(bid) {
-  // Import results intentionally contain only a short preview. Always enter
-  // through showDetail so the editor receives the complete Markdown body.
+  // 导入结果只含正文预览；先进入详情，确保编辑器拿到完整 Markdown 正文。
   if (!await showDetail(bid)) return;
   const editor = document.getElementById('bucket-edit-form');
   if (!editor) return;
@@ -8876,7 +9022,7 @@ function onMcpAuthModeChange() {
   const sel = document.getElementById('cfg-mcp-auth');
   const panel = document.getElementById('mcp-token-panel');
   if (!sel || !panel) return;
-  panel.style.display = sel.value === 'token' ? '' : 'none';
+  panel.style.display = (sel.value === 'token' || sel.value === 'hybrid') ? '' : 'none';
   const statusEl = document.getElementById('mcp-token-status');
   if (statusEl) {
     statusEl.textContent = window._mcpTokenConfigured
@@ -8887,7 +9033,7 @@ function onMcpAuthModeChange() {
 
 async function saveMcpAuth() {
   const msg = document.getElementById('mcp-auth-msg');
-  const sel = document.getElementById('cfg-mcp-auth').value; // 'oauth' | 'token' | 'off'
+  const sel = document.getElementById('cfg-mcp-auth').value; // 'oauth' | 'hybrid' | 'token' | 'off'
   const payload = sel === 'off'
     ? { mcp_require_auth: false, persist: true }
     : { mcp_require_auth: true, mcp_auth_mode: sel, persist: true };
@@ -8900,8 +9046,10 @@ async function saveMcpAuth() {
     if (!res) return;
     const result = await res.json();
     if (result.ok) {
-      msg.style.color = result.restart_required ? 'var(--warning)' : 'var(--positive)';
-      msg.textContent = result.message || (result.restart_required ? '已保存，需要重启服务后生效' : '已保存');
+      const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+      msg.style.color = (warnings.length || result.restart_required) ? 'var(--warning)' : 'var(--positive)';
+      msg.textContent = (result.message || (result.restart_required ? '已保存，需要重启服务后生效' : '已保存'))
+        + (warnings.length ? '；高风险豁免：' + warnings.join('；') : '');
       setRestartRequired(!!result.restart_required, 'MCP 鉴权设置已保存');
     } else {
       msg.style.color = 'var(--negative)';
@@ -9184,6 +9332,9 @@ function renderMigrateParsed(d) {
   let infoHtml = d.integrity_verified
     ? `<span style="color:var(--positive)">${_SV.ok} 备份清单与 SHA-256 校验通过。</span> `
     : `<span style="color:var(--negative)">${_SV.warn} ${esc(d.integrity_warning || '旧版备份没有完整性清单，无法确认是否齐全。')}</span> `;
+  if (d.integrity_verified && d.integrity_warning) {
+    infoHtml += `<span style="color:var(--negative)">${_SV.warn} ${esc(d.integrity_warning)}</span> `;
+  }
   infoHtml += `解析到 <strong>${Number(d.total_buckets || 0)}</strong> 个 bucket。`;
   if (hasEmb) {
     if (embMatch) {
@@ -9344,6 +9495,8 @@ async function loadDuplicates() {
 // ========================================
 function renderEditForm(bid, meta) {
   const curContent = esc(meta._content_for_edit || '');
+  const fallbackTitle = String(meta.name || '').replace(/^\d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}\s*/, '');
+  const editTitle = String(meta.title || fallbackTitle || '');
   const safeImportance = Math.round(safeNumber(meta.importance, 5, 1, 10));
   const editableTypes = ['dynamic','permanent','feel','plan','letter'];
   const currentType = String(meta.type || 'dynamic');
@@ -9358,7 +9511,9 @@ function renderEditForm(bid, meta) {
     <details id="bucket-edit-form" style="margin-top:14px;border:1px solid var(--border);border-radius:2px;padding:12px 14px;background:var(--surface-solid);">
       <summary style="cursor:pointer;font-weight:600;color:var(--accent);display:flex;align-items:center;gap:5px;"><svg class="icon" aria-hidden="true"><use href="#i-edit"></use></svg> 编辑这条记忆</summary>
       <div style="display:grid;grid-template-columns:90px 1fr;gap:10px 12px;align-items:center;margin-top:14px;font-size:13px;">
-        <label>名称</label>
+        <label>标题</label>
+        <input id="edit-title" type="text" maxlength="120" value="${escAttr(editTitle)}" data-dirty="0" oninput="this.dataset.dirty='1'" placeholder="原文核对使用的精确标题" />
+        <label>显示名称</label>
         <input id="edit-name" type="text" value="${escAttr(meta.name || '')}" />
         <label>类型</label>
         <select id="edit-type" style="width:160px;" onchange="syncEditPinConstraints('type')" ${typeIsEditable ? '' : 'disabled title="特殊类型由对应工具维护，编辑其他字段时会保持原类型"'}>
@@ -9438,6 +9593,7 @@ async function bucketSaveEdit(bid) {
   // iter 1.8: 新增 why_remembered / dont_surface / weight，plan 才会有 weight
   const weightEl = document.getElementById('edit-weight');
   const typeEl = document.getElementById('edit-type');
+  const titleEl = document.getElementById('edit-title');
   const body = {
     name: document.getElementById('edit-name').value,
     tags: document.getElementById('edit-tags').value,
@@ -9449,6 +9605,9 @@ async function bucketSaveEdit(bid) {
     dont_surface: document.getElementById('edit-dont-surface').checked,
     why_remembered: document.getElementById('edit-why').value,
   };
+  // 历史桶可能没有显式 title；表单展示的是 name fallback。只有用户
+  // 真正动过标题输入框才提交，避免保存其他字段时意外固化或因空标题 400。
+  if (titleEl && titleEl.dataset.dirty === '1') body.title = titleEl.value;
   // i/self、archived 及未来特殊类型由专用生命周期维护；不要把浏览器
   // select 的默认首项 dynamic 写回。普通类型仍允许沿用现有编辑入口。
   if (typeEl && !typeEl.disabled) body.type = typeEl.value;

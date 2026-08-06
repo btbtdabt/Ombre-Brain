@@ -13,6 +13,7 @@ web/buckets.py — 记忆桶管理 + 设置 + 锚点 + 自我认知读取
 
 import math
 import threading
+import unicodedata
 from contextlib import AsyncExitStack
 from typing import Any, cast
 
@@ -193,6 +194,8 @@ def register(mcp) -> None:
                     "resolved": meta.get("resolved", False),
                     "pinned": meta.get("pinned", False),
                     "digested": meta.get("digested", False),
+                    "imported": parse_bool(meta.get("imported"), default=False)
+                    or str(meta.get("source_tool") or "").strip() == "import",
                     "created": meta.get("created", ""),
                     "created_epoch_ms": created_epoch_ms,
                     "last_active": meta.get("last_active", ""),
@@ -312,6 +315,36 @@ def register(mcp) -> None:
                     current_importance = int(meta.get("importance") or 0)
                 except (TypeError, ValueError):
                     current_importance = 0
+                unpin_importance = current_importance
+                if current_pinned and not protected:
+                    try:
+                        body = await sh._read_json_object(request)
+                        raw_importance = body.get("importance")
+                        if raw_importance is None or isinstance(raw_importance, bool):
+                            raise ValueError("boolean is not an importance")
+                        unpin_importance = int(cast(Any, raw_importance))
+                        if (
+                            isinstance(raw_importance, float)
+                            and not raw_importance.is_integer()
+                        ):
+                            raise ValueError("fractional importance")
+                    except Exception:
+                        return JSONResponse(
+                            {
+                                "error": "unpin requires importance=1..10 in the same request",
+                                "field": "importance",
+                            },
+                            status_code=400,
+                        )
+                    if not 1 <= unpin_importance <= 10:
+                        return JSONResponse(
+                            {
+                                "error": "unpin requires importance=1..10 in the same request",
+                                "field": "importance",
+                            },
+                            status_code=400,
+                        )
+                    update_kwargs["importance"] = unpin_importance
                 current_type = str(
                     meta.get("type") or "dynamic"
                 ).strip().lower()
@@ -331,7 +364,7 @@ def register(mcp) -> None:
                 })
                 after_quota_meta = dict(before_quota_meta)
                 after_quota_meta.update({
-                    "importance": 10 if new_pinned else current_importance,
+                    "importance": 10 if new_pinned else unpin_importance,
                     "pinned": new_pinned,
                     "type": final_type,
                 })
@@ -398,13 +431,15 @@ def register(mcp) -> None:
                     # same BucketManager transaction.
                     if occupies_high_after and not occupied_high_before:
                         adjusted_importance = (
-                            await _enforce_high_importance_quota(current_importance)
+                            await _enforce_high_importance_quota(unpin_importance)
                         )
-                        if adjusted_importance != current_importance:
+                        if adjusted_importance != unpin_importance:
                             update_kwargs["importance"] = adjusted_importance
 
                 ok = await sh.bucket_mgr.update(
-                    bucket_id, **cast(Any, update_kwargs)
+                    bucket_id,
+                    event_actor="human",
+                    **cast(Any, update_kwargs),
                 )
                 if not ok:
                     latest = await sh.bucket_mgr.get(bucket_id)
@@ -878,7 +913,13 @@ def register(mcp) -> None:
             # restart once the top-level override had been removed.
             human = "人类"
             inherit_identity = False
-
+        if len(human) > 20:
+            return JSONResponse({"error": "human name must be ≤ 20 characters"}, status_code=400)
+        if any(unicodedata.category(char).startswith("C") for char in human):
+            return JSONResponse(
+                {"error": "human name must not contain control characters"},
+                status_code=400,
+            )
         # Config read/write, live runtime update and the full-vault replacement
         # are one outer transaction.  Without it, concurrent A->B and B->C
         # requests can interleave their per-bucket writes and leave mixed names.

@@ -31,6 +31,11 @@ services:
       - "${OMBRE_BIND_ADDRESS:-127.0.0.1}:${OMBRE_HOST_PORT:-18001}:8000"
     environment:
       - OMBRE_TRANSPORT=streamable-http
+      # 把宿主端口真实绑定地址同步给容器内风险诊断；进程本身仍监听容器全接口。
+      - OMBRE_BIND_ADDRESS=${OMBRE_BIND_ADDRESS:-127.0.0.1}
+      - OMBRE_ALLOW_INSECURE_MCP=${OMBRE_ALLOW_INSECURE_MCP:-false}
+      - OMBRE_MCP_AUTH_MODE=${OMBRE_MCP_AUTH_MODE:-}
+      - OMBRE_MCP_TOKEN=${OMBRE_MCP_TOKEN:-}
       - OMBRE_CONFIG_PATH=/app/buckets/config.yaml
       # Dashboard-managed provider keys live beside config in the persistent
       # vault bind and are loaded literally before runtime config initialization.

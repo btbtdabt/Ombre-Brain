@@ -70,6 +70,17 @@ def test_oauth_authorize_page_exposes_progress_timeout_and_trace_id():
     assert "诊断编号" in html
 
 
+def test_oauth_log_fields_remove_control_characters_and_limit_length():
+    value = "trace\r\n\t伪造\u2028" + "x" * 40
+
+    sanitized = oauth_mod._oauth_log_field(value, 24)
+
+    assert len(sanitized) == 24
+    assert all(char.isprintable() for char in sanitized)
+    assert "\r" not in sanitized
+    assert "\n" not in sanitized
+
+
 def _fresh_oauth_routes(
     monkeypatch,
     tmp_path,

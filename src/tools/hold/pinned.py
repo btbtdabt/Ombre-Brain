@@ -22,11 +22,14 @@ permanent 目录，不衰减、不会被合并掉。
 ========================================
 """
 
+from collections.abc import Awaitable, Callable
+from typing import cast
+
+from utils import normalize_memory_title
+
 from .. import _runtime as rt
 from .._common import check_pinned_quota, _quota_turn
 from .metadata import default_hold_analysis, normalize_hold_metadata
-from collections.abc import Awaitable, Callable
-from typing import cast
 
 
 async def store_pinned(
@@ -35,8 +38,9 @@ async def store_pinned(
     valence: float,
     arousal: float,
     why_remembered: str,
+    title: str = "",
     meaning: str = "",
-    media: list | None = None,
+    media: list | str | None = None,
 ) -> str:
     try:
         analysis = await rt.dehydrator.analyze(content)
@@ -45,6 +49,7 @@ async def store_pinned(
         analysis = default_hold_analysis()
 
     metadata = normalize_hold_metadata(analysis, extra_tags, valence, arousal)
+    final_title = title or normalize_memory_title(metadata.suggested_name)
 
     # 配额判定 + 落盘必须在同一把锁里：两个并发 hold(pinned=True) 都可能在
     # 对方提交前读到同一个「未满」快照，检查和创建隔着一次 await 就会互相看不见。
@@ -61,10 +66,12 @@ async def store_pinned(
             valence=metadata.valence,
             arousal=metadata.arousal,
             name=metadata.suggested_name or None,
+            title=final_title,
             bucket_type="permanent",
             pinned=True,
             why_remembered=why_remembered,
             source_tool="hold",
+            event_actor="llm",
             allow_embedding_fallback=True,
             meaning=meaning,
             media=media,

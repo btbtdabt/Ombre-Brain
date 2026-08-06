@@ -7,12 +7,16 @@ issue 诉求：上层 AI 已拆好的正文应逐字入库，消除「廉价 LLM
 3. 同批共享 grow_batch_id；不传 items 时行为不变（走原 digest 路径）。
 """
 from unittest.mock import MagicMock
+from pathlib import Path
 
 import pytest
 
 import tools._runtime as rt
 from tools.grow import dispatch
-from tools.grow.core import grow_items
+from tools.grow.core import grow_core, grow_items
+from tools.source_read import dispatch as source_read
+from errors import PublicToolError
+from ombrebrain.storage.source_store import SourceStore
 
 
 class StubDehydrator:
@@ -52,6 +56,7 @@ def grow_rt(bucket_mgr, monkeypatch):
     monkeypatch.setattr(rt, "decay_engine", NoopDecay(), raising=False)
     monkeypatch.setattr(rt, "logger", MagicMock(), raising=False)
     monkeypatch.setattr(rt, "fire_webhook", None, raising=False)
+    monkeypatch.setattr(rt, "source_store", SourceStore(bucket_mgr.base_dir), raising=False)
     return bucket_mgr, stub
 
 
@@ -106,11 +111,145 @@ async def test_dict_items_take_content_field(grow_rt):
 @pytest.mark.asyncio
 async def test_dispatch_routes_to_items_when_provided(grow_rt):
     bucket_mgr, stub = grow_rt
-    # 传 items 时忽略 content、走逐字路径（content 给一段会触发 digest 的长文也不该炸）
+    # 传 items 时 content 是共享原文证据，不进入 digest；items 仍是最终正文。
     out = await dispatch(content="x" * 100, items=["逐字入库的唯一正文条目内容"])
     assert "预拆分·逐字" in out
     buckets = await bucket_mgr.list_all(include_archive=False)
     assert [b["content"] for b in buckets] == ["逐字入库的唯一正文条目内容"]
+    assert buckets[0]["metadata"]["source_refs"][0]["ref"].startswith("src_")
+
+
+@pytest.mark.asyncio
+async def test_source_backed_item_keeps_readable_title_when_analysis_fails(grow_rt):
+    bucket_mgr, _stub = grow_rt
+
+    class FailingDehydrator:
+        async def analyze(self, _content):
+            raise RuntimeError("metadata provider unavailable")
+
+    rt.dehydrator = FailingDehydrator()
+    result = await grow_items(
+        [{"content": "分析器离线时也应保留可读标题", "source_ranges": [[1, 1]]}],
+        source_content="分析器离线时也应保留可读标题\n第二行原文",
+    )
+
+    bucket = (await bucket_mgr.list_all(include_archive=False))[0]
+    title = bucket["metadata"].get("title")
+    assert title == "分析器离线时也应保留可读标题"
+
+    evidence = await source_read(bucket["id"], title, scope="event")
+    assert "分析器离线时也应保留可读标题" in evidence
+    assert "第二行原文" not in evidence
+    assert "需先在 Dashboard 设置标题" not in result
+
+
+@pytest.mark.asyncio
+async def test_dict_items_preserve_explicit_metadata_and_title(grow_rt):
+    bucket_mgr, stub = grow_rt
+    await grow_items([{
+        "title": "wife",
+        "content": "她说 wife 喔，不是 girlfriend 喔。",
+        "tags": ["老婆", "称呼"],
+        "importance": 8,
+        "domain": ["恋爱"],
+        "valence": 0.9,
+        "arousal": 0.6,
+    }])
+    bucket = (await bucket_mgr.list_all(include_archive=False))[0]
+    metadata = bucket["metadata"]
+    assert metadata["title"] == "wife"
+    assert metadata["tags"] == ["老婆", "称呼"]
+    assert metadata["importance"] == 8
+    assert metadata["domain"] == ["恋爱"]
+    assert metadata["valence"] == 0.9
+    assert metadata["arousal"] == 0.6
+    assert stub.analyze_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_missing_title_and_importance_are_filled_by_analysis(grow_rt):
+    bucket_mgr, _stub = grow_rt
+
+    class MetadataDehydrator(StubDehydrator):
+        async def analyze(self, content):
+            self.analyze_calls += 1
+            return {
+                "domain": ["工作"],
+                "valence": 0.6,
+                "arousal": 0.4,
+                "tags": ["模型补全"],
+                "suggested_name": "模型补齐标题",
+                "importance": 7,
+            }
+
+    dehydrator = MetadataDehydrator()
+    rt.dehydrator = dehydrator
+    await grow_items([{"content": "只给正文，其他元数据由整理者补齐。"}])
+
+    bucket = (await bucket_mgr.list_all(include_archive=False))[0]
+    assert bucket["metadata"]["title"] == "模型补齐标题"
+    assert bucket["metadata"]["importance"] == 7
+    assert bucket["metadata"]["tags"] == ["模型补全"]
+    assert dehydrator.analyze_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_explicit_empty_tags_are_not_refilled_by_model(grow_rt):
+    bucket_mgr, _stub = grow_rt
+    await grow_items([{
+        "content": "人工明确决定不设标签。",
+        "title": "空标签决定",
+        "tags": [],
+    }])
+
+    bucket = (await bucket_mgr.list_all(include_archive=False))[0]
+    assert bucket["metadata"]["tags"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "item, expected",
+    [
+        ({"content": "字段拼错", "titel": "x"}, "未支持字段"),
+        ({"content": 123}, "content 必须是字符串"),
+        ({"content": "越界重要度", "importance": 11}, "importance"),
+        ({"content": "过长标题", "title": "长" * 121}, "120"),
+    ],
+)
+async def test_invalid_structured_item_is_rejected_before_any_write(
+    grow_rt, item, expected
+):
+    bucket_mgr, stub = grow_rt
+    out = await grow_items([item], source_content="这份原文也不应先落盘")
+
+    assert expected in out
+    assert stub.analyze_calls == 0
+    assert await bucket_mgr.list_all(include_archive=False) == []
+    assert not list((Path(bucket_mgr.base_dir) / "_sources").glob("*.source"))
+
+
+@pytest.mark.asyncio
+async def test_source_ranges_without_source_content_are_rejected(grow_rt):
+    bucket_mgr, stub = grow_rt
+    out = await grow_items([
+        {"content": "事件", "title": "标题", "source_ranges": [[1, 1]]}
+    ])
+
+    assert "source_ranges 需要同时提供 content" in out
+    assert stub.analyze_calls == 0
+    assert await bucket_mgr.list_all(include_archive=False) == []
+
+
+@pytest.mark.asyncio
+async def test_invalid_source_range_rejects_batch_before_any_write(grow_rt):
+    bucket_mgr, _stub = grow_rt
+    out = await grow_items(
+        [{"title": "越界", "content": "最终正文", "source_ranges": [[3, 4]]}],
+        source_content="只有一行",
+    )
+    assert "超出原文总行数" in out
+    assert await bucket_mgr.list_all(include_archive=False) == []
+    assert not list((Path(bucket_mgr.base_dir) / "_sources").glob("*.source"))
 
 
 @pytest.mark.asyncio
@@ -119,3 +258,27 @@ async def test_dispatch_without_items_unchanged(grow_rt):
     # → 证明默认路径没变、digest 仍在原路径被调用
     with pytest.raises(RuntimeError):
         await dispatch(content="这是一段超过三十个字的长文本内容需要走 digest 拆分路径来验证向后兼容性没有被破坏")
+
+
+@pytest.mark.asyncio
+async def test_grow_digest_failure_hides_provider_detail(grow_rt):
+    _bucket_mgr, _stub = grow_rt
+    provider_secret = "sk-provider-secret https://provider.invalid/private"
+
+    class FailingDehydrator:
+        async def digest(self, _content):
+            raise RuntimeError(provider_secret)
+
+    rt.dehydrator = FailingDehydrator()
+
+    with pytest.raises(PublicToolError) as caught:
+        await grow_core("这是一段需要调用摘要服务的长内容，长度足够进入 grow 的日记拆分主路径。")
+
+    assert "OMBRE_COMPRESS_API_KEY" in caught.value.public_message
+    assert provider_secret not in caught.value.public_message
+    assert provider_secret not in str(caught.value)
+    rendered_logs = "\n".join(
+        str(call) for call in rt.logger.error.call_args_list
+    )
+    assert "RuntimeError" in rendered_logs
+    assert provider_secret not in rendered_logs

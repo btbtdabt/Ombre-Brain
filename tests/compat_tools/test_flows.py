@@ -241,6 +241,7 @@ async def test_non_overlapping_p0_tool_adapters_remain_callable(current_runtime)
     plan_result = await current.plan("验证迁移后的 P0 plan 入口。")
     assert "plan→" in plan_result
     self_result = await current.I("我会保留兼容边界。", aspect="stance")
-    assert "I [stance]" in self_result
+    assert "🌱" in self_result
+    assert "普通记忆" in self_result
     self_read = await current.I(read=True)
     assert "我会保留兼容边界。" in self_read

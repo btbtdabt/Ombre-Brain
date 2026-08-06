@@ -125,27 +125,17 @@ def test_daily_chat_pending_state_refreshes_legacy_template_shell(worker_config)
     assert item["content"].startswith("笔友名单需要核对")
 
 
-def test_fallback_reflection_anchor_varies_without_fixed_chord(worker_config):
+def test_reflection_anchor_varies_without_fixed_chord(worker_config):
     engine = ReflectionEngine(_config(worker_config))
     anchors = []
     for day in range(20, 28):
-        reflection = engine._fallback_reflection(
-            "daily",
-            f"2026-05-{day:02d}",
-            {
-                "buckets": [{"name": f"weather {day}"}],
-                "commitments": [],
-                "daily_impressions": [],
-                "persona_events": [],
-                "diary": None,
-            },
-        )
+        key = f"2026-05-{day:02d}"
         anchors.append(
             engine._fallback_reflection_anchor(
                 "daily",
-                f"2026-05-{day:02d}",
-                reflection["title"],
-                reflection["content"],
+                key,
+                f"{key} 日印象",
+                f"我从 weather {day} 里带走了一点关系温度。",
             )
         )
 

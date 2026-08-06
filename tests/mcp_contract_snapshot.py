@@ -50,6 +50,7 @@ EXPECTED_PARAMETERS = {
     "darkroom_status": (),
     "darkroom_release": ("entry_id", "reason"),
     "grow": ("content", "items", "auto", "source", "title"),
+    "source_read": ("bucket_id", "expected_title", "scope", "cursor", "max_tokens"),
     "profile_fact": (
         "fact", "evidence_bucket_id", "profile_kind", "subject", "predicate",
         "object_value", "evidence_moment_id", "evidence_context", "reflection",
@@ -65,11 +66,11 @@ EXPECTED_PARAMETERS = {
     "pulse": ("include_archive",),
     "introspection": ("limit", "offset", "created_date", "created_from", "created_to"),
     "entity_edge_backfill": ("limit", "bucket_id", "query", "dry_run", "include_archive"),
-    "dream": ("window_hours",),
+    "dream": ("window_hours", "inspiration"),
     "anchor": ("bucket_id",),
     "release": ("bucket_id",),
     "plan": ("content", "status", "related_bucket", "weight", "why_remembered"),
-    "I": ("content", "aspect", "read", "limit"),
+    "I": ("content", "aspect", "read", "limit", "promote"),
 }
 
 
@@ -84,6 +85,7 @@ EXPECTED_REQUIRED_PARAMETERS = {
     "hold": ("content",),
     "darkroom_enter": ("note",),
     "darkroom_delete": ("room_id",),
+    "source_read": ("bucket_id", "expected_title"),
     "profile_fact": ("fact", "evidence_bucket_id"),
     "trace": ("bucket_id",),
     "anchor": ("bucket_id",),

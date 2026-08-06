@@ -7,7 +7,7 @@ from typing import Any, cast
 
 from identity import identity_names
 from stored_data import stored_data_marker
-from utils import strip_wikilinks
+from utils import normalize_memory_title, strip_wikilinks
 
 
 class LetterService:
@@ -29,6 +29,18 @@ class LetterService:
             return f"信件内容过大（{size / 1024:.1f} KB > 上限 {cap / 1024:.0f} KB）。"
         return ""
 
+    def normalize_author(self, author: str, ai_name: str = "") -> str:
+        """Normalize user/AI aliases against the configured identity."""
+
+        raw_author = str(author or "").strip()
+        ai = self._ai_name(ai_name)
+        low = raw_author.lower()
+        if low == "user":
+            return "user"
+        if low in {"ai", "claude"} or raw_author == ai:
+            return ai
+        return raw_author
+
     async def write(
         self,
         author: str,
@@ -38,25 +50,45 @@ class LetterService:
         date: str = "",
         ai_name: str = "",
     ) -> str:
-        ai = self._ai_name(ai_name)
+        try:
+            bucket_id, normalized_author = await self.create(
+                author=author,
+                content=content,
+                user_name=user_name,
+                title=title,
+                date=date,
+                ai_name=ai_name,
+                event_actor="llm",
+            )
+        except ValueError as exc:
+            return str(exc)
+        return f"💌letter→{bucket_id} [{normalized_author}]"
+
+    async def create(
+        self,
+        author: str,
+        content: str,
+        user_name: str = "",
+        title: str = "",
+        date: str = "",
+        ai_name: str = "",
+        *,
+        event_actor: str = "llm",
+    ) -> tuple[str, str]:
+        """Create one canonical letter and return its ID and stored author."""
+
         raw_author = str(author or "").strip()
         body = str(content or "").strip()
         if not raw_author:
-            return "author 不能为空。"
+            raise ValueError("author 不能为空。")
         if not body:
-            return "信件内容不能为空。"
+            raise ValueError("信件内容不能为空。")
         if error := self._content_error(body):
-            return error
+            raise ValueError(error)
 
-        low = raw_author.lower()
-        if low == "user":
-            normalized_author = "user"
-        elif low in {"ai", "claude"} or raw_author == ai:
-            normalized_author = ai
-        else:
-            normalized_author = raw_author
+        normalized_author = self.normalize_author(raw_author, ai_name)
 
-        clean_title = str(title or "").strip()[:120]
+        clean_title = normalize_memory_title(title)
         clean_date = str(date or "").strip()
         clean_user_name = str(user_name or "").strip()
         extra_metadata = {
@@ -65,8 +97,6 @@ class LetterService:
         }
         if clean_user_name:
             extra_metadata["user_name"] = clean_user_name
-        if clean_title:
-            extra_metadata["title"] = clean_title
         if clean_date:
             extra_metadata["letter_date"] = clean_date
 
@@ -78,11 +108,14 @@ class LetterService:
             valence=0.5,
             arousal=0.3,
             name=clean_title[:60] or f"{normalized_author}_{clean_date or 'letter'}",
+            title=clean_title,
             bucket_type="letter",
             source="letter",
+            source_tool="letter",
+            event_actor=event_actor,
             extra_metadata=extra_metadata,
         )
-        return f"💌letter→{bucket_id} [{normalized_author}]"
+        return bucket_id, normalized_author
 
     async def read(
         self,
@@ -120,14 +153,14 @@ class LetterService:
 
         author_filter = str(author or "").strip()
         if author_filter:
-            ai = self._ai_name()
-            low = author_filter.lower()
-            if low == "user":
+            normalized_author = self.normalize_author(author_filter)
+            ai = self.normalize_author("ai")
+            if normalized_author == "user":
                 letters = [
                     item for item in letters
                     if item["metadata"].get("author") == "user"
                 ]
-            elif low in {"ai", "claude"} or author_filter == ai:
+            elif normalized_author == ai:
                 aliases = {ai, "claude"}
                 letters = [
                     item for item in letters
@@ -136,7 +169,7 @@ class LetterService:
             else:
                 letters = [
                     item for item in letters
-                    if item["metadata"].get("author") == author_filter
+                    if item["metadata"].get("author") == normalized_author
                 ]
 
         def within_date(item: dict) -> bool:

@@ -23,7 +23,7 @@ core（普通存入 + 自动合并）。
 
 from typing import Optional
 
-from utils import parse_bool
+from utils import normalize_memory_title, parse_bool
 
 from .. import _runtime as rt
 from .._common import (
@@ -38,6 +38,7 @@ from .core import store_core
 
 async def dispatch(
     content: str,
+    title: Optional[str] = "",
     tags: Optional[str] = "",
     importance: Optional[int] = 5,
     pinned: Optional[bool] = False,
@@ -51,6 +52,10 @@ async def dispatch(
     test_data: Optional[bool] = False,
 ) -> str:
     content = "" if content is None else str(content)
+    try:
+        title = normalize_memory_title(title)
+    except ValueError as exc:
+        return str(exc)
     if tags is None:
         tags = ""
     if importance is None:
@@ -89,6 +94,7 @@ async def dispatch(
 
     metadata_err = check_metadata_size(
         tags=tags,
+        title=title,
         source_bucket=source_bucket,
         why_remembered=why_remembered,
         meaning=meaning,
@@ -164,6 +170,7 @@ async def dispatch(
             return "feel 必须指向一条原始记忆（source_bucket 不能为空）。请先用 breath_search(query=...) 找到那条桶的 bucket_id，再传入 source_bucket=id。"
         result = await store_feel(
             content=content,
+            title=title,
             extra_tags=extra_tags,
             valence=valence,
             arousal=arousal,
@@ -177,6 +184,7 @@ async def dispatch(
     if pinned:
         result = await store_pinned(
             content=content,
+            title=title,
             extra_tags=extra_tags,
             valence=valence,
             arousal=arousal,
@@ -188,6 +196,7 @@ async def dispatch(
 
     result = await store_core(
         content=content,
+        title=title,
         extra_tags=extra_tags,
         importance=importance,
         valence=valence,

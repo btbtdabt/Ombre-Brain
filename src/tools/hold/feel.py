@@ -48,8 +48,9 @@ async def store_feel(
     arousal: float,
     source_bucket: str,
     why_remembered: str,
+    title: str = "",
     meaning: str = "",
-    media: list | None = None,
+    media: list | str | None = None,
 ) -> str:
     feel_valence = valence if 0 <= valence <= 1 else 0.5
     feel_arousal = arousal if 0 <= arousal <= 1 else 0.3
@@ -62,10 +63,12 @@ async def store_feel(
         valence=feel_valence,
         arousal=feel_arousal,
         name=None,
+        title=title,
         bucket_type="feel",
         why_remembered=why_remembered,
         triggered_by=source_bucket.strip() if source_bucket else "",
         source_tool="hold",
+        event_actor="llm",
         bucket_id_override=_build_feel_id(feel_valence),
         allow_embedding_fallback=True,
         meaning=meaning,

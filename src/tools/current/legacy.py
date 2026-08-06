@@ -5,6 +5,7 @@ from __future__ import annotations
 from ..anchor import anchor_release, anchor_set
 from ..i import dispatch as p0_i
 from ..plan import plan_create
+from ..source_read import dispatch as p0_source_read
 
 
 async def anchor(bucket_id: str) -> str:
@@ -34,18 +35,42 @@ async def plan(
     )
 
 
+async def source_read(
+    bucket_id: str,
+    expected_title: str,
+    scope: str = "event",
+    cursor: int = 0,
+    max_tokens: int = 6000,
+) -> str:
+    """显式读取一个记忆桶对应的原文证据。必须同时给出精确 bucket_id 与该桶的显式 title；不做语义搜索、不扩散到相关桶、不调用模型。scope=event 只读该事件声明的行范围，scope=full_source 读取整份共享原文。内容过长时返回 next_cursor，继续以同一桶和标题分页读取。"""
+    return await p0_source_read(
+        bucket_id=bucket_id,
+        expected_title=expected_title,
+        scope=scope,
+        cursor=cursor,
+        max_tokens=max_tokens,
+    )
+
+
 async def i_tool(
     content: str = "",
     aspect: str = "",
     read: bool = False,
     limit: int = 20,
+    promote: str = "",
 ) -> str:
-    """记录或读取自我认知条目。content=要记录的自我认知内容(空=进入读取模式)。aspect=维度:nature(本质)/values(看重的)/patterns(规律)/limits(局限)/becoming(变化方向)/uncertainty(不确定的)/stance(立场)(可选)。read=True=读取所有已积累条目。limit=返回条数上限(默认 20)。条目不参与普通 breath/dream，SessionStart 时自动附最近 3 条。"""
-    return await p0_i(content=content, aspect=aspect, read=read, limit=limit)
+    """写下或读取自我认知。I 是沉淀物不是日记：content=一个「我觉得……」，先落成一条普通记忆（候选），会浮现也会衰减，每次 dream 都跟相关记忆摆在一起碰撞。aspect=维度:nature(本质)/values(看重的)/patterns(规律)/limits(局限)/becoming(变化方向)/uncertainty(不确定的)/stance(立场)(可选)。read=True 或全空=读正式条目+待沉淀候选。limit=返回条数上限(默认 20)。promote=候选桶ID，被 3 次不同日期的 dream 见证后才能升级成正式条目（可同时传 content 用提炼后的措辞）。正式条目不参与普通 breath/dream，SessionStart 时自动附最近 3 条。"""
+    return await p0_i(
+        content=content,
+        aspect=aspect,
+        read=read,
+        limit=limit,
+        promote=promote,
+    )
 
 
 i_tool.__name__ = "I"
 I = i_tool  # noqa: E741 - historical public MCP tool name
 
 
-__all__ = ["I", "anchor", "plan", "release"]
+__all__ = ["I", "anchor", "plan", "release", "source_read"]

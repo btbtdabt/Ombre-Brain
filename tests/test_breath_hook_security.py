@@ -108,6 +108,14 @@ def _handler(monkeypatch, buckets, dehydrator, hook_config=None):
     return mcp.routes[("GET", "/breath-hook")]
 
 
+def test_hook_rejects_unicode_token_without_type_error(monkeypatch):
+    monkeypatch.setenv("OMBRE_HOOK_TOKEN", "ascii-secret")
+    request = _Request(token="错误令牌")
+
+    assert hooks._is_hook_request_authorized(request) is False
+    assert hooks._valid_hook_token(request) is False
+
+
 @pytest.mark.asyncio
 async def test_hook_hides_digested_core_and_ordinary_memories(monkeypatch):
     dehydrator = _EchoDehydrator()

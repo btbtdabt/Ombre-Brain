@@ -406,11 +406,12 @@ from utils import (
     bucket_content_for_recall,
     bucket_text_for_embedding,
     generate_bucket_id,
-    sanitize_name,
-    safe_path,
     now_iso,
+    normalize_memory_title,
     parse_bool,
     parse_iso_datetime,
+    safe_path,
+    sanitize_name,
     strip_wikilinks,
 )
 from identity import identity_names
@@ -1537,6 +1538,7 @@ class BucketManager:
         arousal: float = 0.3,
         bucket_type: str = "dynamic",
         name: Optional[str] = None,
+        title: str = "",
         pinned: bool = False,
         protected: bool = False,
         why_remembered: str = "",
@@ -1562,6 +1564,9 @@ class BucketManager:
         date: str | None = None,
         extra_metadata: dict | None = None,
         defer_derived_index: bool = False,
+        imported: bool = False,
+        source_refs: Any = None,
+        event_actor: str = "system",
     ) -> str:
         """
         Create a new memory bucket, return bucket ID.
@@ -1572,13 +1577,15 @@ class BucketManager:
         pinned/protected 桶不参与合并与衰减，importance 强制锁定为 10。
 
         iter 2.0 来源追踪：
-        - source_tool: "hold" | "grow" — 记录由哪个工具创建。feel 走 hold 分支，
-          所以 feel 桶 source_tool="hold"，依靠 bucket_type 区分。
+        - source_tool: "hold" | "grow" | "import" — 记录创建来源。feel 走 hold
+          分支，所以 feel 桶 source_tool="hold"，依靠 bucket_type 区分。
         - grow_batch_id: 同一次 grow 调用拆出的所有桶共享同一个 batch_id，
           dashboard 可按 batch 聚合显示。
         - bucket_id_override: 调用方提供的可读 id（如 feel 的
           ``feel_202605011423_V085``）。如果与已有桶冲突，自动追加秒级后缀。
           为空 → 走默认 ``generate_bucket_id()``（12 位 hex）。
+        - imported=True: 对话导入桶的持久化来源标记；创建时间与最后活跃时间
+          均使用本次导入时刻。
         """
         # ``allow_embedding_fallback`` is retained for API compatibility.
         # All memory types now write first; embedding is a derived index.
@@ -1588,6 +1595,11 @@ class BucketManager:
         self._validate_bucket_content(content)
         if name:
             name = self._sanitize_text(name)
+        title = normalize_memory_title(self._sanitize_text(title))
+        if source_refs:
+            from ombrebrain.storage.source_store import normalize_source_refs
+
+            source_refs = normalize_source_refs(source_refs)
 
         # Candidate selection is finalized immediately before the no-overwrite
         # write while holding that exact ID's normal bucket turn.  The value
@@ -1612,7 +1624,7 @@ class BucketManager:
         # 桶名 = "YYYY-MM-DD HH-MM-SS [LLM生成的标题]"，无标题时仅用时间戳。
         # 使用连字符替代冒号，避免 sanitize_name 后续编辑时把冒号去掉破坏可读性。
         _ts = datetime.now().strftime("%Y-%m-%d %H-%M-%S")
-        _clean = sanitize_name(name) if name else ""
+        _clean = sanitize_name(title or name or "")
         compatibility_metadata = any(
             value is not None
             for value in (
@@ -1701,6 +1713,12 @@ class BucketManager:
             metadata["period"] = self._sanitize_text(str(period)).strip()[:128]
         if date:
             metadata["date"] = self._sanitize_text(str(date)).strip()[:128]
+        if title:
+            metadata["title"] = title
+        if source_refs:
+            metadata["source_refs"] = source_refs
+        if imported:
+            metadata["imported"] = True
         if test_data:
             metadata["provenance"] = {
                 "kind": "test",
@@ -1715,10 +1733,11 @@ class BucketManager:
             metadata["type"] = "permanent"
 
         # --- iter 2.0: 来源工具与 grow 批次 ---
-        # source_tool 留空 = 调用方未声明（兼容老逻辑），不写 frontmatter。
+        # 今后所有记忆必须声明来源。旧调用方未传时统一标为 direct，避免
+        # footprint 只说“创建”却无法让模型判断这条记忆从哪里来。
         # grow_batch_id 仅 grow 路径会传，hold/feel 不会有这个字段。
-        if source_tool:
-            metadata["source_tool"] = str(source_tool).strip()[:_SOURCE_TOOL_MAX]
+        declared_source = str(source_tool or "direct").strip()[:_SOURCE_TOOL_MAX]
+        metadata["source_tool"] = declared_source or "direct"
         if grow_batch_id:
             metadata["grow_batch_id"] = str(grow_batch_id).strip()[:_GROW_BATCH_ID_MAX]
 
@@ -1919,6 +1938,7 @@ class BucketManager:
             str(metadata.get("type") or bucket_type),
             linked_content,
             metadata,
+            {"event_actor": str(event_actor or "system").strip().lower()},
         )
 
         return bucket_id
@@ -2226,6 +2246,7 @@ class BucketManager:
         old_str: str,
         new_str: str,
         append_plan_history: bool = False,
+        event_actor: str = "system",
         **kwargs,
     ) -> dict[str, Any]:
         """Atomically replace one unique literal fragment in a bucket body.
@@ -2310,6 +2331,7 @@ class BucketManager:
                 committed = await self._update_locked(
                     bucket_id,
                     _derived_state_out=derived_state,
+                    event_actor=event_actor,
                     **updates,
                 )
             except ValueError as exc:
@@ -2344,6 +2366,7 @@ class BucketManager:
         *,
         allow_embedding_fallback: bool = False,
         bump_active: bool = False,
+        event_actor: str = "system",
         **kwargs,
     ) -> bool:
         """
@@ -2363,6 +2386,7 @@ class BucketManager:
                 bucket_id,
                 allow_embedding_fallback=allow_embedding_fallback,
                 bump_active=bump_active,
+                event_actor=event_actor,
                 _derived_state_out=derived_state,
                 **kwargs,
             )
@@ -2382,6 +2406,7 @@ class BucketManager:
         _derived_state_out: dict[str, Any],
         allow_embedding_fallback: bool = False,
         bump_active: bool = False,
+        event_actor: str = "system",
         **kwargs,
     ) -> bool:
         file_path = self._find_bucket_file(bucket_id)
@@ -2433,6 +2458,18 @@ class BucketManager:
         if "meaning_append" in kwargs:
             # Miss: meaning_append 是追加一条新 meaning（trace 的 meaning_append / hold 每次调用）。
             kwargs["meaning_append"] = self._normalize_meaning_item(kwargs["meaning_append"])
+        if "title" in kwargs:
+            kwargs["title"] = normalize_memory_title(
+                self._sanitize_text(kwargs["title"])
+            )
+            if not kwargs["title"]:
+                raise ValueError("title 不能为空；省略 title 表示不修改")
+        if "source_refs_append" in kwargs:
+            from ombrebrain.storage.source_store import normalize_source_refs
+
+            kwargs["source_refs_append"] = normalize_source_refs(
+                kwargs["source_refs_append"]
+            )
 
         try:
             post = frontmatter.load(file_path)
@@ -2531,6 +2568,16 @@ class BucketManager:
             post["arousal"] = _clamp_unit(kwargs["arousal"], "arousal", f"update:{bucket_id}")
         if "name" in kwargs:
             post["name"] = sanitize_name(kwargs["name"])
+        if "title" in kwargs and kwargs["title"]:
+            post["title"] = kwargs["title"]
+        if "source_refs_append" in kwargs and kwargs["source_refs_append"]:
+            from ombrebrain.storage.source_store import normalize_source_refs
+
+            existing_refs = normalize_source_refs(post.get("source_refs") or [])
+            appended_refs = normalize_source_refs(kwargs["source_refs_append"])
+            post["source_refs"] = normalize_source_refs(
+                [*existing_refs, *appended_refs]
+            )
         if "resolved" in kwargs:
             post["resolved"] = kwargs["resolved"]
         if "pinned" in kwargs:
@@ -2637,7 +2684,7 @@ class BucketManager:
         # iter 1.7 §G3 在这里加入了 "change_log"——plan 桶的状态/编辑历史 list[dict]，
         # 由 server.py 的 plan() / trace() / /api/plans/{id}/action 维护，bucket_manager 不参与生成。
         for k in ("status", "type", "resolution_reason", "resolved_by",
-                  "related_bucket", "author", "user_name", "title", "letter_date",
+                  "related_bucket", "author", "user_name", "letter_date",
                   "change_log",
                   # iter 1.8 新增字段。除 weight 外全部透传不转换。
                   # weight 在 plan 上才有意义；这里不在这个循环里校验类型，由上层 server.py 保证传入范围。
@@ -2654,7 +2701,13 @@ class BucketManager:
                   # 表示「最后一次合并是 hold 还是 grow 触发的」。
                   # _pre_anchor_source_tool 是 anchor 时保存的原始 source_tool，
                   # release 时自动恢复；None 表示删除该字段。
-                  "source_tool", "grow_batch_id", "last_merged_by", "_pre_anchor_source_tool"):
+                  "source_tool", "grow_batch_id", "last_merged_by", "_pre_anchor_source_tool",
+                  # I 沉淀机制字段（tools/i/core.py 维护，bucket_manager 不生成也不解读）：
+                  # i_stage        "candidate" | "promoted"，标一条普通记忆是 I 候选
+                  # i_dream_dates  被 dream 见证过的日期列表（按天去重），升级门槛的唯一依据
+                  # i_promoted_to  候选升级后指向的正式 I 桶 ID
+                  # i_from_candidate 正式 I 桶指回它的候选桶 ID
+                  "i_stage", "i_dream_dates", "i_promoted_to", "i_from_candidate"):
             if k in kwargs:
                 if k == "weight" and kwargs[k] is not None:
                     post[k] = _clamp01(kwargs[k], _DEFAULT_VALENCE)
@@ -2811,7 +2864,10 @@ class BucketManager:
             str(post.get("type") or "dynamic"),
             post.content or "",
             dict(post.metadata),
-            {"changed_fields": sorted(str(k) for k in kwargs.keys())},
+            {
+                "changed_fields": sorted(str(k) for k in kwargs.keys()),
+                "event_actor": str(event_actor or "system").strip().lower(),
+            },
         )
 
         return True

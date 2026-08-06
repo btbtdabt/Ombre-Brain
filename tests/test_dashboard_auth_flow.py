@@ -1,4 +1,9 @@
+import json
 from pathlib import Path
+import shutil
+import subprocess
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,7 +17,7 @@ def _dashboard_section(start_marker: str, end_marker: str) -> str:
     return html[start:end]
 
 
-def test_auth_success_paths_reload_through_one_session_boundary() -> None:
+def test_auth_success_paths_reload_through_one_verified_session_boundary() -> None:
     html = DASHBOARD.read_text(encoding="utf-8")
     completion = _dashboard_section(
         "async function completeDashboardAuthentication()",
@@ -20,6 +25,10 @@ def test_auth_success_paths_reload_through_one_session_boundary() -> None:
     )
 
     assert "clearDashboardPasswordInputs();" in completion
+    assert "DASHBOARD_PATH.api('/auth/status')" in completion
+    assert "cache: 'no-store'" in completion
+    assert "credentials: 'same-origin'" in completion
+    assert "data.authenticated === true" in completion
     assert "window.OmbreDashboardAuthenticated = true;" in completion
     assert "reloadDashboardSession();" in completion
 
@@ -81,13 +90,16 @@ def test_auth_status_check_bypasses_browser_cache() -> None:
     assert "signal: controller.signal" in check_auth
 
 
-def test_login_failure_prefers_backend_error_payload() -> None:
+def test_login_failure_uses_author_proxy_diagnostics() -> None:
     login = _dashboard_section(
         "async function doLogin()",
         "async function doLogout()",
     )
 
-    assert "d.error || d.detail || '密码错误'" in login
+    assert "credentials: 'same-origin'" in login
+    assert "cache: 'no-store'" in login
+    assert "readAuthFailure(resp" in login
+    assert "登录请求未到达 OB" in login
 
 
 def test_session_teardown_is_reusable_and_invalidates_sensitive_state() -> None:
@@ -103,3 +115,185 @@ def test_session_teardown_is_reusable_and_invalidates_sensitive_state() -> None:
     assert "replaceChildren();" in teardown
     assert "finally" in teardown
     assert "dashboardSessionResetPromise = null;" in teardown
+
+
+def _run_node(script: str) -> dict:
+    completed = subprocess.run(
+        [shutil.which("node"), "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    return json.loads(completed.stdout)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
+def test_login_failure_displays_backend_error_message() -> None:
+    auth_source = (
+        _dashboard_section("function showAuthError(msg)", "async function doSetup()")
+        + _dashboard_section("async function doLogin()", "async function doLogout()")
+    )
+    script = r"""
+const elements = new Map([
+  ['auth-login-pwd', {value:'wrong-password', textContent:'', style:{}}],
+  ['auth-error', {value:'', textContent:'', style:{}}],
+]);
+const document = {getElementById(id) { return elements.get(id); }};
+const DASHBOARD_PATH = {api(path) { return path; }};
+async function fetch(url) {
+  if (url !== '/auth/login') throw new Error('unexpected fetch: ' + url);
+  return {
+    ok: false,
+    status: 503,
+    async json() { return {error:'登录服务繁忙，请 17 秒后重试'}; },
+  };
+}
+""" + auth_source + r"""
+(async function() {
+  await doLogin();
+  const error = elements.get('auth-error');
+  process.stdout.write(JSON.stringify({textContent:error.textContent, display:error.style.display}));
+})().catch(error => { console.error(error); process.exit(1); });
+"""
+
+    assert _run_node(script) == {
+        "textContent": "登录服务繁忙，请 17 秒后重试",
+        "display": "block",
+    }
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
+def test_login_failure_reports_non_json_proxy_response() -> None:
+    auth_source = (
+        _dashboard_section("function showAuthError(msg)", "async function doSetup()")
+        + _dashboard_section("async function doLogin()", "async function doLogout()")
+    )
+    script = r"""
+const elements = new Map([
+  ['auth-login-pwd', {value:'correct-password', textContent:'', style:{}}],
+  ['auth-error', {value:'', textContent:'', style:{}}],
+]);
+const document = {getElementById(id) { return elements.get(id); }};
+const DASHBOARD_PATH = {api(path) { return path; }};
+async function fetch(url) {
+  if (url !== '/auth/login') throw new Error('unexpected fetch: ' + url);
+  return {ok:false, status:502, async json() { throw new Error('nginx returned HTML'); }};
+}
+""" + auth_source + r"""
+(async function() {
+  await doLogin();
+  const error = elements.get('auth-error');
+  process.stdout.write(JSON.stringify({textContent:error.textContent, display:error.style.display}));
+})().catch(error => { console.error(error); process.exit(1); });
+"""
+
+    assert _run_node(script) == {
+        "textContent": (
+            "登录请求失败（HTTP 502）：反向代理未返回 OB 的 JSON 响应，"
+            "请检查 nginx 是否完整转发 /auth/*。"
+        ),
+        "display": "block",
+    }
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
+def test_login_success_requires_cookie_backed_session_before_reload() -> None:
+    auth_source = _dashboard_section(
+        "function reloadDashboardSession()",
+        "async function handleDashboardUnauthorized()",
+    ) + _dashboard_section("function showAuthError(msg)", "async function readAuthFailure")
+    script = r"""
+let reloads = 0;
+const window = {
+  OmbreDashboardAuthenticated: null,
+  location: {reload() { reloads += 1; }},
+};
+const elements = new Map();
+function element(id) {
+  if (!elements.has(id)) elements.set(id, {textContent:'', style:{}});
+  return elements.get(id);
+}
+const document = {body:{dataset:{}}, getElementById:element};
+const DASHBOARD_PATH = {api(path) { return path; }};
+function clearDashboardPasswordInputs() {}
+async function fetch(url) {
+  if (url !== '/auth/status') throw new Error('unexpected fetch: ' + url);
+  return {ok:true, async json() { return {authenticated:false}; }};
+}
+""" + auth_source + r"""
+(async function() {
+  const authenticated = await completeDashboardAuthentication();
+  process.stdout.write(JSON.stringify({
+    authenticated,
+    reloads,
+    dashboardAuthenticated: window.OmbreDashboardAuthenticated,
+    bodyAuthenticated: document.body.dataset.authenticated,
+    error: element('auth-error').textContent,
+    errorDisplay: element('auth-error').style.display,
+    overlayDisplay: element('auth-overlay').style.display,
+  }));
+})().catch(error => { console.error(error); process.exit(1); });
+"""
+
+    assert _run_node(script) == {
+        "authenticated": False,
+        "reloads": 0,
+        "dashboardAuthenticated": False,
+        "bodyAuthenticated": "false",
+        "error": (
+            "验证已通过，但浏览器未建立登录会话。请检查 nginx 的 Host、"
+            "X-Forwarded-Proto 与 Set-Cookie 转发。"
+        ),
+        "errorDisplay": "block",
+        "overlayDisplay": "flex",
+    }
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
+def test_verified_login_session_reloads_exactly_once() -> None:
+    auth_source = _dashboard_section(
+        "function reloadDashboardSession()",
+        "async function handleDashboardUnauthorized()",
+    ) + _dashboard_section("function showAuthError(msg)", "async function readAuthFailure")
+    script = r"""
+let reloads = 0;
+let passwordsCleared = 0;
+const window = {
+  OmbreDashboardAuthenticated: null,
+  location: {reload() { reloads += 1; }},
+};
+const elements = new Map();
+function element(id) {
+  if (!elements.has(id)) elements.set(id, {textContent:'', style:{}});
+  return elements.get(id);
+}
+const document = {body:{dataset:{}}, getElementById:element};
+const DASHBOARD_PATH = {api(path) { return path; }};
+function clearDashboardPasswordInputs() { passwordsCleared += 1; }
+async function fetch(url) {
+  if (url !== '/auth/status') throw new Error('unexpected fetch: ' + url);
+  return {ok:true, async json() { return {authenticated:true}; }};
+}
+""" + auth_source + r"""
+(async function() {
+  const authenticated = await completeDashboardAuthentication();
+  process.stdout.write(JSON.stringify({
+    authenticated,
+    reloads,
+    passwordsCleared,
+    dashboardAuthenticated: window.OmbreDashboardAuthenticated,
+    bodyAuthenticated: document.body.dataset.authenticated,
+    overlayDisplay: element('auth-overlay').style.display,
+  }));
+})().catch(error => { console.error(error); process.exit(1); });
+"""
+
+    assert _run_node(script) == {
+        "authenticated": True,
+        "reloads": 1,
+        "passwordsCleared": 1,
+        "dashboardAuthenticated": True,
+        "bodyAuthenticated": "true",
+        "overlayDisplay": "none",
+    }

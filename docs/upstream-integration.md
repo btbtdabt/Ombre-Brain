@@ -100,6 +100,57 @@ fixed access token remains a resource-bound compatibility credential.
 
 ## Integration Batch Ledger
 
+### 2026-08-05 P0luz source evidence, Spark, I sediment, and Ying generation-failure sync
+
+This batch reviews `ea5d8f5..0bb1e4d` from P0luz and
+`c758a4d..2651e2a` from Yinglianchun. P0luz remains the implementation base;
+Yinglianchun's distinct generation-failure behavior is ported at the matching
+Persona/Reflection worker boundaries. The recorded baselines remain unchanged
+until the exact integration commit passes isolated staging.
+
+| Source commit | Disposition | Evidence |
+| --- | --- | --- |
+| P0luz `7b74699` | Merged from the author | MCP local-mode bind and authentication boundaries, configuration validation, documentation, and regression tests are retained. |
+| P0luz `1ba4e7c` | Merged from the author | OAuth/static-token coexistence, import boundary hardening, release metadata, and the author's tests are retained in the modular runtime. |
+| P0luz `b9c0c48` | Merged from the author | The CI listener-security guard's intentional test annotation is retained without weakening the runtime guard. |
+| P0luz `360c9dd` | Merged from the author | Dehydration thinking configuration and actionable import UI failures are retained and combined with the current configuration API. |
+| P0luz `1d1f2cd` | Merged from the author | Source-backed imports and structured grow entries retain precise explicit titles instead of replacing them with storage filenames. |
+| P0luz `07f5eaf` | Merged from the author | The content-addressed source store, bounded `source_read`, source-reference validation, backup/restore integration, and source-layer tests are retained. |
+| P0luz `8904f47` | Merged into the unified Dashboard | Reverse-proxy login origin handling is retained while the current single Dashboard shell remains the visible owner. |
+| P0luz `4203516` | Merged from the author | The independent bucket co-activation edge projection and its regression coverage are retained. |
+| P0luz `075515f` | Merged from the author behind the existing dormant research boundary | Spark R1, shadow, pilot, evaluation tools, fixtures, and tests are retained verbatim without entering the single-node production boot path. |
+| P0luz `50321ea` | Merged from the author as an explicit read-only Dream option | Spark inspiration candidates remain response-only, provider-free, non-persistent, and opt-in; the author's security and policy tests are retained. |
+| P0luz `cb4152e` | Merged from the author | Explicit MCP no-auth behavior and the clarified activation-score contract are retained. |
+| P0luz `5944ced` | Merged from the author | The associated regression-only correction is retained. |
+| P0luz `d051237` | Merged by ancestry | This upstream merge commit contributes no competing runtime owner beyond the already classified P0 changes. |
+| P0luz `b2f7166` | Merged from the author and combined with current metadata extensions | Source provenance, atomic unpin/quota behavior, structured direct import, optional titles, and current media/meaning fields share the P0 storage boundary. |
+| P0luz `5a01ed5` | Merged from the author | `I` now uses the candidate-to-sediment lifecycle, including three distinct Dream dates before explicit promotion, with the author's tests and tool guidance. |
+| P0luz `6f3f5a8` | Merged from the author | Hot-update manifests are generated from Git index bytes so line-ending conversion cannot invalidate release archives. |
+| P0luz `0bb1e4d` | Merged from the author | Manifest round-trip verification uses a real temporary Git repository and exact repository bytes. |
+| Yinglianchun `d7551d2` | Ported into the P0 worker modules | Reflection and portrait generation no longer manufacture deterministic long-term state when the configured model is unavailable or fails. |
+| Yinglianchun `2651e2a` | Ported into the P0 worker modules and pytest suite | Invalid or failed generated updates return a skipped result without writing buckets/state. The author's standalone verifier is represented by equivalent maintained pytest cases instead of a duplicate script. |
+
+The public MCP contract after integration contains 31 unique tools: P0luz's 15
+core tools plus 16 retained current/Yinglianchun extensions, all registered once
+through `src/tools/current/manifest.py` on the same `/mcp` endpoint.
+
+Local verification complete; isolated staging is still required before the
+recorded baselines advance:
+
+- Focused source/grow/I/GitHub/Dream/import/Dashboard/worker suites: **440
+  passed / 1 skipped / 0 functional failures** after updating the retained
+  31-tool description marker.
+- Full pre-commit suite: **3198 passed / 102 skipped / 0 failures**.
+- Repository-wide Ruff, Python bytecode compilation, the update manifest, and
+  all **49** changed production Python files: **clean / 0 Pyright errors / 0
+  Pyright warnings**. The whole `src` debt audit remains **68 errors / 21
+  warnings**, all outside this batch's changed production files and primarily
+  in the intentionally dormant v3/distributed tree.
+- All five changed inline Dashboard/onboarding scripts parse successfully under
+  Node, and independent code/Python reviewers reported no remaining findings.
+- The local Docker daemon was unavailable, so the image build and runtime
+  smoke checks must run on isolated VPS staging before this batch is promoted.
+
 ### 2026-07-26 Gateway continuation, Persona JSON, and auth cache fixes
 
 This batch reviews `0b4a877..c758a4d` from Yinglianchun and

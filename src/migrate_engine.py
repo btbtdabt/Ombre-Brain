@@ -31,6 +31,7 @@ migrate_engine.py — 完整记忆包导入引擎
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -52,9 +53,15 @@ import frontmatter
 
 from ombrebrain.storage.backup_archive import (
     BackupArchiveError,
+    MIGRATE_MAX_SOURCE_BYTES,
     extract_backup_archive_file,
     validate_sqlite_bytes,
     validate_sqlite_file,
+)
+from ombrebrain.storage.source_store import (
+    SOURCE_REF_RE,
+    SourceStore,
+    normalize_source_refs,
 )
 
 try:
@@ -255,6 +262,7 @@ class MigrateEngine:
         self._has_embeddings: bool = False
         self._zip_db_bytes: Optional[bytes] = None
         self._zip_db_path: str = ""
+        self._source_members: dict[str, bytes | str] = {}
         self._parse_temp_dir: str = ""
         self._parsed_at_monotonic: float = 0.0
         self._total_buckets: int = 0
@@ -324,6 +332,7 @@ class MigrateEngine:
             shutil.rmtree(temp_dir, ignore_errors=True)
         self._zip_db_bytes = None
         self._zip_db_path = ""
+        self._source_members = {}
         for bucket in self._parsed_buckets:
             bucket.md_bytes = None
             bucket.md_path = ""
@@ -624,6 +633,7 @@ class MigrateEngine:
         self._has_embeddings = parsed["has_embeddings"]
         self._zip_db_bytes = parsed.get("db_bytes")
         self._zip_db_path = str(parsed.get("db_path") or "")
+        self._source_members = dict(parsed.get("source_members") or {})
         self._parse_temp_dir = str(parsed.get("temp_dir") or "")
         self._integrity_verified = bool(parsed.get("integrity_verified"))
         self._integrity_warning = str(parsed.get("integrity_warning") or "")
@@ -672,6 +682,16 @@ class MigrateEngine:
             "max_metadata_bytes",
             _DEFAULT_MAX_METADATA_BYTES,
             _MAX_UNLIMITED_MIGRATE_METADATA_BYTES,
+        )
+
+    def _source_content_limit(self) -> int:
+        return min(
+            MIGRATE_MAX_SOURCE_BYTES,
+            self._configured_limit(
+                "max_grow_input_bytes",
+                2 * 1024 * 1024,
+                MIGRATE_MAX_SOURCE_BYTES,
+            ),
         )
 
     def _normalize_import_metadata(self, metadata: dict[str, Any]) -> dict[str, Any]:
@@ -743,6 +763,8 @@ class MigrateEngine:
         has_embeddings = False
         db_bytes: Optional[bytes] = None
         db_path = ""
+        source_members: dict[str, bytes | str] = {}
+        referenced_sources: set[str] = set()
         files: dict[str, bytes | str] = package["files"]
         names = set(files)
 
@@ -776,7 +798,30 @@ class MigrateEngine:
                 validate_sqlite_bytes(db_bytes)
                 has_embeddings = bool(db_bytes)
 
-        # 3) 遍历 bucket markdown 文件。任何损坏项都会让整个恢复预检失败，
+        # 3) 原文证据按文件名中的内容哈希预检。旧版备份可能完全
+        # 没有 sources/，保持可导入并显式告警；但只要包已声称携带证据，
+        # 任何损坏都必须在写入记忆之前整包失败。
+        for arc_path in sorted(names):
+            if not arc_path.startswith("sources/") or not arc_path.endswith(".source"):
+                continue
+            filename = arc_path.removeprefix("sources/")
+            ref = filename[:-len(".source")]
+            if "/" in filename or not SOURCE_REF_RE.fullmatch(ref):
+                raise BackupArchiveError(f"原文证据路径非法: {arc_path}")
+            raw = self._read_member(
+                files[arc_path],
+                limit=self._source_content_limit(),
+                label=arc_path,
+            )
+            if hashlib.sha256(raw).hexdigest() != ref.removeprefix("src_"):
+                raise BackupArchiveError(f"原文证据 SHA-256 校验失败: {arc_path}")
+            try:
+                raw.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise BackupArchiveError(f"原文证据不是 UTF-8: {arc_path}") from exc
+            source_members[ref] = files[arc_path]
+
+        # 4) 遍历 bucket markdown 文件。任何损坏项都会让整个恢复预检失败，
         # 避免界面显示“成功”但实际静默漏掉记忆。
         seen_ids: set[str] = set()
         for arc_path in sorted(names):
@@ -791,6 +836,9 @@ class MigrateEngine:
                 )
                 post = frontmatter.loads(raw.decode("utf-8"))
                 meta = self._normalize_import_metadata(dict(post.metadata))
+                if meta.get("source_refs"):
+                    for source_ref in normalize_source_refs(meta["source_refs"]):
+                        referenced_sources.add(source_ref["ref"])
                 content_size = len((post.content or "").encode("utf-8"))
                 if content_size > content_limit:
                     raise BackupArchiveError(
@@ -835,6 +883,17 @@ class MigrateEngine:
             except Exception as e:
                 raise BackupArchiveError(f"bucket markdown 无法解析: {arc_path}: {e}") from e
 
+        missing_sources = sorted(referenced_sources - set(source_members))
+        integrity_warning = str(package["integrity_warning"] or "")
+        if missing_sources:
+            warning = (
+                f"备份中有 {len(missing_sources)} 个原文证据引用没有对应文件；"
+                "这通常来自 v2.10.0 及更早的备份，事件记忆仍可恢复，但这些原文无法核对"
+            )
+            integrity_warning = "; ".join(
+                part for part in (integrity_warning, warning) if part
+            )
+
         return {
             "buckets": buckets,
             "import_model": import_model,
@@ -843,8 +902,9 @@ class MigrateEngine:
             "has_embeddings": has_embeddings,
             "db_bytes": db_bytes,
             "db_path": db_path,
+            "source_members": source_members,
             "integrity_verified": package["integrity_verified"],
-            "integrity_warning": package["integrity_warning"],
+            "integrity_warning": integrity_warning,
             "manifest": package["manifest"],
         }
 
@@ -935,6 +995,10 @@ class MigrateEngine:
         imported_files: dict[str, str] = {}
 
         try:
+            # 先发布内容寻址的原文，然后才允许任何 bucket 引用落盘。
+            # 若证据安装失败，整次 apply 在记忆写入前终止。
+            if self._source_members:
+                await _to_thread_reaped(self._install_source_members, buckets_dir)
             ensure_path_index = getattr(
                 self._bucket_mgr,
                 "_ensure_bucket_path_index",
@@ -1019,6 +1083,23 @@ class MigrateEngine:
             self._cleanup_parse_artifacts()
             self._parsed_buckets = []
             self._buckets_to_reindex = []
+
+    def _install_source_members(self, buckets_dir: str) -> None:
+        source_limit = self._source_content_limit()
+        store = SourceStore(buckets_dir, max_bytes=source_limit)
+        for ref, source in sorted(self._source_members.items()):
+            raw = self._read_member(
+                source,
+                limit=source_limit,
+                label=f"sources/{ref}.source",
+            )
+            try:
+                content = raw.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise BackupArchiveError(f"原文证据不是 UTF-8: {ref}") from exc
+            installed_ref = store.put(content)
+            if installed_ref != ref:
+                raise BackupArchiveError(f"原文证据内容与引用不匹配: {ref}")
 
     async def _apply_one_bucket(
         self,

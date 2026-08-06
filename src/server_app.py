@@ -80,8 +80,7 @@ class HTTPRuntimeSettings:
     auth_required: bool
     max_request_bytes: int
     max_management_request_bytes: int = DEFAULT_MAX_MANAGEMENT_REQUEST_BYTES
-    # "oauth" (default) or "token" — only consulted when auth_required is True.
-    # Mutually exclusive: see MCPAuthMiddleware and web/oauth.py's route 404s.
+    # "oauth"（默认）、"token" 或 "hybrid"；仅在 auth_required=True 时生效。
     auth_mode: str = "oauth"
     # Canonical external origin captured from the same startup config snapshot
     # used by OAuth route registration.  An empty value means request-derived
@@ -113,7 +112,7 @@ class HTTPRuntimeSettings:
             DEFAULT_MAX_MANAGEMENT_REQUEST_BYTES,
         )
         auth_mode = str(config.get("mcp_auth_mode", "oauth")).strip().lower()
-        if auth_mode not in ("oauth", "token"):
+        if auth_mode not in ("oauth", "token", "hybrid"):
             auth_mode = "oauth"
         auth_required = parse_bool(
             config.get("mcp_require_auth", True), default=True
@@ -219,6 +218,7 @@ class MCPAuthMiddleware:
         *,
         auth_required: bool,
         token_validator: TokenValidator,
+        static_token_validator: TokenValidator | None = None,
         auth_mode: str = "oauth",
         path_matcher: Callable[[object], bool] = is_mcp_endpoint_path,
         resource_path: str = "/mcp",
@@ -227,7 +227,10 @@ class MCPAuthMiddleware:
         self.app = app
         self.auth_required = bool(auth_required)
         self.token_validator = token_validator
-        self.auth_mode = auth_mode if auth_mode in ("oauth", "token") else "oauth"
+        self.static_token_validator = static_token_validator
+        self.auth_mode = (
+            auth_mode if auth_mode in ("oauth", "token", "hybrid") else "oauth"
+        )
         self.path_matcher = path_matcher
         self.resource_path = "/" + str(resource_path or "mcp").strip("/")
         self.public_origin = normalize_public_origin(public_origin)
@@ -248,16 +251,31 @@ class MCPAuthMiddleware:
             # that same resource, not independently token-bound resources.
             resource = f"{base}{self.resource_path}"
             bearer_token = _extract_bearer_token(auth)
-            valid = bool(bearer_token) and self.token_validator(
-                bearer_token, resource=resource
-            )
-            if not valid and self.auth_mode == "token":
+            valid = False
+            if bearer_token:
+                primary_valid = bool(
+                    self.token_validator(bearer_token, resource=resource)
+                )
+                static_valid = False
+                if self.auth_mode == "hybrid" and self.static_token_validator:
+                    # 两个校验器都执行后再合并结果，避免凭响应时延泄露 Token 类型。
+                    static_valid = bool(
+                        self.static_token_validator(bearer_token, resource=resource)
+                    )
+                valid = primary_valid | static_valid
+            if not valid and self.auth_mode in ("token", "hybrid"):
                 # Fallback header for MCP clients that can't customize Authorization.
                 alt_token = headers.get(b"ombre-mcp-token", b"").decode(
                     "latin-1"
                 ).strip()
                 if alt_token:
-                    valid = self.token_validator(alt_token, resource=resource)
+                    static_validator = self.static_token_validator
+                    if static_validator is None and self.auth_mode == "token":
+                        # 保留旧调用方只注入一个 validator 的兼容行为。
+                        static_validator = self.token_validator
+                    valid = bool(static_validator) and static_validator(
+                        alt_token, resource=resource
+                    )
             if not valid:
                 endpoint = self.resource_path.strip("/")
                 if self.auth_mode == "token":
@@ -717,6 +735,7 @@ def build_http_app(
     settings: HTTPRuntimeSettings,
     token_validator: TokenValidator,
     lifecycle: RuntimeLifecycle,
+    static_token_validator: TokenValidator | None = None,
 ) -> Any:
     """Build the HTTP/SSE ASGI app with one consistent middleware stack."""
 
@@ -756,6 +775,7 @@ def build_http_app(
         MCPAuthMiddleware,
         auth_required=settings.auth_required,
         token_validator=token_validator,
+        static_token_validator=static_token_validator,
         auth_mode=settings.auth_mode,
         path_matcher=mcp_path_matcher,
         resource_path="/mcp",

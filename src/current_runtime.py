@@ -150,6 +150,7 @@ class RuntimeCollaborators:
     embedding_engine: Any
     embedding_outbox: Any
     import_engine: Any
+    source_store: Any
     logger: Any
 
     backup_manager: VaultBackupManager = field(init=False)
@@ -255,6 +256,7 @@ class RuntimeCollaborators:
             "embedding_engine": self.embedding_engine,
             "embedding_outbox": self.embedding_outbox,
             "import_engine": self.import_engine,
+            "source_store": self.source_store,
             "logger": self.logger,
             "reminder_store": self.reminder_store,
             "letter_service": self.letter_service,
@@ -288,6 +290,7 @@ class RuntimeCollaborators:
             "embedding_engine": self.embedding_engine,
             "embedding_outbox": self.embedding_outbox,
             "backup_manager": self.backup_manager,
+            "source_store": self.source_store,
             "darkroom_store": self.darkroom_store,
             "dream_engine": self.dream_engine,
             "memory_edge_store": self.memory_edge_store,
@@ -298,6 +301,7 @@ class RuntimeCollaborators:
             "word_map_store": self.word_map_store,
             "raw_event_store": self.raw_event_store,
             "reminder_store": self.reminder_store,
+            "letter_service": self.letter_service,
             "reflection_engine": self.reflection_engine,
             "persona_engine": self.persona_engine,
             "portrait_engine": self.portrait_engine,

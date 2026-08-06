@@ -303,27 +303,69 @@ def test_dashboard_exposes_oauth_authentication_switch():
         assert 'id="btn-restart"' in text
         assert "restartService()" in text
         assert "setRestartRequired(!!result.restart_required" in text
+        assert "安全门禁已强制开启鉴权" in text
 
 
-def test_dashboard_exposes_mcp_static_token_mode():
+def test_dashboard_exposes_mcp_static_token_and_hybrid_modes():
     for rel in ("frontend/dashboard.html",):
         text = (ROOT / rel).read_text(encoding="utf-8")
 
-        # 三态互斥：选 OAuth 就不认 Token，选 Token 就不认 OAuth。
+        # 共存模式显式启用；纯 OAuth 不会因遗留 token 悄悄扩大凭据面。
         assert '<option value="oauth">' in text
+        assert '<option value="hybrid">' in text
         assert '<option value="token">' in text
         assert '<option value="off">' in text
         assert 'id="mcp-token-panel"' in text
         assert "regenerateMcpToken()" in text
         assert "/api/mcp-token/regenerate" in text
         assert "Ombre-MCP-Token" in text
+        assert "OAuth + 静态 Token 共存" in text
+
+
+@pytest.mark.asyncio
+async def test_dashboard_hybrid_mode_persists_and_requires_restart(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.yaml"
+    runtime = {
+        "transport": "streamable-http",
+        "mcp_require_auth": True,
+        "mcp_auth_mode": "oauth",
+    }
+    monkeypatch.setattr(config_api.sh, "_require_auth", lambda _request: None)
+    monkeypatch.setattr(config_api.sh, "config", runtime)
+    monkeypatch.setattr(config_api.sh, "in_docker", lambda: False)
+    monkeypatch.setenv("OMBRE_BIND_HOST", "127.0.0.1")
+    monkeypatch.delenv("OMBRE_MCP_AUTH_MODE", raising=False)
+    monkeypatch.setattr(utils, "config_file_path", lambda: str(config_path))
+    mcp = FakeMCP()
+    config_api.register(mcp)
+
+    response = await mcp.routes[("POST", "/api/config")](
+        JsonRequest({"mcp_auth_mode": "hybrid", "persist": True})
+    )
+    payload = _json(response)
+    persisted = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+    assert response.status_code == 200
+    assert payload["mcp_auth_mode"] == "hybrid"
+    assert payload["mcp_auth_mode_effective"] == "oauth"
+    assert payload["restart_required"] is True
+    assert persisted["mcp_auth_mode"] == "hybrid"
+    assert runtime["mcp_auth_mode"] == "oauth"
 
 
 @pytest.mark.asyncio
 async def test_dashboard_oauth_switch_persists_to_config(monkeypatch, tmp_path):
     config_path = tmp_path / "config.yaml"
     monkeypatch.setattr(config_api.sh, "_require_auth", lambda _request: None)
-    monkeypatch.setattr(config_api.sh, "config", {"mcp_require_auth": True})
+    monkeypatch.setattr(
+        config_api.sh,
+        "config",
+        {"transport": "streamable-http", "mcp_require_auth": True},
+    )
+    monkeypatch.setattr(config_api.sh, "in_docker", lambda: False)
+    monkeypatch.setenv("OMBRE_BIND_HOST", "127.0.0.1")
+    monkeypatch.delenv("OMBRE_MCP_REQUIRE_AUTH", raising=False)
+    monkeypatch.delenv("OMBRE_ALLOW_INSECURE_MCP", raising=False)
     monkeypatch.setattr(utils, "config_file_path", lambda: str(config_path))
     mcp = FakeMCP()
     config_api.register(mcp)
@@ -390,9 +432,16 @@ async def test_dashboard_startup_state_honors_boot_environment_precedence(
 async def test_dashboard_mcp_startup_settings_require_persistence_and_do_not_publish_on_failure(
     monkeypatch,
 ):
-    runtime = {"mcp_require_auth": True, "mcp_auth_mode": "oauth"}
+    runtime = {
+        "transport": "streamable-http",
+        "mcp_require_auth": True,
+        "mcp_auth_mode": "oauth",
+    }
     monkeypatch.setattr(config_api.sh, "_require_auth", lambda _request: None)
     monkeypatch.setattr(config_api.sh, "config", runtime)
+    monkeypatch.setattr(config_api.sh, "in_docker", lambda: False)
+    monkeypatch.setenv("OMBRE_BIND_HOST", "127.0.0.1")
+    monkeypatch.delenv("OMBRE_ALLOW_INSECURE_MCP", raising=False)
     mcp = FakeMCP()
     config_api.register(mcp)
 
@@ -400,7 +449,11 @@ async def test_dashboard_mcp_startup_settings_require_persistence_and_do_not_pub
         JsonRequest({"mcp_require_auth": False})
     )
     assert not_persisted.status_code == 400
-    assert runtime == {"mcp_require_auth": True, "mcp_auth_mode": "oauth"}
+    assert runtime == {
+        "transport": "streamable-http",
+        "mcp_require_auth": True,
+        "mcp_auth_mode": "oauth",
+    }
 
     monkeypatch.setattr(
         config_api,
@@ -417,7 +470,353 @@ async def test_dashboard_mcp_startup_settings_require_persistence_and_do_not_pub
         )
     )
     assert failed.status_code == 500
-    assert runtime == {"mcp_require_auth": True, "mcp_auth_mode": "oauth"}
+    assert runtime == {
+        "transport": "streamable-http",
+        "mcp_require_auth": True,
+        "mcp_auth_mode": "oauth",
+    }
+
+
+@pytest.mark.asyncio
+async def test_dashboard_hot_config_persist_failure_rolls_back_runtime(
+    monkeypatch,
+):
+    runtime = {
+        "transport": "streamable-http",
+        "dehydration": {"model": "old-model", "max_tokens": 1000},
+        "merge_threshold": 70,
+    }
+    dehydrator = SimpleNamespace(
+        model="old-model",
+        base_url="https://old.example/v1",
+        max_tokens=1000,
+        temperature=0.2,
+        timeout_seconds=30.0,
+        api_format="openai_compat",
+        api_key="",
+        api_available=False,
+        client=None,
+    )
+    monkeypatch.setattr(config_api.sh, "_require_auth", lambda _request: None)
+    monkeypatch.setattr(config_api.sh, "config", runtime)
+    monkeypatch.setattr(config_api.sh, "dehydrator", dehydrator)
+    monkeypatch.setattr(config_api.sh, "in_docker", lambda: False)
+    monkeypatch.setattr(
+        config_api,
+        "atomic_update_config_yaml",
+        lambda _mutate: (_ for _ in ()).throw(OSError("只读挂载")),
+    )
+    mcp = FakeMCP()
+    config_api.register(mcp)
+
+    response = await mcp.routes[("POST", "/api/config")](JsonRequest({
+        "dehydration": {"model": "new-model", "max_tokens": 2000},
+        "merge_threshold": 55,
+        "persist": True,
+    }))
+
+    assert response.status_code == 500
+    assert _json(response)["updated"] == []
+    assert runtime == {
+        "transport": "streamable-http",
+        "dehydration": {"model": "old-model", "max_tokens": 1000},
+        "merge_threshold": 70,
+    }
+    assert dehydrator.model == "old-model"
+    assert dehydrator.max_tokens == 1000
+
+
+@pytest.mark.asyncio
+async def test_dashboard_rejects_unsafe_no_auth_before_config_write(
+    monkeypatch, tmp_path
+):
+    config_path = tmp_path / "config.yaml"
+    writes = []
+    monkeypatch.setattr(config_api.sh, "_require_auth", lambda _request: None)
+    monkeypatch.setattr(
+        config_api.sh,
+        "config",
+        {"transport": "streamable-http", "mcp_require_auth": True},
+    )
+    monkeypatch.setattr(config_api.sh, "in_docker", lambda: False)
+    monkeypatch.setenv("OMBRE_BIND_HOST", "0.0.0.0")
+    monkeypatch.delenv("OMBRE_MCP_REQUIRE_AUTH", raising=False)
+    monkeypatch.delenv("OMBRE_ALLOW_INSECURE_MCP", raising=False)
+    monkeypatch.setattr(utils, "config_file_path", lambda: str(config_path))
+    monkeypatch.setattr(
+        config_api,
+        "atomic_update_config_yaml",
+        lambda mutate: writes.append(mutate),
+    )
+    mcp = FakeMCP()
+    config_api.register(mcp)
+
+    response = await mcp.routes[("POST", "/api/config")](
+        JsonRequest({"mcp_require_auth": False, "persist": True})
+    )
+    payload = _json(response)
+
+    assert response.status_code == 400
+    assert payload["mcp_network_security"]["guard_required"] is True
+    assert writes == []
+    assert not config_path.exists()
+    assert config_api.sh.config == {
+        "transport": "streamable-http",
+        "mcp_require_auth": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_dashboard_rechecks_network_safety_inside_atomic_config_turn(
+    monkeypatch,
+):
+    runtime = {"transport": "stdio", "mcp_require_auth": True}
+    latest_after_attempt = {}
+
+    def writer(mutate):
+        latest = {"transport": "streamable-http", "mcp_require_auth": True}
+        try:
+            mutate(latest)
+        finally:
+            latest_after_attempt.update(latest)
+        return latest
+
+    monkeypatch.setattr(config_api.sh, "_require_auth", lambda _request: None)
+    monkeypatch.setattr(config_api.sh, "config", runtime)
+    monkeypatch.setattr(config_api.sh, "in_docker", lambda: False)
+    monkeypatch.setenv("OMBRE_BIND_HOST", "0.0.0.0")
+    monkeypatch.delenv("OMBRE_ALLOW_INSECURE_MCP", raising=False)
+    monkeypatch.setattr(config_api, "atomic_update_config_yaml", writer)
+    mcp = FakeMCP()
+    config_api.register(mcp)
+
+    response = await mcp.routes[("POST", "/api/config")](
+        JsonRequest({"mcp_require_auth": False, "persist": True})
+    )
+
+    assert response.status_code == 400
+    assert "关闭 MCP 鉴权仅允许" in _json(response)["error"]
+    assert latest_after_attempt == {
+        "transport": "streamable-http",
+        "mcp_require_auth": True,
+    }
+    assert runtime == {"transport": "stdio", "mcp_require_auth": True}
+
+
+@pytest.mark.asyncio
+async def test_dashboard_reports_restart_after_open_runtime_is_repaired(
+    monkeypatch,
+):
+    from ombrebrain.security.deployment_profile import enforce_mcp_network_guard
+
+    runtime = {"transport": "streamable-http", "mcp_require_auth": False}
+    enforce_mcp_network_guard(
+        runtime,
+        environment={"OMBRE_BIND_HOST": "0.0.0.0"},
+    )
+    persisted = {"transport": "streamable-http", "mcp_require_auth": False}
+
+    def writer(mutate):
+        candidate = copy.deepcopy(persisted)
+        mutate(candidate)
+        persisted.clear()
+        persisted.update(candidate)
+        return candidate
+
+    monkeypatch.setattr(config_api.sh, "_require_auth", lambda _request: None)
+    monkeypatch.setattr(config_api.sh, "config", runtime)
+    monkeypatch.setattr(config_api.sh, "in_docker", lambda: False)
+    monkeypatch.setenv("OMBRE_BIND_HOST", "0.0.0.0")
+    monkeypatch.delenv("OMBRE_MCP_REQUIRE_AUTH", raising=False)
+    monkeypatch.delenv("OMBRE_ALLOW_INSECURE_MCP", raising=False)
+    monkeypatch.setattr(config_api, "atomic_update_config_yaml", writer)
+    monkeypatch.setattr(config_api, "read_config_yaml", lambda: copy.deepcopy(persisted))
+    mcp = FakeMCP()
+    config_api.register(mcp)
+
+    repaired = await mcp.routes[("POST", "/api/config")](JsonRequest({
+        "mcp_require_auth": True,
+        "persist": True,
+    }))
+    repaired_payload = _json(repaired)
+    refreshed = await mcp.routes[("GET", "/api/config")](JsonRequest(method="GET"))
+    refreshed_payload = _json(refreshed)
+
+    assert repaired.status_code == 200
+    assert repaired_payload["mcp_require_auth"] is True
+    assert repaired_payload["mcp_require_auth_effective"] is False
+    assert repaired_payload["mcp_network_security"]["guard_active"] is False
+    assert repaired_payload["restart_required"] is True
+    assert persisted["mcp_require_auth"] is True
+    assert refreshed.status_code == 200
+    assert refreshed_payload["mcp_require_auth"] is True
+    assert refreshed_payload["mcp_require_auth_effective"] is False
+    assert refreshed_payload["mcp_network_security"]["guard_active"] is False
+    assert refreshed_payload["restart_required"] is True
+
+
+@pytest.mark.asyncio
+async def test_dashboard_explicit_insecure_override_is_auditable(monkeypatch):
+    runtime = {"transport": "streamable-http", "mcp_require_auth": True}
+    persisted = {"transport": "streamable-http", "mcp_require_auth": True}
+
+    def writer(mutate):
+        candidate = copy.deepcopy(persisted)
+        mutate(candidate)
+        persisted.clear()
+        persisted.update(candidate)
+        return candidate
+
+    monkeypatch.setattr(config_api.sh, "_require_auth", lambda _request: None)
+    monkeypatch.setattr(config_api.sh, "config", runtime)
+    monkeypatch.setattr(config_api.sh, "in_docker", lambda: False)
+    monkeypatch.setenv("OMBRE_BIND_HOST", "0.0.0.0")
+    monkeypatch.delenv("OMBRE_MCP_REQUIRE_AUTH", raising=False)
+    monkeypatch.setenv("OMBRE_ALLOW_INSECURE_MCP", "true")
+    monkeypatch.setattr(config_api, "atomic_update_config_yaml", writer)
+    mcp = FakeMCP()
+    config_api.register(mcp)
+
+    response = await mcp.routes[("POST", "/api/config")](JsonRequest({
+        "mcp_require_auth": False,
+        "persist": True,
+    }))
+    payload = _json(response)
+
+    assert response.status_code == 200
+    assert persisted["mcp_require_auth"] is False
+    assert payload["mcp_network_security"]["override_active"] is True
+    assert payload["mcp_network_security"]["guard_active"] is False
+    assert payload["warnings"]
+    assert payload["restart_required"] is True
+
+
+@pytest.mark.asyncio
+async def test_dashboard_reports_platform_managed_open_runtime_as_effective(
+    monkeypatch,
+):
+    from ombrebrain.security.deployment_profile import enforce_mcp_network_guard
+
+    runtime = {"transport": "streamable-http", "mcp_require_auth": False}
+    enforce_mcp_network_guard(
+        runtime,
+        environment={
+            "OMBRE_BIND_HOST": "0.0.0.0",
+            "OMBRE_MCP_REQUIRE_AUTH": "false",
+        },
+    )
+    persisted = {"transport": "streamable-http", "mcp_require_auth": False}
+
+    def writer(mutate):
+        candidate = copy.deepcopy(persisted)
+        mutate(candidate)
+        persisted.clear()
+        persisted.update(candidate)
+        return candidate
+
+    monkeypatch.setattr(config_api.sh, "_require_auth", lambda _request: None)
+    monkeypatch.setattr(config_api.sh, "config", runtime)
+    monkeypatch.setattr(config_api.sh, "in_docker", lambda: False)
+    monkeypatch.setenv("OMBRE_BIND_HOST", "0.0.0.0")
+    monkeypatch.setenv("OMBRE_MCP_REQUIRE_AUTH", "false")
+    monkeypatch.delenv("OMBRE_ALLOW_INSECURE_MCP", raising=False)
+    monkeypatch.setattr(config_api, "atomic_update_config_yaml", writer)
+    monkeypatch.setattr(config_api, "read_config_yaml", lambda: copy.deepcopy(persisted))
+    mcp = FakeMCP()
+    config_api.register(mcp)
+
+    response = await mcp.routes[("POST", "/api/config")](JsonRequest({
+        "mcp_require_auth": True,
+        "persist": True,
+    }))
+    payload = _json(response)
+    refreshed = await mcp.routes[("GET", "/api/config")](JsonRequest(method="GET"))
+    refreshed_payload = _json(refreshed)
+
+    assert response.status_code == 200
+    assert persisted["mcp_require_auth"] is True
+    assert payload["mcp_require_auth"] is True
+    assert payload["mcp_require_auth_effective"] is False
+    assert payload["mcp_network_security"]["guard_active"] is False
+    assert payload["restart_required"] is False
+    assert payload["warnings"]
+    assert "仍由平台环境变量控制" in payload["message"]
+    assert refreshed.status_code == 200
+    assert refreshed_payload["mcp_require_auth"] is True
+    assert refreshed_payload["mcp_require_auth_effective"] is False
+    assert refreshed_payload["mcp_network_security"]["guard_active"] is False
+    assert refreshed_payload["restart_required"] is False
+
+
+@pytest.mark.asyncio
+async def test_dashboard_does_not_promise_restart_can_override_platform_no_auth(
+    monkeypatch,
+):
+    from ombrebrain.security.deployment_profile import enforce_mcp_network_guard
+
+    runtime = {"transport": "streamable-http", "mcp_require_auth": False}
+    enforce_mcp_network_guard(
+        runtime,
+        environment={
+            "OMBRE_BIND_HOST": "0.0.0.0",
+            "OMBRE_MCP_REQUIRE_AUTH": "false",
+            "OMBRE_ALLOW_INSECURE_MCP": "true",
+        },
+    )
+    persisted = {"transport": "streamable-http", "mcp_require_auth": False}
+
+    def writer(mutate):
+        candidate = copy.deepcopy(persisted)
+        mutate(candidate)
+        persisted.clear()
+        persisted.update(candidate)
+        return candidate
+
+    monkeypatch.setattr(config_api.sh, "_require_auth", lambda _request: None)
+    monkeypatch.setattr(config_api.sh, "config", runtime)
+    monkeypatch.setattr(config_api.sh, "in_docker", lambda: False)
+    monkeypatch.setenv("OMBRE_BIND_HOST", "0.0.0.0")
+    monkeypatch.setenv("OMBRE_MCP_REQUIRE_AUTH", "false")
+    monkeypatch.setenv("OMBRE_ALLOW_INSECURE_MCP", "true")
+    monkeypatch.setattr(config_api, "atomic_update_config_yaml", writer)
+    mcp = FakeMCP()
+    config_api.register(mcp)
+
+    response = await mcp.routes[("POST", "/api/config")](JsonRequest({
+        "mcp_require_auth": True,
+        "persist": True,
+    }))
+    payload = _json(response)
+
+    assert response.status_code == 200
+    assert persisted["mcp_require_auth"] is True
+    assert payload["mcp_require_auth_effective"] is False
+    assert payload["mcp_network_security"]["override_active"] is True
+    assert payload["mcp_network_security"]["auth_environment_override"] is True
+    assert payload["restart_required"] is False
+    assert any("OMBRE_MCP_REQUIRE_AUTH" in warning for warning in payload["warnings"])
+    assert "仍由平台环境变量控制" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_dashboard_rejects_mixing_startup_and_hot_runtime_settings(
+    monkeypatch,
+):
+    runtime = {"transport": "streamable-http", "mcp_require_auth": True}
+    monkeypatch.setattr(config_api.sh, "_require_auth", lambda _request: None)
+    monkeypatch.setattr(config_api.sh, "config", runtime)
+    mcp = FakeMCP()
+    config_api.register(mcp)
+
+    response = await mcp.routes[("POST", "/api/config")](JsonRequest({
+        "mcp_require_auth": True,
+        "surfacing": {"breath_max_results": 11},
+        "persist": True,
+    }))
+
+    assert response.status_code == 400
+    assert "separate requests" in _json(response)["error"]
+    assert runtime == {"transport": "streamable-http", "mcp_require_auth": True}
 
 
 @pytest.mark.asyncio

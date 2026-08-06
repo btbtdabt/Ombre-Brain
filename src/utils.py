@@ -34,6 +34,7 @@ import logging
 import math
 import tempfile
 import threading
+import unicodedata
 from collections.abc import MutableMapping
 from types import EllipsisType
 from pathlib import Path
@@ -62,6 +63,7 @@ _LOG_FALLBACK_DIR = os.path.join(tempfile.gettempdir(), "ombre_logs")
 
 # sanitize_name() 桶名最大长度（防止文件名过长导致 OS 报错）。
 _BUCKET_NAME_MAX_LEN = 80
+MEMORY_TITLE_MAX_CHARS = 120
 
 _BOOL_TRUE = frozenset({"1", "true", "yes", "on"})
 _BOOL_FALSE = frozenset({"0", "false", "no", "off"})
@@ -764,11 +766,10 @@ def load_config(config_path: Optional[str] = None) -> dict:
         "transport": "stdio",
         "log_level": "INFO",
         "mcp_require_auth": True,
-        # 只有 mcp_require_auth=true 时才生效："oauth"（默认）或 "token"，二选一、互斥。
+        # 只有 mcp_require_auth=true 时才生效：OAuth、静态 Token 或两者共存。
         "mcp_auth_mode": "oauth",
         "mcp_token": "",
         "buckets_dir": os.path.join(project_root, "buckets"),
-        "state_dir": "",
         "merge_threshold": 75,
         "dehydration": {
             "model": "gemini-2.0-flash",
@@ -984,11 +985,11 @@ def load_config(config_path: Optional[str] = None) -> dict:
     _apply_env_override(config, "OMBRE_STATE_DIR", "state_dir")
     env_buckets_dir = os.environ.get("OMBRE_BUCKETS_DIR", "")
 
-    # MCP OAuth 开关（布尔，单独处理）—— OMBRE_MCP_REQUIRE_AUTH
+    # MCP 鉴权开关（布尔，单独处理）—— OMBRE_MCP_REQUIRE_AUTH
     # 不能走 _apply_env_override：它只写字符串，而鉴权中间件和诊断接口都要求
     # 配置中保存真正的 bool；否则字符串 "false" 仍可能被普通真值判断误当成开启。
-    # 用途：把 OB 接进自有前端 / GPT / GLM 等不走 OAuth 的客户端时，
-    # 设 OMBRE_MCP_REQUIRE_AUTH=false（或 config.yaml: mcp_require_auth: false）即可免认证直连 /mcp。
+    # 用途：把 OB 接进同机自有前端等不走 OAuth 的客户端时，可在明确回环边界关闭鉴权；
+    # 局域网/NAS/公网应改用 OAuth 或静态 Token，启动期网络门禁还会统一复核真实边界。
     # 仅在显式设置为可识别的值时才覆盖；不设 / 设成乱七八糟的值都保持默认（安全：默认开启）。
     _env_mcp_auth = os.environ.get("OMBRE_MCP_REQUIRE_AUTH", "").strip()
     if _env_mcp_auth:
@@ -997,13 +998,17 @@ def load_config(config_path: Optional[str] = None) -> dict:
         )
 
     # MCP 鉴权模式（枚举，仅 mcp_require_auth=true 时生效）—— mcp_auth_mode / OMBRE_MCP_AUTH_MODE
-    # "oauth"（默认）沿用上面的 OAuth 2.1 + PKCE；"token" 改走静态密钥（mcp_token / OMBRE_MCP_TOKEN）。
-    # 二者互斥——选 token 模式时 OAuth 的 discovery/register/authorize/token 路由全部 404（见 web/oauth.py）。
+    # "oauth"（默认）沿用 OAuth 2.1 + PKCE；"token" 只走静态密钥；"hybrid" 同时接受两者。
+    # 只有纯 token 模式会关闭 OAuth 的 discovery/register/authorize/token 路由（见 web/oauth.py）。
     # 不能走 _apply_env_override：这里需要做枚举校验，非法值一律回退默认 "oauth"。
     _raw_auth_mode = str(config.get("mcp_auth_mode", "oauth")).strip().lower()
-    config["mcp_auth_mode"] = _raw_auth_mode if _raw_auth_mode in ("oauth", "token") else "oauth"
+    config["mcp_auth_mode"] = (
+        _raw_auth_mode
+        if _raw_auth_mode in ("oauth", "token", "hybrid")
+        else "oauth"
+    )
     _env_mcp_auth_mode = os.environ.get("OMBRE_MCP_AUTH_MODE", "").strip().lower()
-    if _env_mcp_auth_mode in ("oauth", "token"):
+    if _env_mcp_auth_mode in ("oauth", "token", "hybrid"):
         config["mcp_auth_mode"] = _env_mcp_auth_mode
 
     _apply_env_override(config, "OMBRE_MCP_TOKEN", "mcp_token")
@@ -1016,6 +1021,11 @@ def load_config(config_path: Optional[str] = None) -> dict:
             "mcp_auth_mode=token but no mcp_token/OMBRE_MCP_TOKEN configured — falling back to oauth"
         )
         config["mcp_auth_mode"] = "oauth"
+    elif config["mcp_auth_mode"] == "hybrid" and not str(config.get("mcp_token") or "").strip():
+        logging.warning(
+            "mcp_auth_mode=hybrid 但尚未配置静态 Token；OAuth 仍可用，静态 Token 入口将在配置密钥后生效 / "
+            "mcp_auth_mode=hybrid has no static token yet; OAuth remains available"
+        )
 
     # iter 1.9 F: 统一推荐 OMBRE_VAULT_DIR；老变量 OMBRE_BUCKETS_DIR 仍兼容
     # Priority: OMBRE_BUCKETS_DIR (legacy explicit) > OMBRE_VAULT_DIR > config.yaml.buckets_dir
@@ -1487,6 +1497,17 @@ def sanitize_name(name: str) -> str:
     cleaned = re.sub(r"[^\w\s\u4e00-\u9fff-]", "", name, flags=re.UNICODE)
     cleaned = cleaned.strip()[:_BUCKET_NAME_MAX_LEN]
     return cleaned if cleaned else "unnamed"
+
+
+def normalize_memory_title(value: object) -> str:
+    """统一显式记忆标题：NFC、单行、不静默截断。"""
+
+    title = " ".join(unicodedata.normalize("NFC", str(value or "")).split())
+    if len(title) > MEMORY_TITLE_MAX_CHARS:
+        raise ValueError(
+            f"title 超过 {MEMORY_TITLE_MAX_CHARS} 字符上限"
+        )
+    return title
 
 
 def same_path(first: str, second: str) -> bool:

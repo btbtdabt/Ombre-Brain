@@ -214,6 +214,7 @@ class CurrentWebDependencies:
     embedding_engine: Any = None
     embedding_outbox: Any = None
     backup_manager: Any = None
+    source_store: Any = None
     darkroom_store: Any = None
     dream_engine: Any = None
     memory_edge_store: Any = None
@@ -224,6 +225,7 @@ class CurrentWebDependencies:
     word_map_store: Any = None
     raw_event_store: Any = None
     reminder_store: Any = None
+    letter_service: Any = None
     reflection_engine: Any = None
     persona_engine: Any = None
     portrait_engine: Any = None

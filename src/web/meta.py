@@ -86,6 +86,12 @@ _MAX_UPDATE_MANIFEST_BYTES = 2 * 1024 * 1024
 _MAX_DEPENDENCY_MANIFEST_BYTES = 2 * 1024 * 1024
 _DEPENDENCY_MANIFEST_NAMES = ("requirements.txt", "requirements.lock.txt")
 _DEPENDENCY_ABSENCE_PREFIX = ".absent-"
+_LOCK_REQUIREMENT_LINE_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[A-Za-z0-9._,-]+\])?=="
+    r"[A-Za-z0-9][A-Za-z0-9.!+_-]*"
+    r"(?:\s*;\s*[^@/:\\]+)?\s*\\?$"
+)
+_LOCK_HASH_LINE_RE = re.compile(r"^--hash=sha256:[0-9a-fA-F]{64}\s*\\?$")
 
 # A hot update mutates the live source tree and its single ``_prev`` rollback
 # point.  The reservation therefore has to be process-wide, rather than an
@@ -639,6 +645,87 @@ def _normalize_dependency_manifest(data: bytes | None) -> bytes:
     return data.replace(b"\r\n", b"\n").replace(b"\r", b"\n").strip()
 
 
+def _runtime_satisfies_locked_versions(lock_bytes: bytes) -> bool:
+    """只读确认当前解释器是否已经满足新版发布锁。
+
+    早期 Docker 实例可能一路只热更新代码，运行目录和旧镜像都没有留下
+    ``requirements.lock.txt``。过去这种“没有可比较基线”会被一律当成依赖变化，
+    即使当前解释器本来已经安装了完全相同的版本，也会误回滚。
+
+    这里让 pip 仅做本机 dry-run：禁用索引、依赖解析、缓存和版本检查，不访问网络、
+    不安装任何内容。传给 pip 前还会拒绝 URL、全局选项、可编辑依赖等非标准锁语法，
+    防止自定义更新源借“探测”读取外部地址。任何解析失败、缺包、版本不符、pip 太旧
+    或超时都返回 False，由原有门禁继续 fail closed。
+    """
+
+    normalized = _normalize_dependency_manifest(lock_bytes)
+    if not normalized:
+        return False
+    try:
+        text = normalized.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return False
+
+    requirement_count = 0
+    hash_count = 0
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if _LOCK_REQUIREMENT_LINE_RE.fullmatch(line):
+            requirement_count += 1
+            continue
+        if _LOCK_HASH_LINE_RE.fullmatch(line):
+            hash_count += 1
+            continue
+        return False
+    if requirement_count == 0 or hash_count == 0:
+        return False
+
+    import subprocess
+    import tempfile
+
+    path = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb", suffix=".lock.txt", delete=False
+        ) as handle:
+            handle.write(normalized + b"\n")
+            path = handle.name
+        command = [
+            sys.executable,
+            "-m",
+            "pip",
+            "--isolated",
+            "--disable-pip-version-check",
+            "install",
+            "--dry-run",
+            "--no-index",
+            "--no-deps",
+            "--no-cache-dir",
+            "--require-hashes",
+            "-r",
+            path,
+        ]
+        result = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=60,
+            check=False,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+    finally:
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
 def _read_dependency_baseline(repo_root: str, root_name: str) -> bytes | None:
     """读取当前依赖基线；持久代码目录缺文件时回退镜像内置根目录。"""
 
@@ -671,16 +758,17 @@ def _requirements_changed(
     new_requirements: bytes | None,
     new_requirements_lock: bytes | None = None,
 ) -> bool:
-    """依据正式发布 lock 判断依赖是否变化，旧包缺 lock 时兼容原判定。"""
+    """判断新版依赖是否需要安装，旧包缺 lock 时兼容原判定。"""
 
     new_lock = _normalize_dependency_manifest(new_requirements_lock)
     if new_lock:
         old_lock = _read_dependency_baseline(repo_root, "requirements.lock.txt")
-        # 新包声明了正式发布 lock，就只能与同类型基线比较。基线缺失时不能拿
-        # requirements.txt 猜测传递依赖是否相同，必须按真实变化 fail closed。
-        return old_lock is None or (
-            new_lock != _normalize_dependency_manifest(old_lock)
-        )
+        if old_lock is not None:
+            return new_lock != _normalize_dependency_manifest(old_lock)
+        # 不能拿宽松 requirements.txt 猜测传递依赖是否相同；仅在历史实例完全
+        # 缺少 lock 基线、当前解释器又精确满足新版带 hash 发布锁时跳过 pip。
+        # 已有且不同的旧 lock 仍代表真实依赖迁移，保持原有 fail-closed 门禁。
+        return not _runtime_satisfies_locked_versions(new_lock)
 
     new_source = _normalize_dependency_manifest(new_requirements)
     if not new_source:

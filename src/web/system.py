@@ -722,14 +722,34 @@ async def build_system_diagnostics(
             cfg,
             persisted_cfg,
             environment=os.environ,
+            in_docker=sh.in_docker(),
             config_path=persisted_path,
             persistence=persistence,
         )
         effective_auth = bool(effective_report["effective"]["mcp_require_auth"])
+        network_security = effective_report.get("mcp_network_security") or {}
         profile = str(effective_report.get("profile") or "unconfigured")
         overrides = effective_report.get("overrides") or []
         manual_auth_configured = bool(effective_report.get("manual_auth_configured"))
-        if profile == "public_secure" and not effective_auth:
+        if network_security.get("override_active"):
+            config_status = "error"
+            config_message = "高危：已显式允许在非回环或未知边界关闭 MCP 鉴权"
+            config_action = (
+                "在部署平台删除/修正 OMBRE_MCP_REQUIRE_AUTH=false，并删除 "
+                "OMBRE_ALLOW_INSECURE_MCP，然后改用 OAuth 或静态 Token"
+                if network_security.get("auth_environment_override")
+                else "删除 OMBRE_ALLOW_INSECURE_MCP，并改用 OAuth 或静态 Token"
+            )
+        elif network_security.get("guard_active"):
+            config_status = "warning"
+            config_message = "已拦截不安全的免鉴权配置，当前进程已强制开启 MCP 鉴权"
+            config_action = (
+                "在部署平台删除/修正 OMBRE_MCP_REQUIRE_AUTH=false 后重建/重启；"
+                "仅在 Dashboard 重复保存不会覆盖平台环境变量"
+                if network_security.get("auth_environment_override")
+                else "开启并保存 OAuth/静态 Token，或把网络边界明确限制到本机回环"
+            )
+        elif profile == "public_secure" and not effective_auth:
             config_status = "error"
             config_message = "公网安全模式的实际 OAuth 已关闭，当前配置不安全"
             config_action = "删除/修正 OMBRE_MCP_REQUIRE_AUTH，或重新运行安全部署向导"
@@ -1479,18 +1499,18 @@ async def build_system_diagnostics(
     elif not mcp_oauth_required:
         auth_status = "error" if tunnel_public_risk else "warning"
         auth_message = (
-            "高危：隧道已配置为自动连接，但 MCP OAuth 已关闭；公网访问者可匿名读写全部记忆"
+            "高危：隧道已配置为自动连接，但 MCP 鉴权已关闭；公网访问者可匿名读写全部记忆"
             if tunnel_public_risk
-            else "MCP OAuth 已关闭：任何能访问 /mcp 的人都可以匿名读写全部记忆"
+            else "MCP 鉴权已关闭：任何能访问 /mcp 的人都可以匿名读写全部记忆"
         )
         auth_action = (
-            "立即开启 MCP OAuth 或关闭隧道自动连接"
+            "立即开启 MCP 鉴权或关闭隧道自动连接"
             if tunnel_public_risk
-            else "公网部署请开启 OAuth；仅在可信本机/内网或已有反代鉴权时关闭"
+            else "仅在已确认的本机回环，或已有独立鉴权并显式承担风险时关闭"
         )
     else:
         auth_status = "ok"
-        auth_message = "Dashboard 密码已设置，MCP OAuth 已开启"
+        auth_message = "Dashboard 密码已设置，MCP 鉴权已开启"
         auth_action = ""
     checks.append(_check(
         "auth",

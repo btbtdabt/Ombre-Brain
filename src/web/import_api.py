@@ -40,9 +40,9 @@ if TYPE_CHECKING:
     from ..migrate_engine import MigrateEngine
 
 try:
-    from utils import parse_bool, sanitize_name  # type: ignore
+    from utils import normalize_memory_title, parse_bool, sanitize_name  # type: ignore
 except ImportError:  # pragma: no cover
-    from ..utils import parse_bool, sanitize_name  # type: ignore
+    from ..utils import normalize_memory_title, parse_bool, sanitize_name  # type: ignore
 
 from ombrebrain.storage.backup_archive import (
     MAX_ARCHIVE_BYTES,
@@ -500,21 +500,29 @@ def register(mcp) -> None:
                 if requested_tagging is None
                 else requested_tagging
             )
-            preview = await _await_history_worker(
-                preview_import,
-                raw_content,
-                filename,
-                human_label,
-                import_mode,
-                tagging_enabled,
-                str(identity.get("ai_name") or "AI"),
-                user_aliases,
-            )
+            try:
+                preview = await _await_history_worker(
+                    preview_import,
+                    raw_content,
+                    filename,
+                    human_label,
+                    import_mode,
+                    tagging_enabled,
+                    str(identity.get("ai_name") or "AI"),
+                    user_aliases,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "import preflight rejected malformed input: err_type=%s detail=hidden",
+                    type(exc).__name__,
+                )
+                return JSONResponse(
+                    {"ok": False, "error": "Import preview could not parse file"},
+                    status_code=400,
+                )
             raw_content = ""
             llm_ready = _import_llm_ready()
-            llm_required = (
-                preview.get("detected_format") != "operit" or tagging_enabled
-            )
+            requires_llm = bool(preview.get("requires_llm", True))
             return JSONResponse({
                 **preview,
                 "filename": filename,
@@ -523,9 +531,9 @@ def register(mcp) -> None:
                 "operit_tagging_enabled": tagging_enabled,
                 "import_running": False,
                 "llm_ready": llm_ready,
-                "llm_required": llm_required,
+                "llm_required": requires_llm,
                 "can_start": bool(preview.get("ok"))
-                and (llm_ready or not llm_required),
+                and (llm_ready or not requires_llm),
             })
         finally:
             history_ingest_lock.release()
@@ -616,7 +624,11 @@ def register(mcp) -> None:
                         result["error"],
                     )
             except Exception as e:
-                logger.error(f"Import job {job_id} failed: {e}")
+                logger.error(
+                    "Import job %s failed: err_type=%s detail=hidden",
+                    job_id,
+                    type(e).__name__,
+                )
             finally:
                 release_job()
 
@@ -685,7 +697,7 @@ def register(mcp) -> None:
 
     @mcp.custom_route("/api/import/results", methods=["GET"])
     async def api_import_results(request: Request) -> Response:
-        """List recently imported/created buckets for review."""
+        """按有界分页列出待复核的导入桶。"""
         from starlette.responses import JSONResponse
         err = sh._require_auth(request)
         if err:
@@ -694,13 +706,38 @@ def register(mcp) -> None:
         try:
             limit = max(1, min(int(request.query_params.get("limit", "50")), 200))
         except (TypeError, ValueError, OverflowError):
-            return JSONResponse({"error": "limit must be an integer in [1,200]"}, status_code=400)
+            return JSONResponse({"error": "limit 必须是 [1,200] 范围内的整数"}, status_code=400)
+        try:
+            offset = int(request.query_params.get("offset", "0"))
+            if offset < 0:
+                raise ValueError
+        except (TypeError, ValueError, OverflowError):
+            return JSONResponse({"error": "offset 必须是非负整数"}, status_code=400)
         try:
             all_buckets = await bucket_manager.list_all(include_archive=False)
-            # Sort by created time, newest first
-            all_buckets.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
+            imported_buckets = []
+            for bucket in all_buckets:
+                metadata = bucket.get("metadata", {})
+                if not isinstance(metadata, dict):
+                    continue
+                if not (
+                    parse_bool(metadata.get("imported"), default=False)
+                    or str(metadata.get("source_tool") or "").strip() == "import"
+                ):
+                    continue
+                imported_buckets.append(bucket)
+
+            # 使用稳定的最新优先顺序；即使有新导入追加，分页顺序仍可预测。
+            imported_buckets.sort(
+                key=lambda b: (
+                    str(b.get("metadata", {}).get("created", "")),
+                    str(b.get("id", "")),
+                ),
+                reverse=True,
+            )
+            page = imported_buckets[offset:offset + limit]
             results = []
-            for b in all_buckets[:limit]:
+            for b in page:
                 results.append({
                     "id": b["id"],
                     "name": b["metadata"].get("name", ""),
@@ -710,8 +747,18 @@ def register(mcp) -> None:
                     "tags": b["metadata"].get("tags", []),
                     "importance": b["metadata"].get("importance", 5),
                     "created": b["metadata"].get("created", ""),
+                    "imported": True,
                 })
-            return JSONResponse({"buckets": results, "total": len(all_buckets)})
+            next_offset = offset + len(results)
+            has_more = next_offset < len(imported_buckets)
+            return JSONResponse({
+                "buckets": results,
+                "total": len(imported_buckets),
+                "offset": offset,
+                "limit": limit,
+                "has_more": has_more,
+                "next_offset": next_offset if has_more else None,
+            })
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -954,7 +1001,7 @@ def register(mcp) -> None:
             return JSONResponse({"error": "invalid JSON"}, status_code=400)
 
         field_order = (
-            "name", "type", "tags", "domain", "importance", "resolved",
+            "name", "title", "type", "tags", "domain", "importance", "resolved",
             "pinned", "digested", "dont_surface", "why_remembered",
             "weight", "content",
         )
@@ -1008,6 +1055,8 @@ def register(mcp) -> None:
                     return None
             if field == "why_remembered":
                 return str(raw or "")
+            if field == "title":
+                return str(raw or "")
             if field == "type":
                 return str(raw or "dynamic").strip().lower()
             return raw
@@ -1048,12 +1097,44 @@ def register(mcp) -> None:
 
         updates: dict = {}
 
+        explicit_name_changed = False
         if "name" in body:
             if not isinstance(body["name"], str) or not body["name"].strip():
                 return reject("name must be a non-empty string")
             name = sanitize_name(body["name"].strip())
             if name != before_values["name"]:
                 updates["name"] = name
+                explicit_name_changed = True
+
+        if "title" in body:
+            if not isinstance(body["title"], str):
+                return reject("title must be a string")
+            try:
+                title = normalize_memory_title(body["title"])
+            except ValueError as exc:
+                return reject(str(exc))
+            if not title:
+                return reject("title must be a non-empty string")
+            if title != before_values["title"]:
+                updates["title"] = title
+                # name 是带时间前缀的展示/文件名兼容字段。若调用方没有
+                # 同时明确修改 name，则与 title 在同一次 update 中同步。
+                if not explicit_name_changed:
+                    current_name = str(before_values["name"] or "")
+                    prefix = current_name[:19]
+                    has_timestamp = bool(
+                        len(prefix) == 19
+                        and prefix[4:5] == "-"
+                        and prefix[7:8] == "-"
+                        and prefix[10:11] == " "
+                        and prefix[13:14] == "-"
+                        and prefix[16:17] == "-"
+                    )
+                    derived_name = sanitize_name(
+                        f"{prefix} {title}" if has_timestamp else title
+                    )
+                    if derived_name != before_values["name"]:
+                        updates["name"] = derived_name
 
         for field, max_items in (("tags", 64), ("domain", 16)):
             if field not in body:
@@ -1137,6 +1218,13 @@ def register(mcp) -> None:
                 requested_pinned = parse_bool(body["pinned"])
             except ValueError as e:
                 return reject(str(e))
+
+        unpinning_now = current_pinned and not requested_pinned and not protected
+        if unpinning_now and requested_importance is None:
+            return reject(
+                "unpinning requires importance from 1 to 10 in the same edit",
+                field="importance",
+            )
 
         type_changed = requested_type != current_type
         if type_changed:
@@ -1367,7 +1455,11 @@ def register(mcp) -> None:
                 ):
                     expected_values["type"] = "dynamic"
 
-                ok = await bucket_manager.update(bucket_id, **updates)
+                ok = await sh.bucket_mgr.update(
+                    bucket_id,
+                    event_actor="human",
+                    **updates,
+                )
                 if not ok:
                     latest = await bucket_manager.get(bucket_id)
                     if _is_terminal_memory_metadata(

@@ -154,12 +154,13 @@ async def test_initial_daily_portrait_requires_explicit_force(worker_config, tmp
     engine = _engine(worker_config, tmp_path, auto_initial=False)
 
     skipped = await engine.maintain_daily(bucket_mgr, force=False)
-    generated = await engine.maintain_daily(bucket_mgr, force=True)
+    forced = await engine.maintain_daily(bucket_mgr, force=True)
 
     assert skipped["status"] == "skipped"
     assert skipped["reason"] == "initial_requires_manual"
-    assert generated["status"] == "initialized"
-    assert engine.load_state()["runs"]
+    assert forced["status"] == "skipped"
+    assert forced["reason"] == "generator_unavailable"
+    assert engine.load_state()["runs"] == []
 
 
 def test_stable_scope_lock_uses_revision_guard(worker_config, tmp_path):

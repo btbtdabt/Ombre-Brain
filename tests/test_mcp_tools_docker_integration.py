@@ -215,7 +215,26 @@ def test_kelivo_handshake_versions_list_all_tools_without_session_header(
         client.close()
 
 
-def test_manifest_exposes_exactly_the_canonical_tools(mcp_client):
+def test_concurrent_clients_discover_the_same_stateless_dream_schema():
+    def discover(_index):
+        client = MCPClient(MCP_URL)
+        try:
+            client.initialize()
+            dream_tool = next(
+                tool for tool in client.list_tools() if tool["name"] == "dream"
+            )
+            return dream_tool["inputSchema"]
+        finally:
+            client.close()
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        schemas = list(pool.map(discover, range(4)))
+
+    assert all(schema == schemas[0] for schema in schemas)
+    assert set(schemas[0]["properties"]) == {"window_hours", "inspiration"}
+
+
+def test_manifest_exposes_exactly_the_documented_canonical_tools(mcp_client):
     tools = mcp_client.list_tools()
     assert [tool["name"] for tool in tools] == list(EXPECTED_TOOL_ORDER)
     tools_by_name = {tool["name"]: tool for tool in tools}
@@ -242,6 +261,7 @@ def test_manifest_exposes_exactly_the_canonical_tools(mcp_client):
         ("breath_advanced", {"catalog": {"not": "a boolean"}}, "catalog"),
         ("hold", {}, "content"),
         ("grow", {"items": {"not": "a list"}}, "items"),
+        ("source_read", {}, "bucket_id"),
         ("trace", {}, "bucket_id"),
         ("anchor", {}, "bucket_id"),
         ("release", {}, "bucket_id"),
@@ -251,6 +271,7 @@ def test_manifest_exposes_exactly_the_canonical_tools(mcp_client):
         ("letter_read", {"limit": {"not": "an integer"}}, "limit"),
         ("I", {"read": {"not": "a boolean"}}, "read"),
         ("dream", {"window_hours": {"not": "an integer"}}, "window_hours"),
+        ("dream", {"inspiration": {"not": "a boolean"}}, "inspiration"),
     ],
 )
 def test_all_tools_reject_schema_invalid_arguments(mcp_client, tool, arguments, field):
@@ -269,6 +290,7 @@ def test_all_tools_reject_schema_invalid_arguments(mcp_client, tool, arguments, 
         ("breath_advanced", {}),
         ("hold", {"content": "unknown-field-probe", "test_data": True}),
         ("grow", {"items": []}),
+        ("source_read", {"bucket_id": "unknown", "expected_title": "unknown"}),
         ("trace", {"bucket_id": "missing-unknown-field-probe"}),
         ("anchor", {"bucket_id": "missing-unknown-field-probe"}),
         ("release", {"bucket_id": "missing-unknown-field-probe"}),
@@ -442,6 +464,41 @@ def test_grow_long_content_obeys_configured_provider_contract(mcp_client):
     assert marker in recalled
 
 
+def test_grow_items_source_layer_requires_exact_title_and_reads_one_event(mcp_client):
+    marker = _marker("source-layer")
+    source = f"开场 {marker}\n妻子说 wife 喔，不是 girlfriend 喔。\n直接 wife。\n尾声"
+    result = mcp_client.call(
+        "grow",
+        {
+            "content": source,
+            "items": [{
+                "title": "wife",
+                "content": f"{marker} 她注意到我直接用了 wife。",
+                "tags": ["老婆", "称呼"],
+                "importance": 8,
+                "domain": ["恋爱"],
+                "source_ranges": [[2, 3]],
+            }],
+        },
+    )
+    bucket_id = list(re.findall(r"(?<![0-9a-f])[0-9a-f]{12}(?![0-9a-f])", result))[-1]
+
+    denied = mcp_client.call(
+        "source_read",
+        {"bucket_id": bucket_id, "expected_title": "直接确认关系"},
+    )
+    assert "标题不匹配" in denied
+
+    event = mcp_client.call(
+        "source_read",
+        {"bucket_id": bucket_id, "expected_title": "wife", "scope": "event"},
+    )
+    assert "wife 喔" in event
+    assert "直接 wife" in event
+    assert "开场" not in event
+    assert "尾声" not in event
+
+
 def test_trace_updates_existing_memory_metadata(mcp_client):
     marker = _marker("trace")
     bucket_id = _hold(mcp_client, marker)
@@ -612,6 +669,33 @@ def test_dream_returns_recent_complete_memory(mcp_client):
     _hold(mcp_client, marker)
     result = mcp_client.call("dream", {"window_hours": 48})
     assert marker in result
+
+
+def test_dream_inspiration_is_explicit_and_does_not_add_a_tool(mcp_client):
+    marker = _marker("dream-inspiration")
+    bucket_id = _hold(mcp_client, marker, test_data=True)
+
+    try:
+        ordinary = mcp_client.call("dream", {"window_hours": 48})
+        inspired = mcp_client.call(
+            "dream",
+            {"window_hours": 48, "inspiration": True},
+        )
+
+        assert "Spark 灵感候选" not in ordinary
+        assert "Spark 灵感候选（显式请求、仅本次响应）" in inspired
+        assert "不是事实、当前立场、行动建议或工具许可" in inspired
+        assert len(mcp_client.list_tools()) == 15
+    finally:
+        cleanup = mcp_client.call(
+            "trace",
+            {
+                "bucket_id": bucket_id,
+                "hard_delete": True,
+                "delete_reason": "Spark Docker integration cleanup",
+            },
+        )
+        assert "已永久删除测试桶" in cleanup
 
 
 @pytest.mark.parametrize(("window_hours", "expected_window"), [(-100, 1), (1000, 336)])

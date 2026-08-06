@@ -232,7 +232,7 @@ DIGEST_PROMPT_TEMPLATE = """你是一个日记整理专家。她/他会发送一
 
 整理规则：
 1. 每个条目应该是一个独立的主题/事件（不要混在一起）
-2. 为每个条目自动分析元数据
+2. 为每个条目自动分析元数据。标题优先沿用原文明确写出的《标题》、独立首行标题或有辨识度的关键原话；不要把它改写成“确认关系”“进行沟通”“关系变化”等会议纪要式结论
 3. 去除无意义的口水话和重复信息，保留核心内容
 4. 同一主题的零散信息应合并为一个条目
 5. 如果有待办事项，单独提取为一个条目
@@ -243,7 +243,7 @@ DIGEST_PROMPT_TEMPLATE = """你是一个日记整理专家。她/他会发送一
 输出格式（纯 JSON 数组，无其他内容）：
 [
   {
-    "name": "条目标题（10字以内）",
+    "name": "有辨识度的事件标题（优先原文明确标题或关键原话）",
     "content": "整理后的内容",
     "domain": ["主题域1"],
     "valence": 0.7,
@@ -371,8 +371,9 @@ ANALYZE_PROMPT_TEMPLATE = """你是一个内容分析器。请分析以下文本
    第一步—精准提取：从原文抽取 3~5 个真正的核心词，不泛化、不遗漏
    第二步—引申扩展：自动补充 8~10 个与当前场景语义相关的词，包括近义词、上位词、关联场景词、她/他可能用不同措辞搜索的词
    两步合并为一个 tags 数组，总计 10~15 个
-5. suggested_name（建议桶名）：10字以内的简短标题
-6. 在 tags 和 suggested_name 中不要使用 [[]] 双链标记
+5. suggested_name（建议桶名）：优先逐字沿用原文中的《标题》、独立首行标题或最有辨识度的关键原话（去掉书名号即可）；没有明确候选时才概括。标题应让当事人一眼认出这件事，避免“确认关系”“深入交流”“关系变化”“达成共识”等会议纪要式抽象结论
+6. importance（重要度）：1~10 的整数，根据这件事对长期记忆的实际重要程度判断；普通日常默认靠近 5，只有明确长期影响、承诺或核心边界时才提高
+7. 在 tags 和 suggested_name 中不要使用 [[]] 双链标记
 
 输出格式（纯 JSON，无其他内容）：
 {
@@ -380,7 +381,8 @@ ANALYZE_PROMPT_TEMPLATE = """你是一个内容分析器。请分析以下文本
   "valence": 0.7,
   "arousal": 0.4,
   "tags": ["核心词1", "核心词2", "扩展词1", "扩展词2", "..."],
-  "suggested_name": "简短标题"
+  "suggested_name": "简短标题",
+  "importance": 5
 }"""
 
 ANALYZE_PROMPT_TEMPLATE += """
@@ -399,6 +401,7 @@ ANALYZE_PROMPT_TEMPLATE += """
   "arousal": 0.4,
   "tags": ["核心词1", "核心词2"],
   "suggested_name": "简短标题",
+  "importance": 5,
   "memory_subject": "event",
   "memory_layer": "process_event"
 }
@@ -470,6 +473,10 @@ class Dehydrator:
         # 思考，关掉它既修了空输出、又更快更省。设为 None 可彻底不发该字段（兼容
         # 不支持 thinkingConfig 的老模型）。
         self.thinking_budget = dehy_cfg.get("thinking_budget", 0)
+        # OpenAI-compatible providers may expose request extensions that are not
+        # part of the OpenAI schema (for example DeepSeek's thinking switch).
+        extra_body = dehy_cfg.get("extra_body")
+        self.extra_body = dict(extra_body) if isinstance(extra_body, dict) else {}
 
         # --- Human display name / 人类一方的称呼 ---
         # 注入脱水/合并的「视角铁律」：原文里人类那一方统一还原为这个名字，
@@ -1067,7 +1074,7 @@ class Dehydrator:
         Analyze content and return structured metadata.
         分析内容，返回结构化元数据。
 
-        Returns: {"domain", "valence", "arousal", "tags", "suggested_name"}
+        Returns: {"domain", "valence", "arousal", "tags", "suggested_name", "importance"}
         """
         if not content or not content.strip():
             return self._default_analysis()
@@ -1124,6 +1131,14 @@ class Dehydrator:
 
         # --- Validate and clamp value ranges / 校验并钳制数值范围 ---
         valence, arousal = self._clamp_va(result)
+        try:
+            importance = max(
+                _IMPORTANCE_MIN,
+                min(_IMPORTANCE_MAX, int(result.get("importance", _DEFAULT_IMPORTANCE))),
+            )
+        except (TypeError, ValueError, OverflowError):
+            importance = _DEFAULT_IMPORTANCE
+
         tags = _sanitize_generated_tags(result.get("tags", []))
         classification = normalize_write_classification(
             memory_subject=result.get("memory_subject", ""),
@@ -1138,6 +1153,7 @@ class Dehydrator:
             "arousal": arousal,
             "tags": tags,
             "suggested_name": str(result.get("suggested_name", ""))[:_NAME_MAX_CHARS],
+            "importance": importance,
             **classification,
         }
 
@@ -1156,6 +1172,7 @@ class Dehydrator:
             "arousal": _DEFAULT_AROUSAL,
             "tags": [],
             "suggested_name": "",
+            "importance": _DEFAULT_IMPORTANCE,
             "memory_subject": "event",
             "memory_layer": "process_event",
             "memory_classification_source": "default",
@@ -1389,6 +1406,14 @@ class Dehydrator:
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
+        configured_extra_body = getattr(self, "extra_body", {})
+        extra_body = (
+            dict(configured_extra_body)
+            if isinstance(configured_extra_body, dict)
+            else {}
+        )
         if self.thinking_mode:
-            options["extra_body"] = {"thinking": {"type": self.thinking_mode}}
+            extra_body["thinking"] = {"type": self.thinking_mode}
+        if extra_body:
+            options["extra_body"] = extra_body
         return options

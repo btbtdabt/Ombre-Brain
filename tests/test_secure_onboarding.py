@@ -11,13 +11,21 @@ import pytest
 import yaml
 
 from ombrebrain.security.deployment_profile import (
+    assess_mcp_network_safety,
     build_profile_patch,
+    enforce_mcp_network_guard,
     effective_configuration_report,
+    insecure_mcp_override_enabled,
+    is_loopback_bind_host,
+    mcp_network_safety_issue,
     normalize_public_https_origin,
+    profile_catalog,
     validate_profile_patch,
 )
+from server_app import HTTPRuntimeSettings
 import web.onboarding as onboarding
 import web.config_api as config_api
+import web.oauth as oauth
 import utils
 
 
@@ -57,16 +65,219 @@ def _onboarding_section(start_marker: str, end_marker: str) -> str:
     return html[start:end]
 
 
-def test_profile_defaults_make_public_safe_and_local_simple() -> None:
+def test_profile_defaults_keep_local_and_public_authenticated() -> None:
     local = build_profile_patch("local")
     public = build_profile_patch("public_secure", {"public_url": "https://ob.example"})
 
     assert local["transport"] == "streamable-http"
-    assert local["mcp_require_auth"] is False
+    assert local["mcp_require_auth"] is True
     assert public["mcp_require_auth"] is True
     assert public["mcp_auth_mode"] == "oauth"
     assert validate_profile_patch(local) == []
     assert validate_profile_patch(public) == []
+    catalog_local = next(item for item in profile_catalog() if item["id"] == "local")
+    assert catalog_local["defaults"]["mcp_require_auth"] is True
+
+
+def test_public_profile_allows_explicit_hybrid_because_oauth_remains_available() -> None:
+    patch = build_profile_patch(
+        "public_secure", {"public_url": "https://ob.example"}
+    )
+    patch["mcp_auth_mode"] = "hybrid"
+
+    assert validate_profile_patch(patch) == []
+
+    patch["mcp_auth_mode"] = "token"
+    assert "公网安全模式必须包含 OAuth 鉴权（oauth 或 hybrid）" in validate_profile_patch(
+        patch
+    )
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["127.0.0.1", "127.42.0.8", "::1", "[::1]", "::ffff:127.0.0.1"],
+)
+def test_loopback_classifier_accepts_only_explicit_loopback_hosts(host: str) -> None:
+    assert is_loopback_bind_host(host) is True
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "",
+        "0.0.0.0",
+        "::",
+        "192.168.1.2",
+        "10.0.0.3",
+        "localhost",
+        "LOCALHOST.",
+        "ob.local",
+        "localhost.example",
+    ],
+)
+def test_loopback_classifier_rejects_wildcard_lan_and_unknown_hosts(host: str) -> None:
+    assert is_loopback_bind_host(host) is False
+
+
+@pytest.mark.parametrize("transport", ["streamable-http", "sse"])
+def test_network_mcp_without_auth_requires_a_confirmed_loopback_boundary(
+    transport: str,
+) -> None:
+    config = {"transport": transport, "mcp_require_auth": False}
+
+    safe = assess_mcp_network_safety(
+        config,
+        environment={"OMBRE_BIND_HOST": "127.0.0.1"},
+    )
+    wildcard = assess_mcp_network_safety(
+        config,
+        environment={"OMBRE_BIND_HOST": "0.0.0.0"},
+    )
+
+    assert safe["loopback_only"] is True
+    assert safe["guard_required"] is False
+    assert wildcard["loopback_only"] is False
+    assert wildcard["guard_required"] is True
+    assert "0.0.0.0" in mcp_network_safety_issue(wildcard)
+
+
+@pytest.mark.parametrize(
+    ("environment", "guard_required"),
+    [
+        ({"OMBRE_BIND_ADDRESS": "127.0.0.1"}, False),
+        ({"OMBRE_BIND_ADDRESS": "::1"}, False),
+        ({"OMBRE_BIND_ADDRESS": "0.0.0.0"}, True),
+        ({"OMBRE_BIND_ADDRESS": "192.168.1.20"}, True),
+        ({}, True),
+        ({"OMBRE_BIND_HOST": "127.0.0.1"}, False),
+    ],
+)
+def test_docker_boundary_fails_closed_when_host_binding_is_unknown_or_non_loopback(
+    environment: dict[str, str], guard_required: bool
+) -> None:
+    decision = assess_mcp_network_safety(
+        {"transport": "streamable-http", "mcp_require_auth": False},
+        environment=environment,
+        in_docker=True,
+    )
+
+    assert decision["guard_required"] is guard_required
+
+
+@pytest.mark.parametrize("value", ["1", "yes", "on", "TRUE ", "false", ""])
+def test_insecure_override_accepts_only_explicit_true(value: str) -> None:
+    expected = value.strip().lower() == "true"
+    assert insecure_mcp_override_enabled({"OMBRE_ALLOW_INSECURE_MCP": value}) is expected
+
+
+def test_explicit_override_is_reported_but_does_not_trigger_guard() -> None:
+    decision = assess_mcp_network_safety(
+        {"transport": "streamable-http", "mcp_require_auth": False},
+        environment={
+            "OMBRE_BIND_HOST": "0.0.0.0",
+            "OMBRE_ALLOW_INSECURE_MCP": "true",
+        },
+    )
+
+    assert decision["override_active"] is True
+    assert decision["guard_required"] is False
+    assert mcp_network_safety_issue(decision) == ""
+
+
+def test_startup_network_check_preserves_explicit_open_access_and_diagnostics() -> None:
+    runtime = {"transport": "streamable-http", "mcp_require_auth": False}
+
+    decision = enforce_mcp_network_guard(
+        runtime,
+        environment={"OMBRE_BIND_HOST": "0.0.0.0"},
+    )
+
+    assert runtime["mcp_require_auth"] is False
+    assert decision["guard_required"] is True
+    assert decision["guard_active"] is False
+    assert runtime["_mcp_network_security"] == decision
+
+    report = effective_configuration_report(
+        runtime,
+        {"transport": "streamable-http", "mcp_require_auth": False},
+        environment={"OMBRE_BIND_HOST": "0.0.0.0"},
+    )
+    assert report["saved"]["mcp_require_auth"] is False
+    assert report["effective"]["mcp_require_auth"] is False
+    assert report["mcp_network_security"]["guard_required"] is True
+    assert report["mcp_network_security"]["guard_active"] is False
+    assert report["restart_required"] is False
+
+    repaired_report = effective_configuration_report(
+        runtime,
+        {"transport": "streamable-http", "mcp_require_auth": True},
+        environment={"OMBRE_BIND_HOST": "0.0.0.0"},
+    )
+    assert repaired_report["saved"]["mcp_require_auth"] is True
+    assert repaired_report["effective"]["mcp_require_auth"] is False
+    assert repaired_report["mcp_network_security"]["guard_active"] is False
+    assert repaired_report["restart_required"] is True
+
+    platform_managed_report = effective_configuration_report(
+        runtime,
+        {"transport": "streamable-http", "mcp_require_auth": True},
+        environment={
+            "OMBRE_BIND_HOST": "0.0.0.0",
+            "OMBRE_MCP_REQUIRE_AUTH": "false",
+        },
+    )
+    assert platform_managed_report["saved"]["mcp_require_auth"] is True
+    assert platform_managed_report["effective"]["mcp_require_auth"] is False
+    assert platform_managed_report["mcp_network_security"]["guard_active"] is False
+    assert platform_managed_report["mcp_network_security"]["auth_environment_override"] is True
+    assert platform_managed_report["overrides"] == [{
+        "env": "OMBRE_MCP_REQUIRE_AUTH",
+        "field": "mcp_require_auth",
+        "value": "false",
+    }]
+    assert platform_managed_report["restart_required"] is False
+
+
+def test_explicit_open_config_drives_mcp_middleware_and_oauth_from_one_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = {
+        "transport": "streamable-http",
+        "mcp_require_auth": False,
+        "mcp_auth_mode": "oauth",
+    }
+    enforce_mcp_network_guard(
+        runtime,
+        environment={"OMBRE_BIND_HOST": "0.0.0.0"},
+    )
+    monkeypatch.setattr(oauth.sh, "config", runtime)
+
+    assert HTTPRuntimeSettings.from_config(runtime).auth_required is False
+    assert oauth._oauth_required_from_config() is False
+
+
+def test_system_diagnostics_directs_platform_managed_guard_to_the_platform() -> None:
+    source = (
+        Path(__file__).resolve().parents[1] / "src" / "web" / "system.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'network_security.get("auth_environment_override")' in source
+    assert "仅在 Dashboard 重复保存不会覆盖平台环境变量" in source
+    assert "OMBRE_ALLOW_INSECURE_MCP，然后改用 OAuth 或静态 Token" in source
+
+
+def test_authenticated_or_stdio_mcp_never_needs_the_network_guard() -> None:
+    authenticated = assess_mcp_network_safety(
+        {"transport": "streamable-http", "mcp_require_auth": True},
+        environment={"OMBRE_BIND_HOST": "0.0.0.0"},
+    )
+    stdio = assess_mcp_network_safety(
+        {"transport": "stdio", "mcp_require_auth": False},
+        environment={},
+    )
+
+    assert authenticated["guard_required"] is False
+    assert stdio["guard_required"] is False
 
 
 def test_public_profile_rejects_non_https_and_cannot_disable_oauth() -> None:
@@ -122,7 +333,8 @@ def test_effective_report_exposes_environment_override_without_hiding_saved_valu
 
     assert report["saved"]["mcp_require_auth"] is True
     assert report["effective"]["mcp_require_auth"] is False
-    assert report["restart_required"] is True
+    # Restarting alone cannot defeat a platform-managed environment override.
+    assert report["restart_required"] is False
     assert report["overrides"] == [{"env": "OMBRE_MCP_REQUIRE_AUTH", "field": "mcp_require_auth", "value": "false"}]
     assert report["environment_sources"] == report["overrides"]
 
@@ -172,6 +384,24 @@ def test_effective_report_includes_auth_mode_and_environment_override() -> None:
     assert report["overrides"] == [
         {"env": "OMBRE_MCP_AUTH_MODE", "field": "mcp_auth_mode", "value": "token"}
     ]
+
+
+def test_effective_report_preserves_hybrid_mode() -> None:
+    report = effective_configuration_report(
+        {
+            "transport": "streamable-http",
+            "mcp_require_auth": True,
+            "mcp_auth_mode": "hybrid",
+        },
+        {
+            "transport": "streamable-http",
+            "mcp_require_auth": True,
+            "mcp_auth_mode": "hybrid",
+        },
+    )
+
+    assert report["saved"]["mcp_auth_mode"] == "hybrid"
+    assert report["effective"]["mcp_auth_mode"] == "hybrid"
 
 
 def test_effective_report_flags_manual_auth_configuration_without_onboarding() -> None:
@@ -249,7 +479,80 @@ async def test_onboarding_apply_preserves_unrelated_config_and_requires_auth(mon
 
     assert local_response.status_code == 200
     assert persisted_local["deployment"]["profile"] == "local"
+    assert persisted_local["mcp_require_auth"] is True
     assert "public_url" not in persisted_local["deployment"]
+
+
+@pytest.mark.asyncio
+async def test_onboarding_rejects_unsafe_advanced_no_auth_before_writing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    original = {"merge_threshold": 81}
+    config_path.write_text(yaml.safe_dump(original), encoding="utf-8")
+    monkeypatch.setattr(onboarding, "config_file_path", lambda: str(config_path))
+    monkeypatch.setattr(onboarding.sh, "_require_auth", lambda _request: None)
+    monkeypatch.setattr(
+        onboarding.sh,
+        "config",
+        {"transport": "streamable-http", "mcp_require_auth": True},
+    )
+    monkeypatch.setattr(onboarding.sh, "in_docker", lambda: False)
+    monkeypatch.setenv("OMBRE_BIND_HOST", "0.0.0.0")
+    monkeypatch.delenv("OMBRE_ALLOW_INSECURE_MCP", raising=False)
+    mcp = FakeMCP()
+    onboarding.register(mcp)
+    request = JsonRequest({
+        "profile": "advanced",
+        "options": {"mcp_require_auth": False},
+    })
+
+    preflight = await mcp.routes[("POST", "/api/onboarding/preflight")](request)
+    apply = await mcp.routes[("POST", "/api/onboarding/apply")](JsonRequest({
+        "profile": "advanced",
+        "options": {"mcp_require_auth": False},
+        "confirm": True,
+    }))
+
+    preflight_payload = _payload(preflight)
+    assert preflight_payload["ok"] is False
+    assert preflight_payload["mcp_network_security"]["guard_required"] is True
+    assert apply.status_code == 400
+    assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == original
+
+
+@pytest.mark.asyncio
+async def test_onboarding_allows_advanced_no_auth_on_explicit_loopback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    monkeypatch.setattr(onboarding, "config_file_path", lambda: str(config_path))
+    monkeypatch.setattr(utils, "config_file_path", lambda: str(config_path))
+    monkeypatch.setattr(onboarding.sh, "_require_auth", lambda _request: None)
+    monkeypatch.setattr(
+        onboarding.sh,
+        "config",
+        {"transport": "streamable-http", "mcp_require_auth": True},
+    )
+    monkeypatch.setattr(onboarding.sh, "in_docker", lambda: False)
+    monkeypatch.setattr(
+        onboarding.sh,
+        "data_dir_persistence",
+        lambda _path: {"persistent": True, "mode": "local", "note": "ok"},
+    )
+    monkeypatch.setenv("OMBRE_BIND_HOST", "127.0.0.1")
+    monkeypatch.delenv("OMBRE_ALLOW_INSECURE_MCP", raising=False)
+    mcp = FakeMCP()
+    onboarding.register(mcp)
+
+    response = await mcp.routes[("POST", "/api/onboarding/apply")](JsonRequest({
+        "profile": "advanced",
+        "options": {"mcp_require_auth": False},
+        "confirm": True,
+    }))
+
+    assert response.status_code == 200
+    assert yaml.safe_load(config_path.read_text(encoding="utf-8"))["mcp_require_auth"] is False
 
 
 @pytest.mark.asyncio

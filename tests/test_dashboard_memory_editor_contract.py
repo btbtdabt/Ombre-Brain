@@ -81,6 +81,7 @@ async def test_bucket_detail_preserves_raw_content_and_separates_display_text(
             "name": "Linked memory",
             "type": "dynamic",
             "meaning": ["first meaning", "second meaning"],
+            "imported": True,
         },
         "content": raw_content,
     }
@@ -109,6 +110,7 @@ async def test_bucket_detail_preserves_raw_content_and_separates_display_text(
         "first meaning",
         "second meaning",
     ]
+    assert listed["imported"] is True
 
 
 def test_dashboard_uses_display_text_for_preview_and_raw_content_for_editor():
@@ -118,6 +120,14 @@ def test_dashboard_uses_display_text_for_preview_and_raw_content_for_editor():
     assert "esc(displayContent)" in source
     assert "_content_for_edit: b.content" in source
     assert "'<div class=\"detail-content\">' + esc(b.content)" not in source
+
+
+def test_dashboard_names_the_calculated_score_as_read_only_activity():
+    source = _dashboard_function("showDetail", "bucketPin")
+
+    assert "活跃度分 / Activity score" in source
+    assert "权重分 / Weight" not in source
+    assert "b.score.toFixed(4)" in source
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
@@ -183,6 +193,32 @@ def test_dashboard_detail_does_not_render_an_editor_for_failed_bucket_fetch():
     assert source.index("if (!res.ok)") < source.index("renderEditForm(")
 
 
+def test_github_restore_surfaces_legacy_source_evidence_warning():
+    source = _dashboard_function("runGithubImport", "_runBackfillSilent")
+
+    assert "d.integrity_warning" in source
+    assert "esc(d.integrity_warning)" in source
+    assert "var(--negative)" in source
+    assert "d.buckets_imported" in source
+    assert "d.sources_imported" in source
+
+
+def test_status_banner_tracks_responsive_sticky_header_height():
+    html = DASHBOARD.read_text(encoding="utf-8")
+    source = _dashboard_function(
+        "syncStatusBannerOffset", "watchStatusBannerOffset"
+    )
+    watcher = _dashboard_function(
+        "watchStatusBannerOffset", "renderStatusBannerCard"
+    )
+
+    assert "top: var(--ob-header-height, 96px)" in html
+    assert "getBoundingClientRect().height" in source
+    assert "--ob-header-height" in source
+    assert "new ResizeObserver(syncStatusBannerOffset)" in watcher
+    assert "window.addEventListener('resize', syncStatusBannerOffset)" in watcher
+
+
 def test_editor_preserves_special_and_future_bucket_types():
     render_source = _dashboard_function("renderEditForm", "bucketSaveEdit")
     save_source = _dashboard_function("bucketSaveEdit", "maybeShowOnboarding")
@@ -202,8 +238,16 @@ def test_editor_preserves_special_and_future_bucket_types():
 
 
 def test_editor_submits_metadata_using_storage_field_names():
+    render_source = _dashboard_function("renderEditForm", "syncEditPinConstraints")
     source = _dashboard_function("bucketSaveEdit", "maybeShowOnboarding")
 
+    assert 'id="edit-title"' in render_source
+    assert 'maxlength="120"' in render_source
+    assert "meta.title || fallbackTitle" in render_source
+    assert "data-dirty=\"0\"" in render_source
+    assert "oninput=\"this.dataset.dirty='1'\"" in render_source
+    assert "title: document.getElementById('edit-title').value" not in source
+    assert "if (titleEl && titleEl.dataset.dirty === '1') body.title" in source
     assert "dont_surface: document.getElementById('edit-dont-surface').checked" in source
     assert "why_remembered: document.getElementById('edit-why').value" in source
     assert "if (weightEl) body.weight = parseFloat(weightEl.value) / 100" in source
@@ -267,7 +311,28 @@ def test_imported_memory_cards_open_the_full_editor_and_refresh_after_save():
     ) < save_source.index("} catch (e) {")
 
 
-@pytest.mark.skipif(NODE is None, reason="Node.js is unavailable")
+def test_import_ui_marks_provenance_refreshes_list_and_supports_pagination():
+    html = DASHBOARD.read_text(encoding="utf-8")
+    activate_source = _dashboard_function("activateDashboardTab", "doSearch")
+    paint_source = _dashboard_function("_paintBuckets", "_localBucketMatches")
+    detail_source = _dashboard_function("showDetail", "bucketPin")
+    update_source = _dashboard_function("updateImportUI", "pauseImport")
+    import_source = _dashboard_function(
+        "loadImportResults", "openImportedBucketEditor"
+    )
+
+    assert "if (target === 'list') pending.push(loadBuckets());" in activate_source
+    assert "b.imported ?" in paint_source
+    assert "被导入" in paint_source
+    assert "导入来源 / Imported" in detail_source
+    assert "loadBuckets();" in update_source
+    assert "&offset=" in import_source
+    assert "data.has_more" in import_source
+    assert "被导入" in import_source
+    assert 'id="import-results-more"' in html
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
 def test_imported_memory_editor_opens_and_focuses_at_runtime():
     html = DASHBOARD.read_text(encoding="utf-8")
     start = html.index("async function openImportedBucketEditor(")

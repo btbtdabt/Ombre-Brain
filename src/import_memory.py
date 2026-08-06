@@ -27,6 +27,7 @@ import json
 import hashlib
 import inspect
 import logging
+import math
 import re
 import threading
 import uuid
@@ -75,7 +76,8 @@ logger = logging.getLogger("ombre_brain.import")
 
 # --- chunk_turns：对话轮次分窗 ---
 _CHUNK_TARGET_TOKENS = 10000   # 单个 chunk 目标 token 数
-_CHUNK_OVERSIZE_RATIO = 1.5    # 单轮 × 该倍数 → 单独成 chunk（避免超范围）
+_CHUNK_BREAK_WINDOW_RATIO = 0.2  # 优先在末尾 20% 内按换行/空白断开
+_CHUNK_MAX_CHARS_PER_TOKEN = 20  # count_tokens_approx 的最低字符贡献为 0.05
 DEFAULT_IMPORT_CHUNK_TOKENS = 3500
 _OVERLAP_CONTEXT_NOTICE = "[上下文提示] 以下是上一段结尾，只用于理解前后关系，请不要从这里单独提取记忆。"
 _CURRENT_SEGMENT_NOTICE = "[本段内容]"
@@ -92,8 +94,10 @@ _CHUNK_ERR_PREVIEW = 200       # 单 chunk 错误信息截断长度
 # chunk_turns 里「单轮超限单独成块」的分支）。这里按 token 数而不是固定字符数
 # 判断要不要截断——旧的固定 12000 字符对英文/中英混合内容而言远小于块本身的
 # token 预算，会把块后半段正文在不留任何痕迹的情况下悄悄丢给 LLM 看不到。
-_EXTRACT_TOKEN_CEILING = int(_CHUNK_TARGET_TOKENS * _CHUNK_OVERSIZE_RATIO)
+_EXTRACT_TOKEN_CEILING = _CHUNK_TARGET_TOKENS
 _EXTRACT_MAX_TOKENS = 2048
+_EXTRACT_MAX_ITEMS = 5
+_STRUCTURED_IMPORT_MAX_ITEMS = 10000
 _EXTRACT_TEMPERATURE = 0.0     # 提取需确定性
 _PARSE_ERR_PREVIEW = 200       # JSON 解析失败时日志预览
 
@@ -129,6 +133,69 @@ _OPERIT_RETRY_PAUSE_POLL_SECONDS = 0.1
 _IMPORT_MODES = frozenset({"auto", "operit", "conversation"})
 
 _TEXT_HASH_CHUNK_CHARS = 1024 * 1024
+
+_IMPORT_ERROR_RULES = (
+    (
+        "model_not_found",
+        re.compile(r"model does not exist|model[_ ]?not[_ ]?found|模型不存在", re.I),
+        "模型名称不可用",
+        "检查模型名是否包含服务商要求的完整前缀。",
+    ),
+    (
+        "insufficient_balance",
+        re.compile(r"balance is insufficient|insufficient (?:balance|quota)|余额不足", re.I),
+        "账户余额或额度不足",
+        "为当前服务商账户充值，或切换到仍有额度的模型与 API Key。",
+    ),
+    (
+        "token_ceiling",
+        re.compile(r"token ceiling|truncating|context length|maximum context|token 上限", re.I),
+        "对话超过模型 Token 上限",
+        "把导出文件按单场对话拆成较小文件后分批导入。",
+    ),
+)
+
+
+def _safe_import_error_detail(exc: BaseException) -> str:
+    """Return a bounded provider error while redacting common credentials."""
+
+    detail = str(exc).strip() or type(exc).__name__
+    detail = re.sub(r"(?i)(bearer\s+)[^\s,;]+", r"\1[REDACTED]", detail)
+    detail = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "[REDACTED]", detail)
+    detail = re.sub(
+        r"(?i)((?:api[_-]?key|token)\s*[=:]\s*)[^\s,;]+",
+        r"\1[REDACTED]",
+        detail,
+    )
+    return detail[:_CHUNK_ERR_PREVIEW]
+
+
+def diagnose_import_errors(errors: list[object]) -> list[dict[str, str]]:
+    """Classify import errors without hiding unknown provider messages."""
+
+    diagnostics: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for value in errors:
+        error = str(value).strip()
+        if not error:
+            continue
+        code, title, solution = "unknown", "导入处理出错", ""
+        for candidate_code, pattern, candidate_title, candidate_solution in _IMPORT_ERROR_RULES:
+            if pattern.search(error):
+                code, title, solution = (
+                    candidate_code,
+                    candidate_title,
+                    candidate_solution,
+                )
+                break
+        key = (code, error)
+        if key in seen:
+            continue
+        seen.add(key)
+        diagnostics.append(
+            {"code": code, "title": title, "error": error, "solution": solution}
+        )
+    return diagnostics
 
 
 _MARKDOWN_ROLE_RE = re.compile(
@@ -190,6 +257,34 @@ def _first_non_whitespace(text: str) -> str:
         if not char.isspace():
             return char
     return ""
+
+
+def _timestamp_sort_key(value: object) -> float:
+    """Convert untrusted export timestamps to a finite sorting key."""
+
+    if isinstance(value, bool):
+        return 0.0
+    try:
+        numeric = float(cast(Any, value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return numeric if math.isfinite(numeric) else 0.0
+
+
+def _timestamp_text(value: object) -> str:
+    """Preserve source timestamps while rejecting non-finite numeric values."""
+
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, (int, float)):
+        if not math.isfinite(float(value)):
+            return ""
+        try:
+            datetime.fromtimestamp(value)
+        except (OSError, OverflowError, ValueError):
+            return ""
+        return str(value)
+    return str(value or "")
 
 
 def _source_hash(human_label: str, raw_content: str) -> str:
@@ -382,55 +477,96 @@ def _tail_for_overlap(text: str, overlap_tokens: int) -> str:
     return "\n".join(tail).strip()
 
 
+def _import_token_estimate(text: str) -> int:
+    """Use the normal estimator with a conservative floor for dense payloads."""
+
+    return max(count_tokens_approx(text), (len(text) + 3) // 4)
+
+
 def _split_oversized_turn(
-    role_label: str,
     content: str,
+    *,
+    line_prefix: str,
     target_tokens: int,
 ) -> list[str]:
-    prefix = f"[{role_label}] "
-    segments: list[str] = []
-    current_lines: list[str] = []
-    current_tokens = count_tokens_approx(prefix)
-    content_budget = max(80, int(target_tokens * 0.85))
-    overlap_tokens = max(20, int(target_tokens * 0.12))
-    max_chars = max(80, int(content_budget / 1.8))
+    """Losslessly split one oversized turn without dropping source characters."""
 
-    def flush_current() -> None:
-        nonlocal current_lines, current_tokens
-        body = "\n".join(current_lines).strip()
-        if body:
-            segments.append(body)
-        current_lines = []
-        current_tokens = count_tokens_approx(prefix)
+    if _import_token_estimate(line_prefix) >= target_tokens:
+        raise ValueError("对话角色标签超过分块 token 预算")
 
-    for line in content.splitlines() or [content]:
-        line_tokens = max(count_tokens_approx(line), (len(line) + 3) // 4)
-        if line_tokens > content_budget or len(line) > max_chars:
-            flush_current()
-            for start in range(0, len(line), max_chars):
-                segment = line[start:start + max_chars].strip()
-                if segment:
-                    segments.append(segment)
-            continue
-        if current_lines and current_tokens + line_tokens > content_budget:
-            flush_current()
-        current_lines.append(line)
-        current_tokens += line_tokens
-    flush_current()
+    parts: list[str] = []
+    start = 0
+    while start < len(content):
+        high = min(
+            len(content),
+            start + target_tokens * _CHUNK_MAX_CHARS_PER_TOKEN,
+        )
+        low = start + 1
+        best = start
+        while low <= high:
+            middle = (low + high) // 2
+            candidate = line_prefix + content[start:middle]
+            if _import_token_estimate(candidate) <= target_tokens:
+                best = middle
+                low = middle + 1
+            else:
+                high = middle - 1
 
-    pieces: list[str] = []
-    previous_tail = ""
-    for segment in segments:
-        body = prefix + segment
-        if previous_tail:
-            pieces.append(
-                f"{_OVERLAP_CONTEXT_NOTICE}\n{prefix}{previous_tail}\n\n"
-                f"{_CURRENT_SEGMENT_NOTICE}\n{body}"
+        if best == start:
+            raise ValueError("对话轮次无法放入分块 token 预算")
+
+        if best < len(content):
+            search_start = max(
+                start + 1,
+                best - max(1, int((best - start) * _CHUNK_BREAK_WINDOW_RATIO)),
             )
+            newline = content.rfind("\n", search_start, best)
+            whitespace = max(
+                content.rfind(" ", search_start, best),
+                content.rfind("\t", search_start, best),
+            )
+            natural_break = max(newline, whitespace)
+            if natural_break >= search_start:
+                best = natural_break + 1
+
+        parts.append(line_prefix + content[start:best])
+        start = best
+
+    return parts
+
+
+def _llm_overlap_view(
+    current_part: str,
+    previous_body: str,
+    *,
+    line_prefix: str,
+    target_tokens: int,
+) -> str:
+    """Add bounded prior context for extraction while keeping source content exact."""
+
+    if not previous_body:
+        return current_part
+    framing = (
+        f"{_OVERLAP_CONTEXT_NOTICE}\n{line_prefix}{{tail}}\n\n"
+        f"{_CURRENT_SEGMENT_NOTICE}\n{current_part}"
+    )
+    if _import_token_estimate(framing.format(tail="")) > target_tokens:
+        return current_part
+
+    max_tail_chars = len(previous_body)
+    low, high, best = 0, max_tail_chars, 0
+    while low <= high:
+        middle = (low + high) // 2
+        tail = previous_body[-middle:] if middle else ""
+        candidate = framing.format(tail=tail)
+        if _import_token_estimate(candidate) <= target_tokens:
+            best = middle
+            low = middle + 1
         else:
-            pieces.append(body)
-        previous_tail = _tail_for_overlap(segment, overlap_tokens)
-    return pieces
+            high = middle - 1
+    if best <= 0:
+        return current_part
+    return framing.format(tail=previous_body[-best:])
 
 
 def _prepare_import(
@@ -440,10 +576,19 @@ def _prepare_import(
     target_tokens: int = _CHUNK_TARGET_TOKENS,
     user_labels: tuple[str, ...] = (),
     assistant_labels: tuple[str, ...] = (),
+    allow_structured: bool = True,
 ) -> tuple[str, int, list[dict]]:
     """CPU/memory-heavy parsing entry point run outside the event loop."""
 
     source_hash = _source_hash(human_label, raw_content)
+    if allow_structured:
+        direct_items = _parse_structured_memory_json(raw_content, filename)
+        if direct_items is not None:
+            return (
+                source_hash,
+                len(direct_items),
+                [{"direct_item": item} for item in direct_items],
+            )
     turns = detect_and_parse(
         raw_content,
         filename,
@@ -462,6 +607,72 @@ def _prepare_import(
     )
     turns.clear()
     return source_hash, turns_count, chunks
+
+
+def _parse_structured_memory_json(
+    raw_content: str,
+    filename: str = "",
+) -> list[dict] | None:
+    """Recognize user-authored memory JSON without sending it through an LLM."""
+
+    if Path(filename).suffix.lower() != ".json" and _first_non_whitespace(
+        raw_content
+    ) not in {"[", "{"}:
+        return None
+    try:
+        payload = json.loads(raw_content)
+    except (json.JSONDecodeError, TypeError, RecursionError):
+        return None
+
+    explicit_wrapper = isinstance(payload, dict) and "items" in payload
+    if explicit_wrapper:
+        candidates = payload.get("items")
+    elif isinstance(payload, list):
+        candidates = payload
+    elif isinstance(payload, dict) and "content" in payload:
+        candidates = [payload]
+    else:
+        return None
+
+    if not isinstance(candidates, list):
+        if explicit_wrapper:
+            raise ValueError("结构化记忆 JSON 的 items 必须是数组")
+        return None
+    if len(candidates) > _STRUCTURED_IMPORT_MAX_ITEMS:
+        raise ValueError(
+            "结构化记忆 JSON 条目过多："
+            f"{len(candidates)} > {_STRUCTURED_IMPORT_MAX_ITEMS}"
+        )
+    if not candidates:
+        return []
+
+    marker_fields = {
+        "name",
+        "domain",
+        "valence",
+        "arousal",
+        "tags",
+        "importance",
+    }
+    dictionary_items = all(
+        isinstance(item, dict) and "role" not in item for item in candidates
+    )
+    declared_memory_fields = any(
+        isinstance(item, dict) and bool(marker_fields.intersection(item))
+        for item in candidates
+    )
+    if not explicit_wrapper and not (
+        dictionary_items and declared_memory_fields
+    ):
+        return None
+
+    return ImportEngine._parse_extraction(
+        json.dumps(candidates, ensure_ascii=False),
+        max_items=_STRUCTURED_IMPORT_MAX_ITEMS,
+        max_tags=_TAGS_MAX,
+        max_tag_chars=32,
+        strict=True,
+    )
 
 
 async def _await_import_worker(func, *args):
@@ -562,8 +773,8 @@ def _parse_chatgpt_json(data: list | dict) -> list[dict]:
             def _node_ts(n):
                 msg = n.get("message")
                 if not isinstance(msg, dict):
-                    return 0
-                return msg.get("create_time") or 0
+                    return 0.0
+                return _timestamp_sort_key(msg.get("create_time"))
 
             sorted_nodes = sorted(valid_nodes, key=_node_ts)
             for node in sorted_nodes:
@@ -592,8 +803,8 @@ def _parse_chatgpt_json(data: list | dict) -> list[dict]:
                     continue
                 # Keep the source value exact; normalize only when deriving a
                 # bucket event date.
-                ts = msg.get("create_time", "")
-                turns.append({"role": role, "content": content.strip(), "timestamp": str(ts)})
+                ts = _timestamp_text(msg.get("create_time", ""))
+                turns.append({"role": role, "content": content.strip(), "timestamp": ts})
         else:
             # Simpler format: list of messages
             messages = conv.get("messages", [])
@@ -626,8 +837,10 @@ def _parse_chatgpt_json(data: list | dict) -> list[dict]:
                     content = str(content_raw)
                 if not content or not content.strip():
                     continue
-                ts = msg.get("timestamp", msg.get("create_time", ""))
-                turns.append({"role": role, "content": content.strip(), "timestamp": str(ts)})
+                ts = _timestamp_text(
+                    msg.get("timestamp", msg.get("create_time", ""))
+                )
+                turns.append({"role": role, "content": content.strip(), "timestamp": ts})
     return turns
 
 
@@ -726,7 +939,16 @@ def detect_and_parse(
                 # Single conversation object with role/content messages
                 if "role" in sample and "content" in sample:
                     return _parse_claude_json(data)
-        except (json.JSONDecodeError, KeyError, IndexError, AttributeError, TypeError):
+        except (
+            json.JSONDecodeError,
+            KeyError,
+            IndexError,
+            AttributeError,
+            TypeError,
+            OSError,
+            OverflowError,
+            RecursionError,
+        ):
             pass
 
     # Fall back to markdown/text
@@ -742,7 +964,7 @@ def parse_operit_memory_backup(raw_content: str) -> dict | None:
 
     try:
         data = json.loads(raw_content)
-    except (json.JSONDecodeError, TypeError):
+    except (json.JSONDecodeError, TypeError, RecursionError):
         return None
     if not isinstance(data, dict) or "memories" not in data:
         return None
@@ -794,6 +1016,9 @@ def chunk_turns(turns: list[dict], target_tokens: int = _CHUNK_TARGET_TOKENS, hu
     按对话轮次边界将对话分为 ~target_tokens 大小的窗口。
     human_label：对话中「用户」那一侧的称呼，默认「用户」，可传入 config["human"] 使内容更个人化。
     """
+    if target_tokens <= 0:
+        raise ValueError("target_tokens 必须为正数")
+
     chunks: list[dict] = []
     current_lines: list[str] = []
     current_tokens = 0
@@ -803,14 +1028,17 @@ def chunk_turns(turns: list[dict], target_tokens: int = _CHUNK_TARGET_TOKENS, hu
 
     for turn in turns:
         role_label = human_label if turn["role"] in ("user", "human") else "AI"
-        line = f"[{role_label}] {turn['content']}"
+        line_prefix = f"[{role_label}] "
+        turn_content = str(turn.get("content", ""))
+        line = line_prefix + turn_content
         # Long unbroken payloads (base64, minified JSON, copied logs) are a
         # single "word" to the normal estimator. Keep a conservative char
         # floor so they cannot bypass the model-sized split boundary.
-        line_tokens = max(count_tokens_approx(line), (len(line) + 3) // 4)
+        line_tokens = _import_token_estimate(line)
+        line_budget = line_tokens + 1
 
         # If single turn exceeds target, split it
-        if line_tokens > target_tokens * _CHUNK_OVERSIZE_RATIO:
+        if line_tokens > target_tokens:
             # Flush current
             if current_lines:
                 chunks.append({
@@ -824,20 +1052,36 @@ def chunk_turns(turns: list[dict], target_tokens: int = _CHUNK_TARGET_TOKENS, hu
                 turn_count = 0
                 first_ts = ""
 
+            prefix_budget = _import_token_estimate(line_prefix) + 1
+            source_budget = max(prefix_budget, int(target_tokens * 0.78))
+            source_budget = min(source_budget, target_tokens)
+            previous_body = ""
             for split_line in _split_oversized_turn(
-                role_label,
-                str(turn.get("content") or ""),
-                target_tokens,
+                turn_content,
+                line_prefix=line_prefix,
+                target_tokens=source_budget,
             ):
-                chunks.append({
+                llm_content = _llm_overlap_view(
+                    split_line,
+                    previous_body,
+                    line_prefix=line_prefix,
+                    target_tokens=target_tokens,
+                )
+                chunk = {
                     "content": split_line,
                     "timestamp_start": turn.get("timestamp", ""),
                     "timestamp_end": turn.get("timestamp", ""),
                     "turn_count": 1,
+                }
+                if llm_content != split_line:
+                    chunk["llm_content"] = llm_content
+                chunks.append({
+                    **chunk,
                 })
+                previous_body = split_line[len(line_prefix):]
             continue
 
-        if current_tokens + line_tokens > target_tokens and current_lines:
+        if current_tokens + line_budget > target_tokens and current_lines:
             chunks.append({
                 "content": "\n".join(current_lines),
                 "timestamp_start": first_ts,
@@ -853,7 +1097,7 @@ def chunk_turns(turns: list[dict], target_tokens: int = _CHUNK_TARGET_TOKENS, hu
             first_ts = turn.get("timestamp", "")
         last_ts = turn.get("timestamp", "")
         current_lines.append(line)
-        current_tokens += line_tokens
+        current_tokens += line_budget
         turn_count += 1
 
     if current_lines:
@@ -889,7 +1133,7 @@ def _detect_preview_format(raw_content: str, filename: str, warnings: list[str])
                 if "role" in sample and "content" in sample:
                     return "chat_json"
             return "json"
-        except (json.JSONDecodeError, TypeError, IndexError):
+        except (json.JSONDecodeError, TypeError, IndexError, RecursionError):
             warnings.append("JSON 解析失败，已按纯文本继续预检")
             return "text"
 
@@ -974,6 +1218,7 @@ def preview_import(
             "turns_count": len(entries),
             "chunks_count": len(entries),
             "estimated_api_calls": len(processable) if operit_tagging else 0,
+            "requires_llm": bool(operit_tagging),
             "estimated_tokens": sum(
                 count_tokens_approx(str(entry.get("content") or ""))
                 for entry in processable
@@ -989,6 +1234,47 @@ def preview_import(
                 for entry in processable[:3]
             ],
         }
+
+    if normalized_mode == "auto":
+        try:
+            direct_items = _parse_structured_memory_json(raw_content, filename)
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "error": _safe_import_error_detail(exc),
+                "detected_format": "structured_memory_json",
+                "turns_count": 0,
+                "chunks_count": 0,
+                "estimated_api_calls": 0,
+                "requires_llm": False,
+                "warnings": warnings,
+            }
+        if direct_items is not None:
+            if not direct_items:
+                return {
+                    "ok": False,
+                    "error": "结构化记忆 JSON 中没有可导入条目",
+                    "detected_format": "structured_memory_json",
+                    "turns_count": 0,
+                    "chunks_count": 0,
+                    "estimated_api_calls": 0,
+                    "requires_llm": False,
+                    "warnings": warnings,
+                }
+            return {
+                "ok": True,
+                "detected_format": "structured_memory_json",
+                "turns_count": len(direct_items),
+                "chunks_count": len(direct_items),
+                "estimated_api_calls": 0,
+                "estimated_tokens": 0,
+                "requires_llm": False,
+                "warnings": warnings,
+                "first_chunk_preview": json.dumps(
+                    direct_items[0], ensure_ascii=False, indent=2
+                )[:600],
+                "sample_turns": [],
+            }
 
     detected_format = _detect_preview_format(raw_content, filename, warnings)
     turns = detect_and_parse(
@@ -1029,6 +1315,7 @@ def preview_import(
         "chunks_count": len(chunks),
         "estimated_api_calls": len(chunks),
         "estimated_tokens": token_estimate,
+        "requires_llm": True,
         "warnings": warnings,
         "first_chunk_preview": first_preview,
         "sample_turns": [
@@ -1060,9 +1347,11 @@ class ImportState:
             "api_calls": 0,
             "memories_created": 0,
             "memories_merged": 0,
+            "memories_skipped": 0,
             "memories_duplicate_skipped": 0,
             "memories_raw": 0,
             "memories_failed": 0,
+            "chunks_failed": 0,
             "embeddings_created": 0,
             "embeddings_failed": 0,
             "embeddings_total": 0,
@@ -1079,7 +1368,7 @@ class ImportState:
             "_operit_tagging_attempts": {},
             "_seen_content_hashes": [],
             "errors": [],
-            "status": "idle",  # idle | running | paused | completed | error
+            "status": "idle",  # idle | running | paused | completed | partial | error
             "job_id": "",
             "started_at": "",
             "updated_at": "",
@@ -1092,8 +1381,10 @@ class ImportState:
                 with open(self.state_file, "r", encoding="utf-8") as f:
                     saved = json.load(f)
                 self.data.update(saved)
+                self.data.setdefault("memories_skipped", 0)
                 self.data.setdefault("memories_duplicate_skipped", 0)
                 self.data.setdefault("memories_failed", 0)
+                self.data.setdefault("chunks_failed", 0)
                 self.data.setdefault("embeddings_created", 0)
                 self.data.setdefault("embeddings_failed", 0)
                 self.data.setdefault("embeddings_total", 0)
@@ -1141,9 +1432,11 @@ class ImportState:
             "api_calls": 0,
             "memories_created": 0,
             "memories_merged": 0,
+            "memories_skipped": 0,
             "memories_duplicate_skipped": 0,
             "memories_raw": 0,
             "memories_failed": 0,
+            "chunks_failed": 0,
             "embeddings_created": 0,
             "embeddings_failed": 0,
             "embeddings_total": 0,
@@ -1168,7 +1461,7 @@ class ImportState:
 
     @property
     def can_resume(self) -> bool:
-        if self.data["status"] not in ("paused", "running"):
+        if self.data["status"] not in ("paused", "running", "error", "partial"):
             return False
         if self.data.get("import_format") == "operit":
             return self.data.get("operit_phase") != "completed"
@@ -1349,6 +1642,8 @@ class ImportEngine:
         self._job_guard = threading.Lock()
         self._chunks: list[dict] = []
         self._seen_import_hashes: set[str] = set()
+        self._exact_content_hashes: set[str] | None = None
+        self._exact_content_buckets: dict[str, list[dict]] | None = None
         self._source_file = ""
         self._source_hash_value = ""
         self._state_lock: asyncio.Lock | None = None
@@ -1399,7 +1694,26 @@ class ImportEngine:
             if self._active_job_id:
                 status["job_id"] = self._active_job_id
                 status["status"] = "running"
+        status["diagnostics"] = diagnose_import_errors(status.get("errors", []))
         return status
+
+    def _record_start_error(
+        self,
+        *,
+        job_id: str,
+        filename: str,
+        message: str,
+        keep_progress: bool,
+    ) -> dict:
+        """Persist a terminal error that occurs before chunk processing."""
+
+        if not keep_progress:
+            self.state.reset(filename, "", 0, job_id=job_id)
+        self.state.data["status"] = "error"
+        self.state.data["job_id"] = job_id
+        self._append_import_error_once(message)
+        self.state.save()
+        return {**self.state.to_dict(), "error": message}
 
     async def start(
         self,
@@ -1432,6 +1746,7 @@ class ImportEngine:
 
         keep_chunks_for_pause = False
         current_job_is_operit = False
+        state_initialized = False
         try:
             self._seen_import_hashes = set()
             self._state_lock = asyncio.Lock()
@@ -1464,15 +1779,9 @@ class ImportEngine:
                     tagging_enabled=tagging_enabled,
                 )
 
-            # 预检：LLM API 必须可用，否则所有 chunk 都会静默失败。
-            # 该检查必须在 reservation 的 try/finally 内，失败时也要释放槽位。
-            if not self.dehydrator.api_available:
-                return {
-                    "error": "LLM API 未配置或不可用，导入需要 OMBRE_COMPRESS_API_KEY。请检查 config.yaml 或环境变量。",
-                    "job_id": job_id,
-                }
-
             _human = effective_human_name(self.config, default="用户")
+            resume_state_loaded = bool(resume and self.state.load())
+            state_initialized = resume_state_loaded
             # source_hash 必须把 human_label 也算进去：chunk_turns() 把它拼进每一行
             # 再数 token，边界完全由它决定。只按 raw_content 算哈希的话，暂停期间
             # config.yaml 的 human 字段被改过，恢复时会重新切出一份不同的 chunk
@@ -1490,13 +1799,28 @@ class ImportEngine:
                 self.chunk_target_tokens,
                 tuple(sorted(self.import_user_labels)),
                 tuple(sorted(self.import_assistant_labels)),
+                normalized_mode == "auto",
             )
             raw_content = ""
             self._source_file = str(filename or "upload").strip() or "upload"
             self._source_hash_value = source_hash
+            direct_import = bool(
+                prepared_chunks and "direct_item" in prepared_chunks[0]
+            )
+
+            if not direct_import and not self.dehydrator.api_available:
+                return self._record_start_error(
+                    job_id=job_id,
+                    filename=filename,
+                    message=(
+                        "LLM API 未配置或不可用，历史对话导入需要 "
+                        "OMBRE_COMPRESS_API_KEY。请检查 config.yaml 或环境变量。"
+                    ),
+                    keep_progress=resume_state_loaded,
+                )
 
             # Check for resume
-            if resume and self.state.load() and self.state.can_resume:
+            if resume_state_loaded and self.state.can_resume:
                 if self.state.data["source_hash"] == source_hash:
                     stored_hashes = self.state.data.get("_seen_content_hashes", [])
                     self._seen_import_hashes = {
@@ -1531,16 +1855,20 @@ class ImportEngine:
             self._seen_import_hashes = set()
             self._chunks = prepared_chunks
             if turns_count == 0:
-                return {
-                    "error": "No conversation turns found in file",
-                    "job_id": job_id,
-                }
+                return self._record_start_error(
+                    job_id=job_id,
+                    filename=filename,
+                    message="文件中没有可导入的对话轮次",
+                    keep_progress=False,
+                )
 
             if not self._chunks:
-                return {
-                    "error": "No processable chunks after splitting",
-                    "job_id": job_id,
-                }
+                return self._record_start_error(
+                    job_id=job_id,
+                    filename=filename,
+                    message="分块后没有可处理内容",
+                    keep_progress=False,
+                )
 
             self.state.reset(
                 filename,
@@ -1548,6 +1876,7 @@ class ImportEngine:
                 len(self._chunks),
                 job_id=job_id,
             )
+            state_initialized = True
             self.state.save()
 
             logger.info(f"Starting import: {turns_count} turns → {len(self._chunks)} chunks")
@@ -1573,14 +1902,21 @@ class ImportEngine:
             keep_chunks_for_pause = resumable_operit
             raise
         except Exception as e:
+            if not state_initialized and not current_job_is_operit:
+                self.state.reset(filename, "", 0, job_id=job_id)
             self.state.data["status"] = "error"
             self.state.data["job_id"] = job_id
-            self.state.data["errors"].append(str(e))
+            self._append_import_error_once(
+                f"导入准备失败（{type(e).__name__}）："
+                f"{_safe_import_error_detail(e)}"
+            )
             self.state.save()
             raise
         finally:
             if not keep_chunks_for_pause:
                 self._chunks.clear()
+            self._exact_content_hashes = None
+            self._exact_content_buckets = None
             self.release_start_reservation(job_id)
 
     async def _start_operit_import(
@@ -2162,6 +2498,16 @@ class ImportEngine:
         if message not in errors and len(errors) < _STATE_ERR_LOG_MAX:
             errors.append(message)
 
+    def _increment_skip(self) -> None:
+        """Keep the P0luz and compatibility counter names in sync."""
+
+        self.state.data["memories_skipped"] = int(
+            self.state.data.get("memories_skipped", 0)
+        ) + 1
+        self.state.data["memories_duplicate_skipped"] = int(
+            self.state.data.get("memories_duplicate_skipped", 0)
+        ) + 1
+
     @staticmethod
     def _operit_bucket_id(entry: dict, entry_index: int) -> str:
         raw_uuid = str(entry.get("uuid") or "").strip().lower()
@@ -2215,6 +2561,7 @@ class ImportEngine:
     async def _process_chunks(self, preserve_raw: bool) -> dict:
         """Process chunks from current position."""
         start_idx = self.state.data["processed"]
+        await self._prime_exact_content_hashes()
 
         for i in range(start_idx, len(self._chunks)):
             if self._paused:
@@ -2237,24 +2584,147 @@ class ImportEngine:
                     }
                 )
             try:
-                await self._process_single_chunk(chunk, preserve_raw)
+                chunk_ok = await self._process_single_chunk(chunk, preserve_raw)
             except Exception as e:
-                err_msg = f"Chunk {i}: {str(e)[:_CHUNK_ERR_PREVIEW]}"
-                logger.warning(f"Import chunk error: {err_msg}")
-                if len(self.state.data["errors"]) < _STATE_ERR_LOG_MAX:
-                    self.state.data["errors"].append(err_msg)
+                chunk_ok = False
+                err_msg = f"分块 {i} 处理失败（{type(e).__name__}）"
+                logger.warning(
+                    "Import chunk failed: index=%s err_type=%s detail=hidden",
+                    i,
+                    type(e).__name__,
+                )
+                self._append_import_error_once(err_msg)
+            if not chunk_ok:
+                self.state.data["chunks_failed"] = int(
+                    self.state.data.get("chunks_failed", 0)
+                ) + 1
 
             self.state.data["processed"] = i + 1
             # Save progress every chunk
             self.state.save()
 
-        self.state.data["status"] = "completed"
+        failed_chunks = int(self.state.data.get("chunks_failed", 0))
+        if failed_chunks:
+            has_success = (
+                int(self.state.data.get("memories_created", 0)) > 0
+                or int(self.state.data.get("memories_merged", 0)) > 0
+                or failed_chunks < int(self.state.data.get("processed", 0))
+            )
+            self.state.data["status"] = "partial" if has_success else "error"
+        else:
+            self.state.data["status"] = "completed"
         self.state.save()
         logger.info(
-            f"Import completed: {self.state.data['memories_created']} created, "
-            f"{self.state.data['memories_merged']} merged"
+            "Import finished: status=%s created=%s merged=%s skipped=%s "
+            "failed_chunks=%s",
+            self.state.data["status"],
+            self.state.data["memories_created"],
+            self.state.data["memories_merged"],
+            self.state.data["memories_skipped"],
+            failed_chunks,
         )
         return self.state.to_dict()
+
+    def _content_digest(self, content: str) -> str:
+        """Compute an exact digest using BucketManager's text normalization."""
+
+        sanitizer = getattr(self.bucket_mgr, "_sanitize_text", None)
+        normalized = (
+            str(cast(Callable[[str], object], sanitizer)(content))
+            if callable(sanitizer)
+            else str(content)
+        )
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+    async def _prime_exact_content_hashes(self) -> None:
+        """Scan active buckets once per import job for exact deduplication."""
+
+        if self._exact_content_hashes is not None:
+            return
+        list_all = getattr(self.bucket_mgr, "list_all", None)
+        if not callable(list_all):
+            return
+        try:
+            list_all_fn = cast(
+                Callable[..., Awaitable[object]],
+                list_all,
+            )
+            buckets = await list_all_fn(include_archive=False)
+            if not isinstance(buckets, list):
+                return
+            hashes: set[str] = set()
+            by_digest: dict[str, list[dict]] = {}
+            for bucket in buckets:
+                if not isinstance(bucket, dict):
+                    continue
+                metadata = bucket.get("metadata", {})
+                if isinstance(metadata, dict) and metadata.get("deleted_at"):
+                    continue
+                digest = self._content_digest(str(bucket.get("content", "")))
+                hashes.add(digest)
+                by_digest.setdefault(digest, []).append(bucket)
+            self._exact_content_hashes = hashes
+            self._exact_content_buckets = by_digest
+        except Exception as exc:
+            logger.warning(
+                "[import] exact-content index unavailable; using per-item checks: "
+                "err_type=%s detail=hidden",
+                type(exc).__name__,
+            )
+
+    async def _find_exact_duplicate(self, item: dict) -> dict | None:
+        content = str(item.get("content") or "")
+        source_hash = str(item.get("import_source_hash") or "")
+        digest = self._content_digest(content)
+        if self._exact_content_buckets is not None:
+            for bucket in self._exact_content_buckets.get(digest, []):
+                if self._duplicate_match_allowed(bucket, source_hash):
+                    return bucket
+            return None
+
+        exact_finder = getattr(self.bucket_mgr, "find_exact_content", None)
+        if callable(exact_finder):
+            try:
+                duplicate = exact_finder(content, domain_filter=None)
+                if inspect.isawaitable(duplicate):
+                    duplicate = await duplicate
+                if isinstance(duplicate, dict) and self._duplicate_match_allowed(
+                    duplicate,
+                    source_hash,
+                ):
+                    return duplicate
+            except Exception as exc:
+                logger.warning(
+                    "[import] exact duplicate check unavailable; continuing: "
+                    "err_type=%s detail=hidden",
+                    type(exc).__name__,
+                )
+        return None
+
+    def _remember_exact_item(self, bucket_id: str, item: dict) -> None:
+        if self._exact_content_hashes is None:
+            return
+        digest = self._content_digest(str(item.get("content") or ""))
+        self._exact_content_hashes.add(digest)
+        if self._exact_content_buckets is not None:
+            self._exact_content_buckets.setdefault(digest, []).append(
+                {
+                    "id": bucket_id,
+                    "content": str(item.get("content") or ""),
+                    "metadata": self._extra_metadata_for_item(item),
+                }
+            )
+
+    async def _create_import_item_if_new(self, item: dict) -> bool:
+        """Create an imported bucket unless an allowed exact duplicate exists."""
+
+        duplicate = await self._find_exact_duplicate(item)
+        if duplicate is not None:
+            await self._record_duplicate_provenance(duplicate, item)
+            return False
+        bucket_id = await self._create_import_bucket(item)
+        self._remember_exact_item(bucket_id, item)
+        return True
 
     async def _create_import_bucket(self, item: dict) -> str:
         """Create one imported memory under the ordinary high quota."""
@@ -2284,6 +2754,9 @@ class ImportEngine:
                 arousal=item.get("arousal", _DEFAULT_AROUSAL),
                 name=item.get("name") or None,
                 source="import",
+                source_tool="import",
+                event_actor="human",
+                imported=True,
                 date=event_date or None,
                 extra_metadata=extra_metadata,
                 defer_derived_index=defer_derived_index,
@@ -2308,148 +2781,108 @@ class ImportEngine:
             return bucket_id
         return await create(requested_importance)
 
-    async def _process_single_chunk(self, chunk: dict, preserve_raw: bool):
-        """Extract memories from a single chunk and store them."""
-        content = chunk["content"]
-        if not content.strip():
-            return
+    async def _process_single_chunk(self, chunk: dict, preserve_raw: bool) -> bool:
+        """Extract memories from one chunk and durably store each item."""
 
-        # --- LLM extraction ---
-        try:
-            items = await self._extract_memories(content)
-            self.state.data["api_calls"] += 1
-        except Exception as e:
-            err_msg = f"LLM extraction failed: {e}"
-            logger.warning(err_msg)
-            self.state.data["api_calls"] += 1
-            # 把 LLM 失败原因写入 state.errors，让 /api/import/status 可见
-            if len(self.state.data["errors"]) < _STATE_ERR_LOG_MAX:
-                self.state.data["errors"].append(err_msg)
-            return
+        direct_item = chunk.get("direct_item")
+        items: list[dict] | None = (
+            [direct_item] if isinstance(direct_item, dict) else None
+        )
+        source_content = (
+            str(direct_item.get("content") or "")
+            if isinstance(direct_item, dict)
+            else str(chunk.get("content") or "")
+        )
+        if not source_content.strip():
+            return True
+
+        if items is None:
+            extraction_content = str(
+                chunk.get("llm_content") or source_content
+            )
+            try:
+                items = await self._extract_memories(extraction_content)
+                self.state.data["api_calls"] += 1
+            except Exception as exc:
+                err_msg = (
+                    f"LLM 提取失败（{type(exc).__name__}）："
+                    f"{_safe_import_error_detail(exc)}"
+                )
+                logger.warning(
+                    "Import extraction failed: err_type=%s detail=hidden",
+                    type(exc).__name__,
+                )
+                self.state.data["api_calls"] += 1
+                self._append_import_error_once(err_msg)
+                return False
 
         if not items:
-            return
+            return True
 
         items = self._dedupe_extracted_items(items)
         if not items:
-            return
+            return True
 
-        # --- Store each extracted memory ---
         source_metadata = self._source_metadata_for_chunk(chunk)
-        for item in items:
+        chunk_ok = True
+        for extracted_item in items:
+            item = {**extracted_item, **source_metadata}
             try:
-                item = {**item, **source_metadata}
-                should_preserve = preserve_raw or item.get("preserve_raw", False)
-
-                if should_preserve:
-                    # preserve_raw 桶不走 _merge_or_create_item 的查重（原文必须逐字
-                    # 保留，不能被 LLM 摘要合并）；但进度只在整个 chunk 处理完才落盘
-                    # （_process_chunks 里 processed=i+1），崩溃重启后同一个 chunk 会
-                    # 从头重新提取一遍，之前已经落盘的 preserve_raw 条目就会被原样
-                    # 再建一份。这里用精确内容匹配挡掉重复——preserve_raw 的定义就是
-                    # 「逐字原文」，完全相同的正文已经存在就是同一条，不是新记忆。
-                    exact_finder = getattr(self.bucket_mgr, "find_exact_content", None)
-                    if callable(exact_finder):
-                        try:
-                            exact_match = exact_finder(
-                                item["content"],
-                                domain_filter=item.get("domain") or None,
-                            )
-                            if isinstance(exact_match, dict) and self._duplicate_match_allowed(
-                                exact_match,
-                                str(item.get("import_source_hash") or ""),
-                            ):
-                                await self._record_duplicate_provenance(
-                                    exact_match,
-                                    item,
-                                )
-                                self.state.data["memories_duplicate_skipped"] += 1
-                                self._mark_import_item_seen(item)
-                                continue
-                        except Exception as exc:
-                            logger.warning(
-                                f"[import] preserve_raw duplicate check failed, "
-                                f"proceeding to store: {exc}"
-                            )
-                    duplicate = await self._find_duplicate_bucket(
-                        item["content"],
-                        source_hash=str(item.get("import_source_hash") or ""),
-                    )
-                    if duplicate:
-                        await self._record_duplicate_provenance(duplicate, item)
-                        self.state.data["memories_duplicate_skipped"] += 1
-                        self._mark_import_item_seen(item)
-                        continue
-                    # Raw mode: store original content without summarization
-                    await self._create_import_bucket(item)
-                    self.state.data["memories_raw"] += 1
-                    self.state.data["memories_created"] += 1
-                else:
-                    if self.auto_merge_enabled and await self._merge_or_create_item(
+                should_preserve = preserve_raw or bool(
+                    item.get("preserve_raw", False)
+                )
+                if (
+                    not should_preserve
+                    and self.auto_merge_enabled
+                    and await self._merge_or_create_item(
                         item,
                         create_if_missing=False,
-                    ):
-                        self.state.data["memories_merged"] += 1
-                    else:
-                        duplicate = await self._find_duplicate_bucket(
-                            item["content"],
-                            source_hash=str(item.get("import_source_hash") or ""),
-                        )
-                        if duplicate:
-                            await self._record_duplicate_provenance(duplicate, item)
-                            self.state.data["memories_duplicate_skipped"] += 1
-                            self._mark_import_item_seen(item)
-                            continue
-                        await self._create_import_bucket(item)
-                        self.state.data["memories_created"] += 1
-
+                    )
+                ):
+                    self.state.data["memories_merged"] += 1
+                else:
+                    created = await self._create_import_item_if_new(item)
+                    if not created:
+                        self._increment_skip()
+                        self._mark_import_item_seen(item)
+                        continue
+                    self.state.data["memories_created"] += 1
+                    if should_preserve:
+                        self.state.data["memories_raw"] += 1
                 self._mark_import_item_seen(item)
-
-                # Patch timestamp if available
-                if chunk.get("timestamp_start"):
-                    # We don't have update support for created, so skip
-                    pass
-
-            except Exception as e:
-                err_msg = f"Failed to store memory {item.get('name', '?')!r}: {e}"
-                logger.warning(err_msg)
-                # 不记 state.errors 的话，/api/import/status 只会看到
-                # memories_created/merged 计数比 api_calls 少，却查不出为什么——
-                # LLM 提取失败已经在记了，存储失败没道理不记。
-                if len(self.state.data["errors"]) < _STATE_ERR_LOG_MAX:
-                    self.state.data["errors"].append(err_msg[:_CHUNK_ERR_PREVIEW])
+            except Exception as exc:
+                chunk_ok = False
+                err_msg = (
+                    f"记忆存储失败（{type(exc).__name__}）："
+                    f"{_safe_import_error_detail(exc)}"
+                )
+                logger.warning(
+                    "Import memory store failed: err_type=%s detail=hidden",
+                    type(exc).__name__,
+                )
+                self._append_import_error_once(err_msg)
                 self.state.data["memories_failed"] += 1
+        return chunk_ok
 
     async def _extract_memories(self, chunk_content: str) -> list[dict]:
         """Use LLM to extract memories from a conversation chunk."""
         if not self.dehydrator.api_available:
             raise RuntimeError("API not available")
 
-        prompt = (
-            f"{IMPORT_EXTRACT_PROMPT}\n\n"
-            f"本次身份：记忆主体是 {self.ai_name}；对方是 "
-            f"{self.user_display_name}。输入角色标签 [AI] 指 "
-            f"{self.ai_name}；[{self.user_display_name}] 指 "
-            f"{self.user_display_name}。"
-        )
-
-        trimmed_content = (
-            chunk_content[: self.extract_max_input_chars]
-            if self.extract_max_input_chars > 0
-            else chunk_content
-        )
-        total_tokens = count_tokens_approx(trimmed_content)
+        prompt = IMPORT_EXTRACT_PROMPT
+        if (
+            self.extract_max_input_chars > 0
+            and len(chunk_content) > self.extract_max_input_chars
+        ):
+            raise ValueError(
+                "分块超过配置的 extract_max_input_chars 上限，已拒绝截断："
+                f"({len(chunk_content)} > {self.extract_max_input_chars})"
+            )
+        total_tokens = count_tokens_approx(chunk_content)
         if total_tokens > _EXTRACT_TOKEN_CEILING:
-            # 按当前内容的字符/token 比例估算要保留的字符数，而不是死板的固定
-            # 字符上限——中英文混合内容每 token 对应的字符数差异很大。
-            ratio = len(trimmed_content) / max(1, total_tokens)
-            approx_chars = max(1, int(_EXTRACT_TOKEN_CEILING * ratio))
-            before_chars = len(trimmed_content)
-            trimmed_content = trimmed_content[:approx_chars]
-            logger.warning(
-                "[import] chunk content exceeds extraction token ceiling, truncating: "
-                f"{before_chars} chars (~{total_tokens} tokens) → "
-                f"{len(trimmed_content)} chars (~{count_tokens_approx(trimmed_content)} tokens)"
+            raise ValueError(
+                "分块超过提取 token 上限，已拒绝截断："
+                f"({total_tokens} > {_EXTRACT_TOKEN_CEILING})"
             )
 
         data_record = json.dumps(
@@ -2458,11 +2891,13 @@ class ImportEngine:
                 "provenance": "user_uploaded_history",
                 "instructions": False,
                 "may_call_tools": False,
-                "content_chars": len(trimmed_content),
+                "memory_subject_label": self.ai_name,
+                "human_label": self.user_display_name,
+                "content_chars": len(chunk_content),
                 "content_sha256": hashlib.sha256(
-                    trimmed_content.encode("utf-8")
+                    chunk_content.encode("utf-8")
                 ).hexdigest(),
-                "content": trimmed_content,
+                "content": chunk_content,
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -2489,25 +2924,47 @@ class ImportEngine:
     def _parse_extraction(
         raw: str,
         *,
-        max_items: int = 10,
+        max_items: int = _EXTRACT_MAX_ITEMS,
         max_tags: int = _TAGS_MAX,
         max_tag_chars: int = 32,
+        strict: bool = False,
     ) -> list[dict]:
         """Parse and validate LLM extraction result."""
         try:
             items = parse_first_json_value(raw)
-        except (TypeError, ValueError):
-            logger.warning(f"Import extraction JSON parse failed: {raw[:_PARSE_ERR_PREVIEW]}")
-            return []
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "Import extraction JSON parse failed: chars=%s sha256=%s",
+                len(raw),
+                hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+            )
+            raise ValueError("LLM extraction returned invalid JSON") from exc
 
         if not isinstance(items, list):
-            return []
+            raise ValueError("LLM extraction result must be a JSON array")
 
-        validated = []
-        for item in items[:max_items]:
-            if not isinstance(item, dict) or not item.get("content"):
+        validated: list[dict] = []
+        truncated = False
+        for index, item in enumerate(items):
+            valid_content = isinstance(item, dict) and bool(item.get("content"))
+            if strict:
+                valid_content = (
+                    valid_content
+                    and isinstance(item.get("content"), str)
+                    and bool(item["content"].strip())
+                )
+            if not valid_content:
+                if strict:
+                    raise ValueError(
+                        f"结构化记忆第 {index + 1} 项必须是含非空 content 的对象"
+                    )
                 continue
-            content = str(item["content"]).strip()
+            if len(validated) >= max_items:
+                truncated = True
+                break
+            content = str(item["content"])
+            if not strict:
+                content = content.strip()
             if not content:
                 continue
             importance = _clamp_importance(item)
@@ -2518,7 +2975,7 @@ class ImportEngine:
                 "content": content,
                 "domain": _clean_import_list(
                     item.get("domain"),
-                    max_items=2,
+                    max_items=_DOMAIN_MAX if strict else 2,
                     max_chars=16,
                     default=["未分类"],
                 ),
@@ -2538,6 +2995,12 @@ class ImportEngine:
                 ),
             })
 
+        if truncated:
+            logger.warning(
+                "Import extraction item cap applied: returned=%s accepted=%s",
+                len(items),
+                max_items,
+            )
         return validated
 
     def _dedupe_extracted_items(self, items: list[dict]) -> list[dict]:
@@ -2556,6 +3019,7 @@ class ImportEngine:
                     "Skipped duplicate import item in same run: %s",
                     item.get("name", "?"),
                 )
+                self._increment_skip()
                 continue
             pending_hashes.add(content_hash)
             deduped.append(item)

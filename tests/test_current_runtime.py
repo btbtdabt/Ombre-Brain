@@ -12,6 +12,7 @@ from current_runtime import (
     PROFILE_FACT_PROPOSAL_PROMPT_TEMPLATE,
     RuntimeCollaborators,
 )
+from ombrebrain.storage.source_store import SourceStore
 from tools.current import memory as current_memory
 from web.current_contract import CURRENT_REQUIRED_SERVICES, CurrentWebDependencies
 from web.current_services import CurrentServiceAdapters
@@ -151,6 +152,7 @@ def runtime(tmp_path: Path) -> RuntimeCollaborators:
         decay_engine=object(),
         embedding_engine=FakeEmbeddingEngine(tmp_path / "embeddings.db"),
         embedding_outbox=FakeEmbeddingOutbox(),
+        source_store=SourceStore(buckets_dir),
         import_engine=object(),
         logger=SimpleNamespace(warning=lambda *_args, **_kwargs: None),
     )
@@ -170,6 +172,7 @@ def test_runtime_maps_share_singleton_collaborators_and_callable_services(
         "decay_engine",
         "embedding_engine",
         "embedding_outbox",
+        "source_store",
         "darkroom_store",
         "dream_engine",
         "memory_edge_store",
@@ -180,6 +183,7 @@ def test_runtime_maps_share_singleton_collaborators_and_callable_services(
         "word_map_store",
         "raw_event_store",
         "reminder_store",
+        "letter_service",
         "reflection_engine",
         "persona_engine",
         "portrait_engine",

@@ -36,7 +36,11 @@ async def dispatch(content: str = "", items: Optional[list] = None) -> str:
         err = check_grow_items_payload(items)
         if err:
             return err
-        return await grow_items(items)
+        if content and content.strip():
+            err = check_grow_input_size(content)
+            if err:
+                return err
+        return await grow_items(items, source_content=content)
 
     if not content or not content.strip():
         return "内容为空，无法整理。"

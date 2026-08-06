@@ -23,6 +23,11 @@ merge_or_create，省一次 LLM 拆分调用。
 import asyncio
 import uuid
 
+try:
+    from errors import PublicToolError
+except ImportError:  # pragma: no cover - 包内导入兜底
+    from ...errors import PublicToolError  # type: ignore
+
 from .. import _runtime as rt
 from .._common import merge_or_create, check_duplicate_for, check_plan_resolution
 
@@ -32,8 +37,13 @@ async def grow_shortpath(content: str) -> str:
     try:
         analysis = await rt.dehydrator.analyze(content)
     except Exception as e:
-        raise RuntimeError(
-            f"API key 未配置或调用失败，打标无法完成，桶未创建。请检查 OMBRE_COMPRESS_API_KEY。（错误：{e}）"
+        rt.logger.error(
+            "grow short analysis failed: err_type=%s detail=hidden",
+            type(e).__name__,
+        )
+        raise PublicToolError(
+            "API key 未配置或调用失败，打标无法完成，桶未创建。"
+            "请检查 OMBRE_COMPRESS_API_KEY。"
         ) from e
     importance = analysis.get("importance", 5) if isinstance(analysis.get("importance"), int) else 5
     # iter 2.0：短路径也是一次 grow 调用 → 仍生成 batch_id，便于 dashboard 聚合，

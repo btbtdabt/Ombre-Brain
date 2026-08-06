@@ -55,6 +55,25 @@ class ErrorSpec:
     suggestion_en: str = ""
 
 
+class PublicToolError(RuntimeError):
+    """固定文案已确认可安全返回给 MCP 客户端的工具异常。
+
+    禁止把动态供应商异常正文放进 public_message。RuntimeError 基础消息保持
+    泛化，避免其他路径意外记录 ``str(exc)`` 时泄露客户端可见正文。
+    """
+
+    def __init__(self, public_message: str):
+        message = str(public_message).strip()
+        if (
+            not message
+            or len(message) > 500
+            or any(ord(char) < 32 for char in message)
+        ):
+            raise ValueError("公开工具错误文案必须是单行安全文本")
+        self.public_message = message
+        super().__init__("public tool error")
+
+
 # 注册表 —— 修改/新增请同时同步 rule.md §11
 ERROR_CODES: dict[str, ErrorSpec] = {
     # ---- Fatal：拒绝启动 ----
@@ -524,6 +543,7 @@ __all__ = [
     "push_warning",
     "pop_warnings",
     "format_warnings_suffix",
+    "PublicToolError",
     "OBStartupError",
     "write_fatal_log",
 ]

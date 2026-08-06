@@ -24,43 +24,42 @@ deployment:
 log_level: "INFO"
 
 # --- MCP remote auth / MCP 远程鉴权开关 ---
-# true  (默认): HTTPS 连接 /mcp 时强制走 OAuth 2.1 + PKCE（Claude.ai 网页版需要）。
-# false: 完全跳过 OAuth，任何客户端（自有前端 / GPT / GLM / 自定义脚本）可免认证直连 /mcp。
-# 把 OB 接进自己的前端、调用 MCP 工具被 OAuth 卡住时，设为 false 即可。
-# 也可用环境变量 OMBRE_MCP_REQUIRE_AUTH=false 覆盖（Docker 用户更方便，优先级最高）。
-# ⚠️ 关掉后请确保服务不直接暴露公网，或在反代层另加鉴权——否则任何人都能读写记忆。
-# true (default): force OAuth 2.1 + PKCE on HTTPS /mcp connections (required by claude.ai web).
-# false: skip OAuth entirely so any client (your own frontend / GPT / GLM / custom scripts)
-#        can hit /mcp without auth. Set this when integrating OB into your own frontend and
-#        OAuth blocks your MCP tool calls. Env var OMBRE_MCP_REQUIRE_AUTH=false also works.
-# ⚠️ When disabled, do not expose the service directly to the public internet without
-#    another auth layer at the reverse proxy — otherwise anyone can read/write memories.
+# true  (默认): HTTP(S) /mcp 必须鉴权；具体使用 OAuth、静态 Token 或共存模式由下项选择。
+# false: 完全跳过 OAuth，仅允许配合已确认的本机回环网络边界使用。
+# 第三方客户端不支持 OAuth 时优先选择下面的静态 Token 模式。
+# false 会按用户明确配置生效；非回环/未知边界会产生高风险诊断，但不会被静默改回 true。
+# Dashboard/向导保存非回环免鉴权配置仍要求显式风险确认。
+# true (default): require auth on HTTP(S) /mcp; select OAuth or static-token mode below.
+# false: skip MCP auth after restart. Prefer static-token mode for LAN/NAS/public access;
+#        open access lets every caller reaching /mcp read and write the memory vault.
 mcp_require_auth: true
 
 # --- MCP auth mode / MCP 鉴权模式（仅 mcp_require_auth: true 时生效）---
 # "oauth" (默认): 上面的 OAuth 2.1 + PKCE。
-# "token": 改用静态密钥鉴权，与 OAuth 互斥——选了 token 后 OAuth 的 discovery/register/
+# "hybrid": 保留 OAuth 动态注册，同时让 Bearer 也接受 mcp_token，适合同一实例服务两类客户端。
+# "token": 只使用静态密钥——选了 token 后 OAuth 的 discovery/register/
 #          authorize/token 路由全部 404。适合支持自定义请求头、但走不通浏览器 OAuth
 #          授权流程的第三方 MCP 客户端。密钥填在 mcp_token（或环境变量 OMBRE_MCP_TOKEN，
 #          优先级更高），也可用环境变量 OMBRE_MCP_AUTH_MODE=token 覆盖。
 # 调用方式：请求头 Authorization: Bearer <token> 或 Ombre-MCP-Token: <token>（不支持 URL 参数）。
 # "oauth" (default): OAuth 2.1 + PKCE above.
-# "token": switch to a static secret instead, mutually exclusive with OAuth — once selected,
+# "hybrid": keep OAuth/DCR and also accept the pre-shared static Bearer token.
+# "token": switch to a static secret only — once selected,
 #          the OAuth discovery/register/authorize/token routes all 404. Useful for third-party
 #          MCP clients that support custom headers but can't complete browser OAuth. Set the
 #          secret via mcp_token (or env var OMBRE_MCP_TOKEN, which takes priority); env var
 #          OMBRE_MCP_AUTH_MODE=token also works.
 # Send it via header Authorization: Bearer <token> or Ombre-MCP-Token: <token> (no URL param).
-# ⚠️ 无论选 oauth / token / 关闭，都不要把服务直接暴露公网——Token 泄露等同任何人可读写全部记忆。
-# ⚠️ Regardless of mode, never expose this service directly to the public internet — a leaked
-#    token is equivalent to open read/write access to all memories.
+# ⚠️ 静态 Token 泄露等同任何人可读写全部记忆；公网连接必须使用 HTTPS 并妥善保管凭据。
+# ⚠️ Public connections require HTTPS and carefully protected credentials; a leaked token is
+#    equivalent to open read/write access to all memories.
 mcp_auth_mode: "oauth"
 mcp_token: ""
 
 # --- HTTP hooks auth / HTTP 钩子鉴权 ---
 # /breath-hook and /dream-hook are protected by default.
-# They accept the Dashboard login cookie, or this token via:
-#   ?token=...
+# They accept the Dashboard login cookie, or this token via the
+# X-Ombre-Hook-Token / Authorization: Bearer request headers (no URL parameter).
 #   X-Ombre-Hook-Token: ...
 #   Authorization: Bearer ...
 # Set allow_public=true only behind another trusted auth layer.
@@ -112,6 +111,11 @@ dehydration:
   max_tokens: 1024
   temperature: 0.1
   timeout_seconds: 120             # LLM request timeout seconds / LLM 请求超时秒数
+  # OpenAI-compatible provider extensions / OpenAI 兼容服务商扩展参数
+  # DeepSeek thinking models can disable reasoning to preserve the output budget:
+  # extra_body:
+  #   thinking:
+  #     type: disabled
 
 # --- Decay parameters / 记忆衰减参数 ---
 # Simulates Ebbinghaus forgetting curve, auto-archives inactive memories
@@ -126,8 +130,7 @@ decay:
 
 # --- Embedding / 向量化配置 ---
 # 使用 OpenAI 兼容的云端 API（如 Gemini）进行向量化。
-# 需要在环境变量中设置 OMBRE_EMBED_API_KEY。旧部署的
-# OMBRE_EMBEDDING_API_KEY 仍作为兼容别名。
+# 需要在环境变量中设置 OMBRE_EMBED_API_KEY。
 embedding:
   enabled: true                   # Enable embedding / 启用向量化
   background_indexing: true       # Write Markdown first; index asynchronously / 先落盘，后台生成向量
@@ -185,7 +188,7 @@ limits:
   max_import_upload_bytes: 67108864  # 64MB conversation import request cap
   max_mcp_request_bytes: 4194304  # 4MB HTTP body cap for /mcp; 0 disables
   max_management_request_bytes: 4194304  # 4MB cap for Dashboard/OAuth mutations; large import routes use their own caps
-  max_grow_input_bytes: 2097152   # 2MB total grow source/items cap; 0 disables
+  max_grow_input_bytes: 2097152   # source 与 items 正文各 2MB；HTTP 总请求另有限制；0 关闭软上限
   max_query_bytes: 16384          # 16KB breath/letter query cap; 0 disables
   max_metadata_bytes: 16384       # combined tool metadata/filter cap; 0 disables
   max_grow_items: 100             # pre-split/digest item count cap; 0 disables

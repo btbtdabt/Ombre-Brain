@@ -164,7 +164,9 @@ def register(mcp) -> None:
                 logger.warning(f"[github] config.yaml 清空写入失败: {e}")
                 return JSONResponse({"ok": False, "error": f"配置写入磁盘失败，未清空：{e}"}, status_code=500)
             sh.github_sync_instance = None
-            sh.restart_github_auto_task(0)
+            restart_auto_task = sh.restart_github_auto_task
+            if restart_auto_task is not None:
+                restart_auto_task(0)
             sh.config["github_sync"] = gh_cfg
             return JSONResponse({
                 "ok": True,
@@ -214,11 +216,20 @@ def register(mcp) -> None:
                 repo=repo,
                 branch=branch,
                 path_prefix=path_prefix,
+                max_source_bytes=int(
+                    (sh.config.get("limits") or {}).get(
+                        "max_grow_input_bytes", 2 * 1024 * 1024
+                    )
+                ),
             )
-            sh.restart_github_auto_task(auto_interval)
+            restart_auto_task = sh.restart_github_auto_task
+            if restart_auto_task is not None:
+                restart_auto_task(auto_interval)
         else:
             sh.github_sync_instance = None
-            sh.restart_github_auto_task(0)
+            restart_auto_task = sh.restart_github_auto_task
+            if restart_auto_task is not None:
+                restart_auto_task(0)
         return JSONResponse({
             "ok": True,
             "message": "配置已保存",
@@ -232,9 +243,10 @@ def register(mcp) -> None:
         err = sh._require_auth(request)
         if err:
             return err
-        if sh.github_sync_instance is None:
+        github_sync = sh.github_sync_instance
+        if github_sync is None:
             return JSONResponse({"ok": False, "error": "尚未配置 GitHub 同步"}, status_code=400)
-        result = await sh.github_sync_instance.validate()
+        result = await github_sync.validate()
         return JSONResponse(result)
 
     @mcp.custom_route("/api/github/sync", methods=["POST"])
@@ -243,12 +255,13 @@ def register(mcp) -> None:
         err = sh._require_auth(request)
         if err:
             return err
-        if sh.github_sync_instance is None:
+        github_sync = sh.github_sync_instance
+        if github_sync is None:
             return JSONResponse({"ok": False, "error": "尚未配置 GitHub 同步，请先填写配置并保存"}, status_code=400)
         buckets_dir = sh.config.get("buckets_dir", "")
         if not buckets_dir:
             return JSONResponse({"ok": False, "error": "buckets_dir 未配置"}, status_code=500)
-        result = await sh.github_sync_instance.sync(buckets_dir)
+        result = await github_sync.sync(buckets_dir)
         return JSONResponse(result)
 
     @mcp.custom_route("/api/github/import", methods=["POST"])
@@ -262,7 +275,8 @@ def register(mcp) -> None:
         err = sh._require_auth(request)
         if err:
             return err
-        if sh.github_sync_instance is None:
+        github_sync = sh.github_sync_instance
+        if github_sync is None:
             return JSONResponse({"ok": False, "error": "尚未配置 GitHub 同步，请先填写配置并保存"}, status_code=400)
         buckets_dir = sh.config.get("buckets_dir", "")
         if not buckets_dir:
@@ -288,7 +302,7 @@ def register(mcp) -> None:
                     "backup_failed": True,
                 }, status_code=409)
             # 2) 从 GitHub 拉回。GitHubSync 内部再与定时 sync 共用同一把锁。
-            result = await sh.github_sync_instance.import_from_github(buckets_dir)
+            result = await github_sync.import_from_github(buckets_dir)
             result["pre_import_backup"] = backup
             # 3) 让 bucket_mgr 的 BM25 索引失效（导入直写磁盘，绕过了 bucket_mgr 的脏标记）
             try:

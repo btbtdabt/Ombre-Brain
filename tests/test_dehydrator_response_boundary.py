@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from dehydrator import DEHYDRATE_PROMPT, Dehydrator
+from dehydrator import ANALYZE_PROMPT, DEHYDRATE_PROMPT, Dehydrator
 
 
 def _dehydrator(tmp_path) -> Dehydrator:
@@ -112,3 +112,21 @@ async def test_non_json_dehydration_result_falls_back_without_caching(
 def test_dehydration_prompt_forbids_comments_and_stance():
     assert "禁止附加自己的评论与立场" in DEHYDRATE_PROMPT
     assert "不得生成原文中不存在" in DEHYDRATE_PROMPT
+
+
+def test_analysis_prompt_and_parser_include_importance(tmp_path):
+    assert "importance（重要度）：1~10 的整数" in ANALYZE_PROMPT
+    assert '"importance": 5' in ANALYZE_PROMPT
+
+    dehydrator = _dehydrator(tmp_path)
+    parsed = dehydrator._parse_analysis(json.dumps({
+        "domain": ["工作"],
+        "valence": 0.6,
+        "arousal": 0.4,
+        "tags": ["承诺"],
+        "suggested_name": "项目承诺",
+        "importance": 8,
+    }, ensure_ascii=False))
+    dehydrator._cache_conn.close()
+
+    assert parsed["importance"] == 8

@@ -72,6 +72,30 @@ async def test_grow_accepts_p0_pre_split_items_without_rewriting(
 
 
 @pytest.mark.asyncio
+async def test_canonical_grow_preserves_shared_source_evidence(
+    current_runtime,
+) -> None:
+    source = "第一行背景\n第二行是需要核对的原话"
+
+    result = await current.grow(
+        content=source,
+        items=[
+            {
+                "title": "原话证据",
+                "content": "Amy 记住了这句原话。",
+                "source_ranges": [[2, 2]],
+            }
+        ],
+    )
+
+    assert "1条(预拆分·逐字)|新1合0" in result
+    bucket = (await current_runtime["bucket_mgr"].list_all())[0]
+    source_refs = bucket["metadata"]["source_refs"]
+    assert source_refs[0]["ref"].startswith("src_")
+    assert source_refs[0]["ranges"] == [[2, 2]]
+
+
+@pytest.mark.asyncio
 async def test_trace_combines_current_date_anchor_with_p0_metadata(
     current_runtime,
 ) -> None:

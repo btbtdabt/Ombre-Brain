@@ -329,6 +329,59 @@ async def test_284_docker_code_dir_uses_image_lock_and_updates_without_pip(
 
 
 @pytest.mark.asyncio
+async def test_legacy_runtime_without_lock_updates_when_installed_versions_match(
+    monkeypatch, tmp_path
+):
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "frontend").mkdir()
+    (repo / "src" / "server.py").write_text("OLD_VALUE = 1\n", encoding="utf-8")
+    (repo / "frontend" / "app.js").write_text("// old\n", encoding="utf-8")
+    (repo / "VERSION").write_text("2.8.8\n", encoding="utf-8")
+    (repo / "src" / "VERSION").write_text("2.8.8\n", encoding="utf-8")
+    lock = "package==1 \\\n+    --hash=sha256:" + "a" * 64 + "\n"
+
+    handler = _handler(monkeypatch)
+    monkeypatch.setattr(sh, "repo_root", str(repo))
+    monkeypatch.setattr(sh, "version", "2.8.8")
+    monkeypatch.setattr(sh, "in_docker", lambda: False)
+    monkeypatch.delenv("OMBRE_IMAGE_ROOT", raising=False)
+    monkeypatch.delenv("OMBRE_UPDATE_ALLOW_PIP", raising=False)
+    monkeypatch.setattr(
+        meta, "_runtime_satisfies_locked_versions", lambda data: data == lock.encode().strip()
+    )
+
+    async def fake_download(_client, _url, destination):
+        await asyncio.to_thread(
+            _write_release_zip,
+            destination,
+            version="2.8.13\n",
+            requirements="package>=1\n",
+            requirements_lock=lock,
+        )
+        return os.path.getsize(destination)
+
+    def unexpected_install(*_args, **_kwargs):
+        raise AssertionError("运行环境已满足 lock 时不应执行 pip 安装")
+
+    restarted = threading.Event()
+    monkeypatch.setattr(meta, "_download_update_archive_to_file", fake_download)
+    monkeypatch.setattr(meta, "_install_update_requirements", unexpected_install)
+    monkeypatch.setattr(meta, "_restart_self", restarted.set)
+
+    response = await handler(object())
+    events = "".join(await _consume(response))
+
+    assert "data: RESTART" in events
+    assert "ERROR:" not in events
+    assert (repo / "requirements.lock.txt").read_text(encoding="utf-8") == lock
+    assert (repo / "requirements.txt").read_text(encoding="utf-8") == "package>=1\n"
+    assert (repo / "VERSION").read_text(encoding="utf-8") == "2.8.13\n"
+    assert await asyncio.to_thread(restarted.wait, 2)
+    assert not meta._UPDATE_JOB_LOCK.locked()
+
+
+@pytest.mark.asyncio
 async def test_changed_release_lock_with_pip_disabled_rolls_back_everything(
     monkeypatch, tmp_path
 ):

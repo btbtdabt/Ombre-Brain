@@ -170,6 +170,7 @@ def test_dependency_check_without_any_baseline_remains_fail_closed(
 ):
     monkeypatch.delenv("OMBRE_IMAGE_ROOT", raising=False)
     monkeypatch.setattr(sh, "in_docker", lambda: False)
+    monkeypatch.setattr(meta, "_runtime_satisfies_locked_versions", lambda _data: False)
 
     assert meta._requirements_changed(
         str(tmp_path), b"new-package==1\n", b"new-package==1 --hash=sha256:abc\n"
@@ -184,12 +185,136 @@ def test_new_lock_never_falls_back_to_matching_source_without_lock_baseline(
 ):
     monkeypatch.delenv("OMBRE_IMAGE_ROOT", raising=False)
     monkeypatch.setattr(sh, "in_docker", lambda: False)
+    monkeypatch.setattr(meta, "_runtime_satisfies_locked_versions", lambda _data: False)
     source = b"package>=1\n"
     (tmp_path / "requirements.txt").write_bytes(source)
 
     assert meta._requirements_changed(
         str(tmp_path), source, b"package==1 --hash=sha256:abc\n"
     ) is True
+
+
+def test_missing_lock_baseline_accepts_exactly_satisfied_runtime(monkeypatch, tmp_path):
+    monkeypatch.delenv("OMBRE_IMAGE_ROOT", raising=False)
+    monkeypatch.setattr(sh, "in_docker", lambda: False)
+    checked = []
+
+    def satisfied(data):
+        checked.append(data)
+        return True
+
+    monkeypatch.setattr(meta, "_runtime_satisfies_locked_versions", satisfied)
+    lock = b"package==1 \\\n    --hash=sha256:" + b"a" * 64 + b"\n"
+
+    assert meta._requirements_changed(str(tmp_path), None, lock) is False
+    assert checked == [meta._normalize_dependency_manifest(lock)]
+
+
+def test_changed_lock_remains_changed_even_if_runtime_probe_would_pass(
+    monkeypatch, tmp_path
+):
+    (tmp_path / "requirements.lock.txt").write_bytes(b"package==1\n")
+
+    def unexpected_probe(_data):
+        raise AssertionError("已有 lock 不同属于真实迁移，不应走缺基线兼容探测")
+
+    monkeypatch.setattr(meta, "_runtime_satisfies_locked_versions", unexpected_probe)
+
+    assert meta._requirements_changed(
+        str(tmp_path), None, b"package==2 --hash=sha256:" + b"b" * 64 + b"\n"
+    ) is True
+
+
+def test_runtime_lock_probe_is_local_read_only_and_cleans_temp_file(
+    monkeypatch, tmp_path
+):
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        requirement_path = Path(command[-1])
+        captured["path"] = requirement_path
+        captured["content"] = requirement_path.read_bytes()
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    lock = b"package==1 \\\n    --hash=sha256:" + b"c" * 64 + b"\n"
+
+    assert meta._runtime_satisfies_locked_versions(lock) is True
+    command = captured["command"]
+    assert "--dry-run" in command
+    assert "--no-index" in command
+    assert "--no-deps" in command
+    assert "--require-hashes" in command
+    assert "--no-cache-dir" in command
+    assert captured["kwargs"]["timeout"] == 60
+    assert captured["content"] == lock
+    assert not captured["path"].exists()
+
+
+def test_runtime_lock_probe_accepts_repository_release_lock_syntax(monkeypatch):
+    repo_root = Path(meta.__file__).resolve().parents[2]
+    captured = {}
+
+    def fake_run(command, **_kwargs):
+        captured["content"] = Path(command[-1]).read_bytes()
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    lock = (repo_root / "requirements.lock.txt").read_bytes()
+
+    assert meta._runtime_satisfies_locked_versions(lock) is True
+    assert b"mcp==1.28.1" in captured["content"]
+
+
+def test_runtime_lock_probe_nonzero_result_fails_closed_and_cleans_temp(
+    monkeypatch,
+):
+    captured = {}
+
+    def fake_run(command, **_kwargs):
+        captured["path"] = Path(command[-1])
+        return subprocess.CompletedProcess(command, 1)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    lock = b"package==1 \\\n    --hash=sha256:" + b"e" * 64 + b"\n"
+
+    assert meta._runtime_satisfies_locked_versions(lock) is False
+    assert not captured["path"].exists()
+
+
+def test_runtime_lock_probe_timeout_and_invalid_utf8_fail_closed(monkeypatch):
+    captured = {}
+
+    def timeout(command, **_kwargs):
+        captured["path"] = Path(command[-1])
+        raise subprocess.TimeoutExpired(command, 60)
+
+    monkeypatch.setattr(subprocess, "run", timeout)
+    lock = b"package==1 \\\n    --hash=sha256:" + b"f" * 64 + b"\n"
+
+    assert meta._runtime_satisfies_locked_versions(lock) is False
+    assert not captured["path"].exists()
+    assert meta._runtime_satisfies_locked_versions(b"package==1\n\xff") is False
+
+
+@pytest.mark.parametrize(
+    "lock",
+    [
+        b"--index-url=https://attacker.invalid/simple\npackage==1\n",
+        b"package @ https://attacker.invalid/package.whl#sha256=abc\n",
+        b"-e ../local-package\n",
+        b"package==1\n",
+        b"package>=1 --hash=sha256:" + b"d" * 64 + b"\n",
+    ],
+)
+def test_runtime_lock_probe_rejects_unsafe_or_unhashed_syntax(monkeypatch, lock):
+    def unexpected_run(*_args, **_kwargs):
+        raise AssertionError("不安全 lock 不能交给 pip 解析")
+
+    monkeypatch.setattr(subprocess, "run", unexpected_run)
+    assert meta._runtime_satisfies_locked_versions(lock) is False
 
 
 def test_lock_install_enforces_hashes(monkeypatch, tmp_path):

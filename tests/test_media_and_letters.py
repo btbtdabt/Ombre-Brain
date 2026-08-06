@@ -194,6 +194,45 @@ def test_letters_are_isolated_and_preserve_author_semantics(tmp_path: Path) -> N
     assert "from nova" in asyncio.run(letters.read(author="Nova"))
 
 
+def test_letter_service_create_preserves_canonical_source_and_actor(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    manager = BucketManager(config)
+    letters = LetterService(config, manager, EmbeddingEngine(config))
+
+    bucket_id, author = asyncio.run(
+        letters.create(
+            author="ai",
+            content="dashboard and MCP share this storage contract",
+            title="Shared\ncontract",
+            ai_name="Nocturne",
+            event_actor="human",
+        )
+    )
+    bucket = asyncio.run(manager.get(bucket_id))
+    event = list(manager.ledger_mirror.iter_events())[-1]
+
+    assert author == "Nocturne"
+    assert bucket is not None
+    assert bucket["metadata"]["source"] == "letter"
+    assert bucket["metadata"]["source_tool"] == "letter"
+    assert bucket["metadata"]["author"] == "Nocturne"
+    assert bucket["metadata"]["title"] == "Shared contract"
+    assert event["payload"]["event_actor"] == "human"
+
+
+def test_letter_write_rejects_overlong_title_without_creating_bucket(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    manager = BucketManager(config)
+    letters = LetterService(config, manager, EmbeddingEngine(config))
+
+    result = asyncio.run(
+        letters.write(author="Amy", content="正文", title="长" * 121)
+    )
+
+    assert "120" in result
+    assert asyncio.run(manager.list_letters()) == []
+
+
 def test_letter_read_falls_back_to_lexical_when_global_vector_hits_are_not_letters(
     tmp_path: Path,
 ) -> None:

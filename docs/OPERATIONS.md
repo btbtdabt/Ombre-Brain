@@ -4,7 +4,7 @@
 
 首次登录后打开 `/onboarding`，只选择部署意图：
 
-- 本机：自己的设备或可信内网使用，OAuth 可关闭。
+- 本机：仅同一设备回环使用；默认保留鉴权，第三方客户端推荐静态 Token。
 - 公网安全：HTTPS 域名远程使用，OAuth 强制开启。
 - 高级：已有反向代理或外部鉴权时自行选择，系统仍持续报告风险。
 
@@ -14,11 +14,18 @@
 
 Docker/Zeabur 的持久卷统一挂载 `/app/buckets`，配置路径为 `/app/buckets/config.yaml`。Zeabur 从 GitHub 部署时只需添加模型 Key、挂载该卷、绑定 HTTPS 域名，再从向导选择“公网安全模式”。不要在平台中长期保留 `OMBRE_MCP_REQUIRE_AUTH` 或 `OMBRE_TRANSPORT`，除非明确希望平台覆盖 Dashboard。
 
+网络 MCP 关闭鉴权时，裸机由 `OMBRE_BIND_HOST` 表示进程监听地址，Docker 由 Compose 的宿主端口绑定决定，官方模板会把 `OMBRE_BIND_ADDRESS` 同步传入容器。OB 会诊断非回环、局域网/NAS 和未知 Docker 边界的匿名访问风险，但 2.11.1 起不再把明确的 `mcp_require_auth: false` 在内存中改回鉴权。Dashboard / 向导保存非回环免鉴权组合和内置 Tunnel 启动仍要求精确设置 `OMBRE_ALLOW_INSECURE_MCP=true`；直接由配置文件或平台环境变量关闭鉴权则由部署者自行保证外层边界。外部独立隧道无法由 OB 自动探测，应优先使用 OAuth 或静态 Token。
+
+`OMBRE_BIND_ADDRESS=127.0.0.1` 证明的是官方 Compose 的**宿主端口映射**不向局域网开放，不等于隔离同一 Docker 网络中的其他容器。免鉴权部署必须同时保证该容器网络没有不可信成员；多实例、自定义网络或无法确认的编排应使用 OAuth/静态 Token。
+
 这份文档说明 Ombre Brain 在断网、模型限流、外部编辑和备份恢复时真正保证什么。
 
 ## 数据边界
 
-- `buckets/**/*.md` 是记忆真源。写入成功以 Markdown 原子落盘为准。
+- `buckets/**/*.md` 是事件记忆真源。写入成功以 Markdown 原子落盘为准。
+- `_sources/src_<sha256>.source` 是结构化 `grow` 可选生成的不可变原文证据资产；它不参与普通浮现或索引，但不能从事件 Markdown 重新推导，备份时必须与桶共同保存。
+- GitHub 同步会把 `_sources` 原文明文提交到已配置仓库。它不是端到端加密备份；生产上应使用可信私有仓库并审计协作者权限，绝不能把包含私密对话的 path prefix 放进公开仓库。
+- 本地导出的 ZIP 同样是未加密的敏感资产；应加密保管或放入可信存储，并在传输后清理不再需要的临时副本。
 - `embeddings.db`、BM25 缓存和脱水缓存都是可重建的派生数据。
 - `.embedding_outbox.json` 只保存待索引 ID、内容哈希和重试状态，不复制记忆正文。
 - `config.yaml`、`.env`、API Key、OAuth/Tunnel token 不进入本地记忆导出包。
@@ -29,7 +36,9 @@ Docker/Zeabur 的持久卷统一挂载 `/app/buckets`，配置路径为 `/app/bu
 2. 连续 provider 故障会打开全局熔断，避免每条待办都重复撞击同一个故障端点；冷却后自动恢复，也可在 Dashboard 手动补齐。
 3. Obsidian、Git 或手工修改 Markdown 后，BucketManager 会按配置的轮询间隔发现文件集合/mtime/size 变化，刷新内存与 BM25，并只对正文变化重新排队向量。
 4. 本地导出对正在使用的 SQLite 调用 backup API，得到事务一致快照；不会直接复制可能处于 WAL 写入中的数据库文件。
-5. 新导出包含 `backup_manifest.json`，逐文件记录字节数与 SHA-256。恢复预检要求清单与 ZIP 内容完全一致。
+5. v2.10.1 起，新导出会同时包含 `buckets/*.md`、`sources/src_<sha256>.source` 和 `backup_manifest.json`，逐文件记录字节数与 SHA-256。恢复预检要求清单与 ZIP 内容完全一致，并校验证据文件名哈希、UTF-8、大小和路径。
+6. 迁移执行时先安装全部已校验证据，再写入引用它们的桶。v2.10.0 旧包缺证据时仍可恢复事件桶，但界面会明确提示这些原文不可核对，不会伪装成完整证据恢复。
+7. 当前版本创建的新本地/GitHub 备份会交叉检查桶的 `source_refs`；任一引用缺文件或格式非法时整次备份失败。GitHub 恢复先把全部远端 blob 暂存并验证，再安装全部证据，最后才覆盖 Markdown。
 
 清单只能发现残缺或意外篡改，不能证明备份由谁创建。需要来源认证时，应在可信存储或带签名的发布/备份系统中保管 ZIP。
 
@@ -60,9 +69,9 @@ python tools/check_buckets.py --json
 
 1. 在 Dashboard 导出完整记忆包，确认请求成功且文件非空。
 2. 准备一个全新的临时 vault/测试实例，不要直接覆盖唯一的生产目录。
-3. 在迁移页面上传 ZIP。新包应显示“备份清单与 SHA-256 校验通过”；旧包会显示“未验证”。
+3. 在迁移页面上传 ZIP。新包应显示“备份清单与 SHA-256 校验通过”；无清单旧包会显示“未验证”，有原文引用但缺证据的 v2.10.0 包会显示兼容性警告。
 4. 检查 bucket 数、冲突决策和 embedding 模型/维度，再执行导入。
-5. 导入完成后运行 `python tools/check_buckets.py`，并用 `breath(query=...)` 抽查可检索性。
+5. 导入完成后运行 `python tools/check_buckets.py`，并用 `breath_search(query=...)` 抽查可检索性；若测试包含原文证据，再用准确桶 ID + 标题调用一次 `source_read(scope="event")`，确认事件范围可读且未带出范围外文字。
 6. 确认 outbox 待处理数最终回到 0。模型离线时允许保持 pending，但 Markdown 必须完整可读。
 
 导入冲突的语义：
@@ -81,8 +90,10 @@ python tools/check_buckets.py --json
 | ZIP 上传被拒绝 | 本地 vault 未写入 | 按错误修复损坏、路径穿越、重复项或清单不一致，重新导出 |
 | SQLite quick_check 失败 | Markdown 真源通常仍在 | 先备份 Markdown，移走损坏的派生库，再重建向量；不要删除 Markdown |
 | outbox 长时间不下降 | 记忆正文仍安全 | 查看熔断状态、最近错误、Key/模型/维度和 provider 连通性 |
+| nginx 下输入正确 Dashboard 密码却提示密码错误 | v2.10.1 及更早版本会把代理返回的 HTML、空响应或网关错误统一回退为“密码错误” | 升级到 2.10.2+ 后按页面显示的真实类型处理；同时检查 `/auth/login` 状态码、下方完整 nginx 转发头和 `OMBRE_TRUSTED_PROXY_CIDRS`。若返回 200 但会话未建立，核对 `X-Forwarded-Proto` 与 `Set-Cookie` |
 | 编辑记忆、热更新或重启提示 `Cross-origin request rejected` | 写请求被来源防护拒绝，原数据未改动；这不是 CORS 缺失 | 优先手动升级到 2.7.1+；nginx 必须保留公网 authority，传入 `X-Forwarded-Proto: https`，并让应用精确信任最后一跳代理 CIDR。不要添加 CORS 头或改写浏览器 `Origin` |
 | Polaris 报 `Failed to fetch`，`/health` 为 200，但 `OPTIONS /mcp` 为 401 且无 CORS 头 | 2.8.1 及更早版本中 CORS 位于 MCP 鉴权内层，静态 Token 模式错误拦截了不携带 Token 的浏览器预检 | 升级到 2.8.2+ 并重建/重启服务；确认预检返回 200，且响应包含 `Access-Control-Allow-Origin`、允许 `POST` 和客户端使用的 Token 请求头 |
+| `mcp_require_auth: false` 但 `/mcp` 仍返回 `401`，CC 云 session 报 `MCP error 32003` | 2.8.12–2.11.0 的启动门禁在非回环/未知云边界中覆盖了关闭鉴权配置 | 升级到 2.11.1+ 并重启；确认 Dashboard 的“当前生效 MCP 鉴权”为关闭。公网匿名 MCP 风险很高，条件允许时仍优先使用 OAuth 或静态 Token |
 
 ### nginx 反代与 v2.7.0 脱困
 
@@ -132,6 +143,7 @@ docker compose -f deploy/docker-compose.yml up -d --build --force-recreate
 ## 访问控制
 
 - Dashboard 会话默认 30 天过期，可通过 `OMBRE_DASHBOARD_SESSION_DAYS` 调整为 1-365 天。认证文件与 token 文件使用原子写入，并在支持的系统上限制为仅文件所有者可读写。
+- 网络 MCP 免鉴权只允许已确认的本机回环边界。启动门禁、Dashboard 配置、部署向导与内置 Tunnel 共用同一规则；`OMBRE_ALLOW_INSECURE_MCP=true` 是不在 Dashboard 暴露的高风险逃生阀，只接受精确的 `true`。
 - 登录和 OAuth 授权共用失败限流。`X-Forwarded-For` / `X-Forwarded-Proto` / `X-Forwarded-Host` 只在请求确实来自可信反代时采用；内置 Tunnel 使用回环地址，外置 nginx/Caddy/容器反代应通过 `OMBRE_TRUSTED_PROXY_CIDRS` 添加直接连接 OB 的最后一跳代理 CIDR，不能使用 `0.0.0.0/0`。三个官方 Compose 模板都会把该变量从 `.env` 传入容器。
 - 内置 JSON OAuth 状态按单进程部署设计。官方 Docker/Render 启动方式使用单 worker；自行部署时不要启动多个 Web worker 或多个共享同一数据卷的副本，否则授权状态不具备跨进程事务保证。
 - `limits.max_management_request_bytes` 限制普通 Dashboard/OAuth 写请求；导入文本和迁移 ZIP 仍使用各自更大的流式上限。

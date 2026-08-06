@@ -45,6 +45,8 @@ from dehydrator import Dehydrator
 from decay_engine import DecayEngine
 from embedding_engine import EmbeddingEngine
 from ombrebrain.storage.embedding_outbox import EmbeddingOutbox
+from ombrebrain.storage.source_store import SourceStore
+from ombrebrain.security.deployment_profile import enforce_mcp_network_guard
 from import_memory import ImportEngine
 from migrate_engine import MigrateEngine
 from current_runtime import RuntimeCollaborators
@@ -183,6 +185,7 @@ try:
         begin_warnings,
         pop_warnings,
         format_warnings_suffix,
+        PublicToolError,
     )
 except ImportError:
     from .errors import (  # type: ignore
@@ -194,6 +197,7 @@ except ImportError:
         begin_warnings,
         pop_warnings,
         format_warnings_suffix,
+        PublicToolError,
     )
 configure_errors_path(config.get("buckets_dir", "buckets"))
 
@@ -209,6 +213,13 @@ except RuntimeError as _emb_err:
     logger.error(f"[STARTUP FAILED] {_emb_err}")
     raise SystemExit(f"Ombre Brain 启动中止：{_emb_err}") from _emb_err
 bucket_mgr = BucketManager(config, embedding_engine=embedding_engine)  # Bucket manager / 记忆桶管理器
+_source_max_bytes = int(
+    (config.get("limits") or {}).get("max_grow_input_bytes", 2 * 1024 * 1024)
+)
+source_store = SourceStore(
+    config.get("buckets_dir", "buckets"),
+    max_bytes=_source_max_bytes,
+)
 embedding_outbox = EmbeddingOutbox(config, bucket_mgr, embedding_engine)
 bucket_mgr.attach_embedding_outbox(embedding_outbox)
 dehydrator = Dehydrator(config)                      # Dehydrator / 脱水器
@@ -223,6 +234,7 @@ current_runtime = RuntimeCollaborators(
     embedding_engine=embedding_engine,
     embedding_outbox=embedding_outbox,
     import_engine=import_engine,
+    source_store=source_store,
     logger=logger,
 )
 
@@ -236,6 +248,7 @@ github_sync_instance: GitHubSync | None = (
         repo=_gh_cfg.get("repo", ""),
         branch=_gh_cfg.get("branch", "main"),
         path_prefix=_gh_cfg.get("path_prefix", "ombre"),
+        max_source_bytes=_source_max_bytes,
     )
     if _gh_token and _gh_cfg.get("repo")
     else None
@@ -328,6 +341,30 @@ mcp = FastMCP(
 # =============================================================
 import web as _web
 import web._shared as _wsh
+
+_mcp_network_security = enforce_mcp_network_guard(
+    config,
+    environment=os.environ,
+    in_docker=_wsh.in_docker(),
+)
+if _mcp_network_security["guard_active"]:
+    logger.error(
+        "=" * 60 + "\n"
+        "MCP network safety warning: unauthenticated non-loopback exposure was detected.\n"
+        "The saved MCP authentication setting was not changed; fix the configuration "
+        "or use the explicit override.\n"
+        "Reason: %s\n"
+        + "=" * 60,
+        _mcp_network_security["reason"],
+    )
+elif _mcp_network_security["override_active"]:
+    logger.critical(
+        "=" * 60 + "\n"
+        "Explicit insecure MCP override is active on a non-loopback boundary.\n"
+        "Reason: %s\n"
+        + "=" * 60,
+        _mcp_network_security["reason"],
+    )
 _wsh.init(config)
 # 记忆持久性自检：容器里记忆目录若没挂持久卷，重建就全丢。开机就醒目告警，别让用户
 # 以为「存住了其实没有」。只提示不阻断（阻断会伤部署）。
@@ -470,6 +507,8 @@ def _log_op_err(op: str, exc: BaseException) -> None:
 
 def _safe_exception_detail(exc: BaseException) -> str:
     """异常对外或持久化前只保留类型与泛化说明。"""
+    if isinstance(exc, PublicToolError):
+        return f"{_safe_exception_type(exc)}: {exc.public_message}"
     return (
         f"{_safe_exception_type(exc)}: 工具执行失败；"
         "异常正文已隐藏，以保护密钥、本机路径与调用内容。"
@@ -734,12 +773,18 @@ if __name__ == "__main__":
             if _http_settings.auth_mode == "token"
             else _is_valid_mcp_token
         )
+        _mcp_static_token_validator = (
+            _is_valid_static_mcp_token
+            if _http_settings.auth_mode == "hybrid"
+            else None
+        )
         _app = build_http_app(
             mcp,
             transport,
             settings=_http_settings,
             token_validator=_mcp_token_validator,
             lifecycle=_runtime_lifecycle,
+            static_token_validator=_mcp_static_token_validator,
         )
         if transport == "streamable-http":
             logger.info(
@@ -768,6 +813,14 @@ if __name__ == "__main__":
                 "    定期轮换该 Token。\n"
                 + "=" * 60
             )
+        elif _mcp_auth_required and _http_settings.auth_mode == "hybrid":
+            logger.info("MCP OAuth + static-token hybrid authentication enabled")
+            logger.warning(
+                "=" * 60 + "\n"
+                "Hybrid mode keeps OAuth active and also accepts the configured static token.\n"
+                "Treat that token as a master key and rotate it regularly.\n"
+                + "=" * 60
+            )
         elif _mcp_auth_required:
             logger.info("MCP OAuth middleware enabled / MCP OAuth 中间件已启用")
         else:
@@ -777,8 +830,8 @@ if __name__ == "__main__":
                 "=" * 60 + "\n"
                 "⚠️  MCP 认证已关闭 (mcp_require_auth: false)：/mcp 无需任何令牌即可直连，\n"
                 "    所有记忆工具全部对外开放——任何能访问本端口的人都能读写你的全部记忆。\n"
-                "    本服务监听 0.0.0.0，若端口暴露到局域网/公网，请务必用反代鉴权、防火墙\n"
-                "    或仅绑定 127.0.0.1 保护；仅在可信内网/本机自有前端场景才建议关闭鉴权。\n"
+                f"    本服务进程监听 {_BIND_HOST}，若端口暴露到局域网/公网，请务必用反代鉴权、防火墙\n"
+                "    或仅绑定 127.0.0.1 保护；免鉴权只建议用于已确认的本机回环连接。\n"
                 + "=" * 60
             )
         # 端口口径澄清（用户反馈：Docker 与裸机端口容易混淆）。容器内固定监听 8000，
@@ -801,9 +854,13 @@ if __name__ == "__main__":
             OMBRE_PORT,
             (
                 "开启(需静态 Token)" if _http_settings.auth_mode == "token"
-                else "开启(需 OAuth Bearer)"
+                else (
+                    "开启(OAuth 或静态 Token)"
+                    if _http_settings.auth_mode == "hybrid"
+                    else "开启(需 OAuth Bearer)"
+                )
             ) if _mcp_auth_required
-            else "关闭(免 token 直连，仅限可信内网/本机)",
+            else "关闭(免 token 直连，仅限本机回环/显式高风险豁免)",
         )
         # Forwarded headers are validated inside the application against
         # OMBRE_TRUSTED_PROXY_CIDRS.  Uvicorn's default proxy middleware rewrites

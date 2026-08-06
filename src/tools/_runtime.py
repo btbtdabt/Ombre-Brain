@@ -39,6 +39,7 @@ decay_engine: Any = None
 embedding_engine: Any = None
 embedding_outbox: Any = None
 import_engine: Any = None
+source_store: Any = None
 logger: Any = None
 v3_runtime: Any = None
 

@@ -19,24 +19,15 @@ from . import _shared as sh
 from tools._common import check_content_size, check_metadata_size
 
 try:
-    from utils import strip_wikilinks, get_ai_name  # type: ignore
+    from utils import normalize_memory_title, strip_wikilinks  # type: ignore
 except ImportError:  # pragma: no cover
-    from ..utils import strip_wikilinks, get_ai_name  # type: ignore
+    from ..utils import normalize_memory_title, strip_wikilinks  # type: ignore
 
 
 def _normalize_author(raw: str) -> str:
-    """把传入署名归一化为存储值，与 tools/plan/core.letter_write 同一套规则：
-    "user"→"user"；"ai"/"claude"(历史)/等于 ai_name→ai_name 的值；其它原样。"""
-    raw = (raw or "").strip()
-    if not raw:
-        return ""
-    ai = get_ai_name()
-    low = raw.lower()
-    if low == "user":
-        return "user"
-    if low in ("ai", "claude") or raw == ai:
-        return ai
-    return raw
+    """Normalize a dashboard author through the canonical letter service."""
+
+    return sh.letter_service.normalize_author(raw)
 
 
 def register(mcp) -> None:
@@ -56,14 +47,18 @@ def register(mcp) -> None:
             all_b = await sh.bucket_mgr.list_all(include_archive=False)
             letters = [b for b in all_b if b["metadata"].get("type") == "letter"]
             if author:
-                af_low = author.lower()
-                if af_low == "user":
+                normalized_author = sh.letter_service.normalize_author(author)
+                ai = sh.letter_service.normalize_author("ai")
+                if normalized_author == "user":
                     letters = [b for b in letters if b["metadata"].get("author") == "user"]
-                elif af_low in ("ai", "claude") or author == get_ai_name():
-                    ai_aliases = {get_ai_name(), "claude"}
+                elif normalized_author == ai:
+                    ai_aliases = {ai, "claude"}
                     letters = [b for b in letters if b["metadata"].get("author") in ai_aliases]
                 else:
-                    letters = [b for b in letters if b["metadata"].get("author") == author]
+                    letters = [
+                        b for b in letters
+                        if b["metadata"].get("author") == normalized_author
+                    ]
             letters.sort(
                 key=lambda b: b["metadata"].get("letter_date") or b["metadata"].get("created", ""),
                 reverse=True,
@@ -117,39 +112,19 @@ def register(mcp) -> None:
         )
         if metadata_err:
             return JSONResponse({"error": metadata_err}, status_code=400)
-        # ai_name：请求体显式传入优先，否则取环境变量 AI_NAME（回退 "AI"）。
-        ai = (body.get("ai_name") or "").strip() or get_ai_name()
-        low = raw_author.lower()
-        if low == "user":
-            author = "user"
-        elif low in ("ai", "claude") or raw_author == ai:
-            author = ai
-        else:
-            author = raw_author
-        user_name = (body.get("user_name") or "").strip()
-        title = (body.get("title") or "").strip()[:120]
-        date = (body.get("date") or "").strip()
-        extra = {"author": author}
-        if user_name:
-            extra["user_name"] = user_name
-        if title:
-            extra["title"] = title
-        if date:
-            extra["letter_date"] = date
         try:
-            bid = await sh.bucket_mgr.create(
+            bid, _normalized_author = await sh.letter_service.create(
+                author=raw_author,
                 content=content,
-                tags=["__letter__"],
-                importance=10,
-                domain=["letter"],
-                valence=0.5,
-                arousal=0.3,
-                name=(title[:60] or f"{author}_{date or 'letter'}"),
-                bucket_type="letter",
-                source_tool="letter",
+                user_name=(body.get("user_name") or "").strip(),
+                title=(body.get("title") or "").strip(),
+                date=(body.get("date") or "").strip(),
+                ai_name=(body.get("ai_name") or "").strip(),
+                event_actor="human",
             )
-            await sh.bucket_mgr.update(bid, **extra)
             return JSONResponse({"ok": True, "id": bid})
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -194,7 +169,13 @@ def register(mcp) -> None:
                 return JSONResponse({"error": size_err}, status_code=400)
             updates["content"] = body["content"].strip()
         if "title" in body and isinstance(body["title"], str):
-            updates["title"] = body["title"].strip()[:120]
+            try:
+                normalized_title = normalize_memory_title(body["title"])
+            except ValueError as e:
+                return JSONResponse({"error": str(e)}, status_code=400)
+            if not normalized_title:
+                return JSONResponse({"error": "title 不能为空"}, status_code=400)
+            updates["title"] = normalized_title
         if "author" in body:
             a = _normalize_author(str(body["author"]))
             if a:
@@ -208,7 +189,11 @@ def register(mcp) -> None:
             return JSONResponse({"error": "nothing to update"}, status_code=400)
 
         try:
-            ok = await sh.bucket_mgr.update(letter_id, **updates)
+            ok = await sh.bucket_mgr.update(
+                letter_id,
+                event_actor="human",
+                **updates,
+            )
             if not ok:
                 return JSONResponse({"error": "update failed"}, status_code=500)
             if "content" in updates:
@@ -217,6 +202,8 @@ def register(mcp) -> None:
                 except Exception:
                     pass
             return JSONResponse({"ok": True, "id": letter_id, "updated": list(updates.keys())})
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
