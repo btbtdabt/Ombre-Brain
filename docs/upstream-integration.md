@@ -8,8 +8,8 @@ verification evidence.
 
 ## Recorded Baselines
 
-- P0luz primary baseline: `v2.8.11` / `ea5d8f5`
-- Yinglianchun secondary baseline: `c758a4d`
+- P0luz primary baseline: `v2.13.1` / `0bb1e4d`
+- Yinglianchun secondary baseline: `2651e2a`
 - Historical deployed root runtime: `8e68a7d`
 - P0luz-base production cutover: `c806f78`
 
@@ -105,8 +105,8 @@ fixed access token remains a resource-bound compatibility credential.
 This batch reviews `ea5d8f5..0bb1e4d` from P0luz and
 `c758a4d..2651e2a` from Yinglianchun. P0luz remains the implementation base;
 Yinglianchun's distinct generation-failure behavior is ported at the matching
-Persona/Reflection worker boundaries. The recorded baselines remain unchanged
-until the exact integration commit passes isolated staging.
+Persona/Reflection worker boundaries. Both recorded baselines advanced after
+the exact integration commit passed isolated staging.
 
 | Source commit | Disposition | Evidence |
 | --- | --- | --- |
@@ -134,8 +134,7 @@ The public MCP contract after integration contains 31 unique tools: P0luz's 15
 core tools plus 16 retained current/Yinglianchun extensions, all registered once
 through `src/tools/current/manifest.py` on the same `/mcp` endpoint.
 
-Local verification complete; isolated staging is still required before the
-recorded baselines advance:
+Verification complete:
 
 - Focused source/grow/I/GitHub/Dream/import/Dashboard/worker suites: **440
   passed / 1 skipped / 0 functional failures** after updating the retained
@@ -148,8 +147,17 @@ recorded baselines advance:
   in the intentionally dormant v3/distributed tree.
 - All five changed inline Dashboard/onboarding scripts parse successfully under
   Node, and independent code/Python reviewers reported no remaining findings.
-- The local Docker daemon was unavailable, so the image build and runtime
-  smoke checks must run on isolated VPS staging before this batch is promoted.
+- VPS staging built `ombre-brain:staging-1999c70` from exact commit `1999c70`
+  and started isolated Brain/Gateway containers on loopback ports 28001/28002.
+  The copied 156-bucket/1086-state-file dataset passed `PRAGMA quick_check` for
+  all 12 SQLite databases both before and after smoke tests; production mounts
+  and containers remained untouched.
+- Staging verified Brain/Gateway health, OAuth-authenticated MCP initialize/list
+  and read-only `pulse`, all 31 unique tools, Claude OpenAI-compatible and native
+  Anthropic routes, native Gemini, embedding, reranker, Persona post-reply
+  updates, non-persistent Reflection JSON generation, Persona portrait update,
+  and authenticated Dashboard worker reads. No staging 5xx, fatal, traceback,
+  or worker-generation errors were observed.
 
 ### 2026-07-26 Gateway continuation, Persona JSON, and auth cache fixes
 
