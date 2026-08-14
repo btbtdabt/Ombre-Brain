@@ -27,7 +27,7 @@ EXPECTED = {
     "relay_base": "https://nuojiji-relay.amydong.workers.dev",
     "final_model": "claude-opus-5",
     "native_final_model": "claude-opus-5-native",
-    "auxiliary_model": "gemini-3.6-flash",
+    "auxiliary_model": "gemini-3.7-flash",
     "embedding_model": "gemini-embedding-2-preview",
     "reranker_model": "Qwen/Qwen3-Reranker-8B",
     "required_models": [
@@ -39,6 +39,7 @@ EXPECTED = {
         "claude-fable-5",
         "gemini-3.5-flash",
         "gemini-3.6-flash",
+        "gemini-3.7-flash",
     ],
     "proxy_claude_models": [
         "claude-opus-4-6",
@@ -126,25 +127,25 @@ def config_gateway_checks(check: Check, config_path: Path) -> None:
         section_cfg = value if isinstance(value, dict) else {}
         check.assert_true(
             section_cfg.get("model") == EXPECTED["auxiliary_model"],
-            f"local {section}.model is gemini-3.6-flash",
+            f"local {section}.model is gemini-3.7-flash",
         )
 
     portrait_value = cfg.get("portrait")
     portrait = portrait_value if isinstance(portrait_value, dict) else {}
     check.assert_true(
         str(portrait.get("model") or "").strip() in {"", EXPECTED["auxiliary_model"]},
-        "local portrait.model is Gemini 3.6 or inherits dehydration",
+        f"local portrait.model is {EXPECTED['auxiliary_model']} or inherits dehydration",
     )
     reflection_value = cfg.get("reflection")
     reflection = reflection_value if isinstance(reflection_value, dict) else {}
     check.assert_true(
         str(reflection.get("model") or "").strip() in {"", EXPECTED["auxiliary_model"]},
-        "local reflection.model is Gemini 3.6 or inherits persona/dehydration",
+        f"local reflection.model is {EXPECTED['auxiliary_model']} or inherits persona/dehydration",
     )
     for key in ("daily_chat_memory_summary_model", "daily_chat_memory_candidate_model"):
         check.assert_true(
             str(reflection.get(key) or "").strip() in {"", EXPECTED["auxiliary_model"]},
-            f"local reflection.{key} is Gemini 3.6 or inherits dehydration",
+            f"local reflection.{key} is {EXPECTED['auxiliary_model']} or inherits dehydration",
         )
 
     embedding_value = cfg.get("embedding")
@@ -224,16 +225,16 @@ def config_gateway_checks(check: Check, config_path: Path) -> None:
     )
     check.assert_true(
         gemini.get("default_model") == EXPECTED["auxiliary_model"],
-        "local gemini upstream default_model is gemini-3.6-flash",
+        "local gemini upstream default_model is gemini-3.7-flash",
     )
     check.assert_true(
         EXPECTED["auxiliary_model"] in set(gemini.get("models") or []),
-        "local gemini upstream exposes gemini-3.6-flash",
+        "local gemini upstream exposes gemini-3.7-flash",
     )
     for key in ("query_planner_model", "domain_sentinel_model"):
         check.assert_true(
             str(gateway.get(key) or "").strip() in {"", EXPECTED["auxiliary_model"]},
-            f"local gateway.{key} is Gemini 3.6 or inherits dehydration",
+            f"local gateway.{key} is {EXPECTED['auxiliary_model']} or inherits dehydration",
         )
 
     routes_value = gateway.get("token_routes")
@@ -256,6 +257,14 @@ def local_env_checks(check: Check, env: dict[str, str]) -> None:
     ]
     for key in required:
         check.assert_true(bool(env.get(key)), f"local .env has {key}")
+    gemini_model_override = str(env.get("OMBRE_GATEWAY_GEMINI_DEFAULT_MODEL") or "").strip()
+    check.assert_true(
+        gemini_model_override in {"", EXPECTED["auxiliary_model"]},
+        (
+            "local OMBRE_GATEWAY_GEMINI_DEFAULT_MODEL is unset "
+            f"or {EXPECTED['auxiliary_model']}"
+        ),
+    )
 
 
 def production_gateway_checks(check: Check, env: dict[str, str], gateway_base: str) -> None:

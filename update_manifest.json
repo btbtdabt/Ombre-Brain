@@ -232,8 +232,8 @@
     },
     {
       "path": "src/gateway.py",
-      "sha256": "df4e5d710e8aba1329cc4712080115ee225d7ef5cf78736666ab8a686d7853ee",
-      "size": 977409
+      "sha256": "5894e59d380feffdf021f72d923c4c750c0088797be268f118b376f0b6123077",
+      "size": 977468
     },
     {
       "path": "src/gateway_state.py",

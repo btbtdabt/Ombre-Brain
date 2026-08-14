@@ -58,7 +58,7 @@ Normal final replies:
 Gemini native route:
 
 - Base URL: `https://gateway.btombre.men/v1beta`
-- Model: `gemini-3.6-flash`
+- Model: `gemini-3.7-flash`
 
 The Gateway must preserve token-based Claude/Gemini routing, native Anthropic tool use, OpenAI compatibility, prompt/debug tracing, memory injection, and final-turn persona processing.
 

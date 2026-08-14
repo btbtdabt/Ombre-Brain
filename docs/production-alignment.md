@@ -40,6 +40,7 @@ claude-opus-5-native
 claude-fable-5
 gemini-3.5-flash
 gemini-3.6-flash
+gemini-3.7-flash
 ```
 
 Default OpenAI-compatible Claude model:
@@ -55,10 +56,10 @@ claude-opus-5-native
 ```
 
 Production explicitly configures dehydration, Dream, Persona, Reflection, and
-the Gateway Gemini token route with `gemini-3.6-flash`. Portrait, query planner,
+the Gateway Gemini token route with `gemini-3.7-flash`. Portrait, query planner,
 domain sentinel, semantic rescue, and daily-memory generation follow their
 existing dehydration/reflection fallback chains when dedicated model fields are
-empty, so their effective production model is also 3.6. Embedding and reranking
+empty, so their effective production model is also 3.7. Embedding and reranking
 remain on their specialized models.
 
 ## Ombre Runtime Files
@@ -71,7 +72,7 @@ gateway:
   token_routes:
     - name: "gemini"
       token_env: "OMBRE_GATEWAY_GEMINI_TOKEN"
-      default_model: "gemini-3.6-flash"
+      default_model: "gemini-3.7-flash"
   upstreams:
     - name: "anthropic"
       base_url: "https://claude-proxy.amydong.workers.dev/v1"
@@ -100,8 +101,9 @@ gateway:
       gemini_base_url: "https://gemini.amydong.workers.dev/v1beta"
       gemini_auth: "bearer"
       api_key_env: "OMBRE_GATEWAY_GEMINI_API_KEY"
-      default_model: "gemini-3.6-flash"
+      default_model: "gemini-3.7-flash"
       models:
+        - "gemini-3.7-flash"
         - "gemini-3.6-flash"
         - "gemini-3.5-flash"
 ```

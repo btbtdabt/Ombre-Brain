@@ -1,5 +1,6 @@
 import asyncio
 import json
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -87,13 +88,64 @@ def test_gateway_tokens_select_claude_openai_and_gemini_defaults(
     }
     assert service._auth_context_from_token("gemini-token") == {
         "name": "gemini",
-        "default_model": "gemini-3.6-flash",
+        "default_model": "gemini-3.7-flash",
     }
     assert service._auth_context_from_token("fallback-token") == {
         "name": "default",
         "default_model": "",
     }
     assert service._auth_context_from_token("wrong-token") is None
+
+
+def test_gateway_gemini_default_model_env_override(gateway_module, monkeypatch):
+    monkeypatch.setenv("OMBRE_GATEWAY_GEMINI_TOKEN", "gemini-token")
+    monkeypatch.setenv("OMBRE_GATEWAY_GEMINI_DEFAULT_MODEL", "gemini-test-override")
+    service = gateway_module.GatewayService.__new__(gateway_module.GatewayService)
+    service.gateway_cfg = {"token_routes": []}
+    service.gateway_token = ""
+    service.gateway_token_routes = service._load_gateway_token_routes()
+
+    assert service._auth_context_from_token("gemini-token") == {
+        "name": "gemini",
+        "default_model": "gemini-test-override",
+    }
+
+
+def test_dehydration_live_apply_refreshes_semantic_rescue_model(gateway_module):
+    service = gateway_module.GatewayService.__new__(gateway_module.GatewayService)
+    service.config = {
+        "dehydration": {
+            "model": "gemini-3.6-flash",
+            "base_url": "",
+            "api_key": "",
+        }
+    }
+    service.gateway_cfg = {
+        "query_planner_model": "",
+        "domain_sentinel_model": "",
+        "domain_sentinel_base_url": "",
+        "domain_sentinel_api_key": "",
+    }
+    service.embedding_cfg = {}
+    service.dehydrator = SimpleNamespace(
+        model="gemini-3.6-flash",
+        base_url="",
+        api_key="",
+        thinking_mode="",
+        max_tokens=1024,
+        temperature=0.1,
+        api_available=False,
+        client=None,
+    )
+    service.semantic_rescue_model = "gemini-3.6-flash"
+
+    updated = service._apply_dehydration_config({"model": "gemini-3.7-flash"})
+
+    assert updated == ["dehydration.model"]
+    assert service.dehydrator.model == "gemini-3.7-flash"
+    assert service.query_planner_model == "gemini-3.7-flash"
+    assert service.domain_sentinel_model == "gemini-3.7-flash"
+    assert service.semantic_rescue_model == "gemini-3.7-flash"
 
 
 def test_anthropic_thinking_and_tool_blocks_round_trip_without_loss(gateway_module):

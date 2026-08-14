@@ -1724,6 +1724,7 @@ class GatewayService:
             self.domain_sentinel_base_url = self._resolve_domain_sentinel_base_url("")
         if not str(self.gateway_cfg.get("domain_sentinel_api_key") or "").strip():
             self.domain_sentinel_api_key = self._resolve_domain_sentinel_api_key("")
+        self.semantic_rescue_model = self.dehydrator.model
         return updated
 
     def _apply_reranker_config(self, payload: dict[str, Any]) -> list[str]:
@@ -4019,7 +4020,7 @@ class GatewayService:
                     "token": gemini_token,
                     "default_model": os.environ.get(
                         "OMBRE_GATEWAY_GEMINI_DEFAULT_MODEL",
-                        "gemini-3.6-flash",
+                        "gemini-3.7-flash",
                     ).strip(),
                 }
             )
