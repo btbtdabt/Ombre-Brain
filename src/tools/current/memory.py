@@ -31,6 +31,7 @@ from .._common import (
 from ..breath import dispatch as p0_breath_dispatch
 from ..dream import dispatch as p0_dream_dispatch
 from ..grow.core import grow_items as p0_grow_items
+from ..hold import _prepare_source_refs
 from ..trace import dispatch as p0_trace_dispatch
 from ._helpers import (
     ai_author_name,
@@ -583,6 +584,7 @@ async def _create_current_bucket(
     source_tool: str = "hold",
     grow_batch_id: str = "",
     extra_metadata: dict | None = None,
+    source_refs: list[dict] | None = None,
 ) -> str:
     manager = require_runtime("bucket_mgr")
     bucket_id = await manager.create(
@@ -603,6 +605,7 @@ async def _create_current_bucket(
         triggered_by=triggered_by,
         source_tool=source_tool,
         grow_batch_id=grow_batch_id,
+        source_refs=source_refs,
         allow_embedding_fallback=True,
         extra_metadata=extra_metadata,
     )
@@ -629,6 +632,8 @@ async def hold(
     why_remembered: str = "",
     meaning: str = "",
     test_data: bool = False,
+    source_content: str = "",
+    source_ranges: list | None = None,
 ) -> str:
     """写一条长期记忆。单个事实/承诺/偏好用 hold；旧记忆的新感受用 comment_bucket；悄悄话用 whisper=True。date 可传事件日期；title 可选，传了就用给定标题，不传则自动生成。media 可传服务器上传临时目录内的路径，或 data_base64+filename 项。普通记忆不用填写 domain，系统会自动判断；维护自我锚点等特殊桶时可显式传 domain。显式 valence/arousal 会覆盖自动情绪。普通记忆 content 的最小写入就是正文；只有确实需要结构化时才按需使用 ### moment、### original、### reflection；reflection 必须写成“我……”第一人称。不要写 ### affect_anchor、### followup 或 ### todo：长期回应变化写进 reflection，到时提醒用 reminder_create。feel=True/whisper=True 时 content 只能写第一人称正文，不写标题或任何 Markdown 分段。"""
     await ensure_decay_started()
@@ -654,6 +659,9 @@ async def hold(
     requested_valence = float(valence) if isinstance(valence, (int, float)) and 0 <= valence <= 1 else None
     requested_arousal = float(arousal) if isinstance(arousal, (int, float)) and 0 <= arousal <= 1 else None
     source_id = coerce_id(source_bucket)
+    source_refs, source_error = _prepare_source_refs(source_content, source_ranges)
+    if source_error:
+        return source_error
 
     async def create_whisper() -> str:
         bucket_id = await _create_current_bucket(
@@ -669,6 +677,7 @@ async def hold(
             media=media,
             why_remembered=why_remembered,
             meaning=meaning,
+            source_refs=source_refs,
         )
         return f"🫧whisper→{bucket_id}"
 
@@ -705,6 +714,7 @@ async def hold(
                     why_remembered=why_remembered,
                     meaning=meaning,
                     triggered_by=source_id,
+                    source_refs=source_refs,
                 )
                 update_kwargs: dict[str, bool | float] = {"digested": True}
                 if requested_valence is not None:
@@ -723,8 +733,13 @@ async def hold(
             )
             if not entry:
                 return "年轮写入失败。"
+            source_updates: dict[str, Any] = {}
             if media:
-                await manager.update(source_id, media_append=media)
+                source_updates["media_append"] = media
+            if source_refs:
+                source_updates["source_refs_append"] = source_refs
+            if source_updates:
+                await manager.update(source_id, **source_updates)
             await queue_embedding_refresh(source_id)
             source = await manager.get(source_id)
             if source:
@@ -758,6 +773,7 @@ async def hold(
                 media=media,
                 why_remembered=why_remembered,
                 meaning=meaning,
+                source_refs=source_refs,
             )
         return f"📌钉选→{bucket_id} {','.join(domains)}"
 
@@ -778,6 +794,7 @@ async def hold(
             why_remembered=why_remembered,
             meaning=meaning,
             test_data=test_data,
+            source_refs=source_refs,
         )
         is_merged = False
         embed_warning = ""
@@ -790,6 +807,7 @@ async def hold(
             valence=final_valence,
             arousal=final_arousal,
             name=name,
+            source_refs=source_refs,
             raw_merge=True,
             why_remembered=why_remembered,
             source_tool="hold",
@@ -1125,6 +1143,7 @@ async def trace(
     tags: str = "",
     resolved: int = -1,
     pinned: int = -1,
+    protected: int = -1,
     anchor: int = -1,
     digested: int = -1,
     content: str = "",
@@ -1143,11 +1162,30 @@ async def trace(
     restore: bool = False,
     old_str: str = "",
     new_str: str | None = None,
+    deletion_request_id: str = "",
+    deletion_decision: str = "",
+    deletion_ai_reason: str = "",
 ) -> str:
-    """修改已有记忆，不创建新桶。tags/domain/content 是替换；old_str/new_str 精确修改正文片段；restore 恢复归档桶；date 可改事件日期；meaning/media 的 append 是追加、replace 是整体替换；hard_delete 只清理明确标记的测试桶。改前先 read_bucket。"""
+    """修改已有记忆，不创建新桶。tags/domain/content 是替换；old_str/new_str 精确修改正文片段；protected=1 保护但不作为核心准则强制浮现；deletion_request_id/deletion_decision 处理人工删除审批；restore 恢复归档桶；date 可改事件日期；meaning/media 的 append 是追加、replace 是整体替换；hard_delete 只清理明确标记的测试桶。改前先 read_bucket。"""
     bucket_id = coerce_id(bucket_id)
     if not bucket_id:
         return "请提供有效的 bucket_id。"
+
+    if deletion_request_id or deletion_decision:
+        result = await require_runtime("deletion_requests").decide(
+            deletion_request_id or "",
+            deletion_decision or "",
+            deletion_ai_reason or "",
+            expected_bucket_id=bucket_id,
+        )
+        if not result.get("ok"):
+            return "Deletion request decision failed: " + str(
+                result.get("error") or "unknown error"
+            )
+        return (
+            f"Deletion request {deletion_request_id} {result['decision']}; "
+            f"bucket {result['bucket_id']}."
+        )
 
     delete = bool_value(delete, False)
     hard_delete = bool_value(hard_delete, False)
@@ -1159,6 +1197,8 @@ async def trace(
         return "delete 归档不能与 anchor 或 date 修改同时执行。"
     if (restore or old_str or new_str is not None) and (anchor in (0, 1) or date):
         return "restore 或正文片段修改不能与 anchor 或 date 修改同时执行。"
+    if protected in (0, 1) and (anchor in (0, 1) or date):
+        return "protected 修改不能与 anchor 或 date 修改同时执行。"
 
     # P0 owns the common trace path: it carries quota locking, plan history,
     # plan-resolution cascade, meaning/media updates, and guarded test erasure.
@@ -1174,6 +1214,7 @@ async def trace(
             tags=tags,
             resolved=resolved,
             pinned=pinned,
+            protected=protected,
             digested=digested,
             content=content,
             delete=delete,
@@ -1714,13 +1755,11 @@ async def entity_edge_backfill(
 
 async def dream(
     window_hours: int | None = None,
-    inspiration: bool = False,
 ) -> str:
-    """无参数进入当前 introspection；传 window_hours 或 inspiration=True 时读取 P0 时间窗梦境。inspiration=True 会追加只读、带来源且仅本次响应有效的 Spark 候选。"""
-    if window_hours is not None or inspiration:
+    """无参数进入当前 introspection；传 window_hours 时读取 P0 时间窗梦境。"""
+    if window_hours is not None:
         return await p0_dream_dispatch(
             window_hours=window_hours if window_hours is not None else 48,
-            inspiration=inspiration,
         )
     result = await introspection()
     return "dream() 已改名为 introspection()。夜梦由后台小模型自动生成，不需要主动调用工具。\n\n" + result

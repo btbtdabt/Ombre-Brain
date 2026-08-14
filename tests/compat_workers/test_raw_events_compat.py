@@ -106,3 +106,39 @@ def test_raw_event_store_filters_date_and_session_without_losing_raw_payload(tmp
 
     assert [row["source_event_id"] for row in rows] == ["a1"]
     assert rows[0]["metadata"] == {"provider": "anthropic"}
+
+
+def test_date_window_is_not_truncated_by_newer_nonmatching_rows(tmp_path):
+    store = RawEventStore(_config(tmp_path))
+    store.ingest(
+        [
+            {
+                "source_event_id": "wanted",
+                "role": "assistant",
+                "text": "old matching event",
+                "created_at": "2026-07-01T23:30:00-04:00",
+            }
+        ],
+        source="gateway",
+    )
+    store.ingest(
+        [
+            {
+                "source_event_id": f"newer-{index}",
+                "role": "assistant",
+                "text": f"newer event {index}",
+                "created_at": f"2026-07-03T12:{index % 60:02d}:00+00:00",
+            }
+            for index in range(550)
+        ],
+        source="gateway",
+    )
+
+    rows = store.list_events_between(
+        start_at=datetime.fromisoformat("2026-07-02T03:00:00+00:00"),
+        end_at=datetime.fromisoformat("2026-07-02T04:00:00+00:00"),
+        source="gateway",
+        limit=1,
+    )
+
+    assert [row["source_event_id"] for row in rows] == ["wanted"]

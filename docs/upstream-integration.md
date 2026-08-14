@@ -100,6 +100,45 @@ fixed access token remains a resource-bound compatibility credential.
 
 ## Integration Batch Ledger
 
+### 2026-08-14 P0luz 2.17.5 memory lifecycle, Letter locks, deletion approval, and Ying raw-event sync
+
+This candidate batch reviews `0bb1e4d..278668e` from P0luz and
+`2651e2a..284c9c7` from Yinglianchun. P0luz remains the implementation base.
+The Yinglianchun date-window correction is ported at the existing modular raw
+event boundary instead of introducing a second runtime owner.
+
+| Source commit(s) | Disposition | Evidence |
+| --- | --- | --- |
+| P0luz `03a0a1c` | Merged from the author | GPT-5.x Chat Completions uses the correct output-token parameter while the existing provider abstraction remains intact. |
+| P0luz `a251563`, `cca0cd4` | Merged from the author | Pinned/anchor guidance is corrected and anchors remain exempt from automatic decay archival. |
+| P0luz `08dd317` | Merged from the author | Obviously misaligned `source_ranges` are rejected before source-backed memory is persisted. |
+| P0luz `5c402d2` | Merged from the author | Successful stdio startup clears the boot marker, preserving reliable restart diagnostics. |
+| P0luz `79227b3`, `cb47ffe`, `fc1ab15`, `df434cb`, `f5b97f2`, `499e839` | Merged from the author and adapted to the unified current-tool manifest | Timed Letter locks, public Letter relocking, historical AI-name migration, locked-surface enforcement, Letter restore behavior, consistent write/update responses, and `grow(test_data=...)` are retained. `letter_lock_update` is registered once through the canonical manifest and the unified Dashboard exposes the author's lock controls. |
+| P0luz `1755e45`, `c0782b5`, `70d608c`, `0b0411d`, `2f74b82`, `3d7a8f9`, `814fb3e` | Merged from the author | Hot-update progress, dependency gating, optional dependency installation, manifest synchronization, Git line-ending-aware SHA checks, the cryptography update, and removal of legacy SSE transport are retained. |
+| P0luz `f6f24de`, `7906391`, `16fa34d`, `b6b43fa`, `1815f93` | Merged from the author | Docker integration setup and fixtures follow the current public-hook and anonymized-name contracts; expected outputs cover the combined tool surface. |
+| P0luz `49a5301`, `d89d1a8` | Merged into the unified Dashboard | Remote first-run setup guidance and responsive narrow-PC/mobile layout are retained while preserving the fork's path-aware Dashboard/auth shell. |
+| P0luz `b6b1eb8`, `94ace4c` | Merged from the author | Restored archive buckets refresh activity, and archived pinned/protected memories preserve their intended visibility and protection semantics. |
+| P0luz `65bda95` | Merged from the author | `breath` and `dream` security envelopes are compacted without changing retained Gateway/current retrieval behavior. |
+| P0luz `56d5877` | Merged from the author | The stdio lifespan owns the vector queue and the author's slow-provider create/merge regressions are retained. |
+| P0luz `0867ae8` | Merged from the author; supersedes the prior Spark retention decision | Spark/inspiration and the hard importance quota are intentionally removed, and the author's cleaned `breath`/`dream` output boundary is authoritative. The dormant distributed/v3 stack remains separate from this removed experiment. |
+| P0luz `ad73eb7` | Merged from the author | Memory reasons, anchor markers, and update-manifest safety are hardened together. |
+| P0luz `e1fb27f`, `945d4ff` | Merged from the author | `grow` and provider errors are sanitized and actionable without making unsupported API-key claims. |
+| P0luz `0bfc768`, `89bcd16`, `52f8128`, `ee39748` | Merged from the author | Dream records `I` witnesses, excludes pinned content, preserves the core selector boundary, and keeps pending `I` candidates eligible. |
+| P0luz `231c8bc` | Merged from the author and combined with current metadata normalization | `hold` accepts an optional domain override; explicit tags remain unioned with model-derived tags instead of being discarded. |
+| P0luz `e1a99ab`, `1db60df` | Merged from the author | Plan resolution requires an explicit decision and stale resolution suggestions expire. |
+| P0luz `f3af09e` | Merged from the author | Human deletion requests require AI approval through the author's persisted request store, tool boundary, and Dashboard workflow. |
+| P0luz `3e52912` | Merged from the author | `hold` can attach hidden source evidence without exposing it through ordinary memory surfaces. |
+| P0luz `3d07b33`, `a814bcf`, `d32bfe8`, `88d4fc6` | Merged from the author | Version, changelog, dependency-lock, and release-manifest history is advanced through the author's release sequence and regenerated for the combined tree. |
+| P0luz `d9cd468`, `b622db4`, `9964fc7`, `58572a1`, `4947cf7`, `0fd347f`, `5f3ec2e`, `2957c09`, `e76b5ed`, `13fff11`, `db758bd`, `fa4f5cd`, `3fb5b2d`, `a3cb116`, `278668e` | Merged by ancestry | These merge commits contribute the already classified author changes and no competing runtime owner. |
+| Yinglianchun `284c9c7` | Ported into `src/raw_events.py` with compatibility coverage | Date filtering reads a padded physical event window before applying exact logical day boundaries, so timezone-offset events near midnight are no longer omitted. |
+
+The combined public MCP contract contains 32 unique tools: P0luz's expanded
+16-tool core plus 16 retained current/Yinglianchun extensions, each registered
+once through `src/tools/current/manifest.py` on the same `/mcp` endpoint.
+
+Verification and baseline advancement are recorded after the exact candidate
+commit passes isolated staging and production-contract smoke tests.
+
 ### 2026-08-05 P0luz source evidence, Spark, I sediment, and Ying generation-failure sync
 
 This batch reviews `ea5d8f5..0bb1e4d` from P0luz and

@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     from letter_service import LetterService
 
 logger = logging.getLogger("ombre_brain")
+deletion_requests = None
 _ENV_FILE_WRITE_LOCK = threading.RLock()
 
 # --- 运行环境探测（Docker vs 裸机）---

@@ -6,7 +6,7 @@ import logging
 import os
 import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from runtime_values import parse_comparable_datetime, utc_now_iso
@@ -260,25 +260,6 @@ class RawEventStore:
             conversation_id=conversation_id,
             session_id=session_id,
         )
-        conn = self._connect()
-        # filters contains only fixed predicates from _search_filters; all
-        # source/conversation/session values remain bound through params.
-        if safe_limit > 0:
-            query = (
-                "SELECT e.* FROM raw_events e WHERE 1 = 1 "
-                f"{filters} "  # nosec B608
-                "ORDER BY e.id DESC LIMIT ?"
-            )
-            rows = conn.execute(query, [*params, max(safe_limit, 500)]).fetchall()
-        else:
-            query = (
-                "SELECT e.* FROM raw_events e WHERE 1 = 1 "
-                f"{filters} "  # nosec B608
-                "ORDER BY e.id DESC"
-            )
-            rows = conn.execute(query, params).fetchall()
-        conn.close()
-
         compare_tz = start_at.tzinfo or end_at.tzinfo
 
         start = start_at
@@ -296,6 +277,26 @@ class RawEventStore:
             start = start.replace(tzinfo=None)
         elif end.tzinfo is not None:
             end = end.replace(tzinfo=None)
+
+        # ``created_at`` is ISO text and may carry different UTC offsets. Use
+        # a padded calendar range only as a coarse SQL prefilter, then retain
+        # the exact timezone-aware comparison below. Crucially, do not apply a
+        # recent-row LIMIT before the exact filter: a valid older event could
+        # otherwise be hidden by unrelated newer rows.
+        coarse_start = (start - timedelta(days=1)).date().isoformat()
+        coarse_end = (end + timedelta(days=1)).date().isoformat()
+        conn = self._connect()
+        query = (
+            "SELECT e.* FROM raw_events e "
+            "WHERE e.created_at >= ? AND e.created_at < ? "
+            f"{filters} "  # nosec B608
+            "ORDER BY e.created_at DESC, e.id DESC"
+        )
+        rows = conn.execute(
+            query,
+            [coarse_start, coarse_end, *params],
+        ).fetchall()
+        conn.close()
 
         selected: list[dict[str, Any]] = []
         for row in rows:

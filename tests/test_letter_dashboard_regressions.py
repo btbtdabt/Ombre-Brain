@@ -27,6 +27,9 @@ class DeleteRequest:
     path_params = {"letter_id": "letter-ghost"}
     query_params = {"confirm": "true"}
 
+    async def json(self):
+        return {}
+
 
 class CreateRequest:
     async def json(self):
@@ -52,6 +55,15 @@ class LetterServiceSpy:
     def normalize_author(author, ai_name=""):
         raw = str(author or "").strip()
         return "秋" if raw.lower() in {"ai", "claude"} or raw == "秋" else raw
+
+
+class CreateBucketManager:
+    async def create(self, **_kwargs):
+        raise AssertionError("dashboard must not bypass LetterService")
+
+    async def get(self, bucket_id):
+        assert bucket_id == "letter-1"
+        return {"metadata": {"created": "2026-08-05T12:00:00Z"}}
 
 
 class EditRequest:
@@ -135,25 +147,40 @@ def test_dashboard_lucide_observer_cannot_eat_button_clicks():
     assert 'data-lucide="moon-off"' not in dashboard
 
 
+def test_dashboard_offers_one_way_legacy_letter_conversion_to_ai_ownership():
+    dashboard = (ROOT / "frontend" / "dashboard.html").read_text(encoding="utf-8")
+
+    assert "l.lock_upgrade_available" in dashboard
+    assert "convertLegacyLetter(this.dataset.letterId)" in dashboard
+    assert "const body = {convert_to_lockable: true};" in dashboard
+    assert "锁控制权将永久交给当前 AI" in dashboard
+    # AI_NAME 未配置时后端拒绝转换；Dashboard 当场弹窗填名字重试一次，
+    # 不强迫用户先跳去别处改配置。
+    assert "无法转换历史 Letter" in dashboard
+    assert "body.ai_name = aiName" in dashboard
+
+
 @pytest.mark.asyncio
 async def test_dashboard_letter_create_uses_canonical_letter_service(monkeypatch):
     service = LetterServiceSpy()
     monkeypatch.setattr(letters.sh, "_require_auth", lambda request: None)
+    monkeypatch.setattr(letters.sh, "_read_json_object", lambda request: request.json())
     monkeypatch.setattr(letters.sh, "letter_service", service, raising=False)
-    monkeypatch.setattr(
-        letters.sh,
-        "bucket_mgr",
-        SimpleNamespace(create=lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("dashboard must not bypass LetterService")
-        )),
-    )
+    monkeypatch.setattr(letters.sh, "bucket_mgr", CreateBucketManager())
     mcp = FakeMCP()
     letters.register(mcp)
 
     response = await mcp.routes[("POST", "/api/letter")](CreateRequest())
 
     assert response.status_code == 200
-    assert payload(response) == {"ok": True, "id": "letter-1"}
+    assert payload(response) == {
+        "ok": True,
+        "id": "letter-1",
+        "created_at": "2026-08-05T12:00:00Z",
+        "lock_type": "none",
+        "unlock_date": None,
+        "stored": True,
+    }
     assert service.calls == [{
         "author": "ai",
         "content": "同一条服务路径写入的信",
@@ -162,6 +189,10 @@ async def test_dashboard_letter_create_uses_canonical_letter_service(monkeypatch
         "date": "2026-08-05",
         "ai_name": "秋",
         "event_actor": "human",
+        "lock_type": "none",
+        "unlock_date": None,
+        "locked_by": "human",
+        "writer_name": "Amy",
     }]
 
 
@@ -171,6 +202,7 @@ async def test_dashboard_letter_edit_validates_title_and_records_human_actor(
 ):
     manager = EditBucketManager()
     monkeypatch.setattr(letters.sh, "_require_auth", lambda request: None)
+    monkeypatch.setattr(letters.sh, "_read_json_object", lambda request: request.json())
     monkeypatch.setattr(letters.sh, "bucket_mgr", manager)
     monkeypatch.setattr(letters.sh, "letter_service", LetterServiceSpy(), raising=False)
     monkeypatch.setenv("AI_NAME", "WrongEnvName")
@@ -185,8 +217,22 @@ async def test_dashboard_letter_edit_validates_title_and_records_human_actor(
 
     assert response.status_code == 200
     assert manager.updates == [
-        ("letter-1", {"title": "新 标题", "event_actor": "human"}),
-        ("letter-1", {"author": "秋", "event_actor": "human"}),
+        (
+            "letter-1",
+            {
+                "title": "新 标题",
+                "event_actor": "human",
+                "expected_lock_state": ("", "", ""),
+            },
+        ),
+        (
+            "letter-1",
+            {
+                "author": "秋",
+                "event_actor": "human",
+                "expected_lock_state": ("", "", ""),
+            },
+        ),
     ]
     assert author.status_code == 200
     assert empty.status_code == 400
@@ -198,6 +244,7 @@ async def test_dashboard_ai_filter_uses_configured_letter_identity(monkeypatch):
     monkeypatch.setattr(letters.sh, "_require_auth", lambda request: None)
     monkeypatch.setattr(letters.sh, "bucket_mgr", ListBucketManager())
     monkeypatch.setattr(letters.sh, "letter_service", LetterServiceSpy(), raising=False)
+    monkeypatch.setattr(letters.sh, "deletion_requests", None, raising=False)
     monkeypatch.setenv("AI_NAME", "WrongEnvName")
     mcp = FakeMCP()
     letters.register(mcp)
@@ -209,7 +256,7 @@ async def test_dashboard_ai_filter_uses_configured_letter_identity(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_delete_missing_letter_repairs_vector_and_runtime_cache(monkeypatch):
+async def test_delete_missing_letter_repairs_vector_and_runtime_cache(monkeypatch, tmp_path):
     manager = MissingBucketManager()
     deleted_vectors = []
     monkeypatch.setattr(letters.sh, "_require_auth", lambda request: None)
@@ -218,6 +265,13 @@ async def test_delete_missing_letter_repairs_vector_and_runtime_cache(monkeypatc
         letters.sh,
         "embedding_engine",
         SimpleNamespace(delete_embedding=deleted_vectors.append),
+    )
+    from deletion_requests import DeletionRequestStore
+
+    monkeypatch.setattr(
+        letters.sh,
+        "deletion_requests",
+        DeletionRequestStore(str(tmp_path), manager, letters.sh.embedding_engine),
     )
     mcp = FakeMCP()
     letters.register(mcp)

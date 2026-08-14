@@ -80,7 +80,7 @@ async def test_transport_env_failure_restores_yaml_and_leaves_runtime_untouched(
     mcp = FakeMCP()
     config_api.register(mcp)
     response = await mcp.routes[("POST", "/api/transport")](
-        JsonRequest({"transport": "sse"})
+        JsonRequest({"transport": "stdio"})
     )
     payload = response_json(response)
 
@@ -89,7 +89,7 @@ async def test_transport_env_failure_restores_yaml_and_leaves_runtime_untouched(
     assert payload["restarting"] is False
     assert payload["rollback_failed"] is False
     assert persisted == original_persisted
-    assert yaml_states[0]["transport"] == "sse"
+    assert yaml_states[0]["transport"] == "stdio"
     assert yaml_states[-1] == original_persisted
     assert config_api.sh.config["transport"] == "streamable-http"
     assert os.environ["OMBRE_TRANSPORT"] == "streamable-http"
@@ -123,7 +123,7 @@ async def test_transport_yaml_failure_does_not_touch_env_or_runtime(
     mcp = FakeMCP()
     config_api.register(mcp)
     response = await mcp.routes[("POST", "/api/transport")](
-        JsonRequest({"transport": "sse"})
+        JsonRequest({"transport": "stdio"})
     )
     payload = response_json(response)
 
@@ -176,19 +176,19 @@ async def test_transport_commits_both_files_before_publishing_runtime(
     mcp = FakeMCP()
     config_api.register(mcp)
     response = await mcp.routes[("POST", "/api/transport")](
-        JsonRequest({"transport": "sse"})
+        JsonRequest({"transport": "stdio"})
     )
     payload = response_json(response)
 
     assert response.status_code == 200
     assert payload["ok"] is True
     assert payload["env_persisted"] is True
-    assert persisted["transport"] == "sse"
-    assert config_api.sh.config["transport"] == "sse"
-    assert os.environ["OMBRE_TRANSPORT"] == "sse"
+    assert persisted["transport"] == "stdio"
+    assert config_api.sh.config["transport"] == "stdio"
+    assert os.environ["OMBRE_TRANSPORT"] == "stdio"
     assert events == [
-        ("yaml", "sse"),
-        ("OMBRE_TRANSPORT", "sse"),
+        ("yaml", "stdio"),
+        ("OMBRE_TRANSPORT", "stdio"),
         ("timer", "created"),
         ("timer", "started"),
     ]

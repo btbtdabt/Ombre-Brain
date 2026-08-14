@@ -216,6 +216,7 @@ class CurrentWebDependencies:
     backup_manager: Any = None
     source_store: Any = None
     darkroom_store: Any = None
+    deletion_requests: Any = None
     dream_engine: Any = None
     memory_edge_store: Any = None
     memory_moment_store: Any = None

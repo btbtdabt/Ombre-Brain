@@ -31,7 +31,6 @@ from web.request_limits import (
     MCPRequestBodyLimitMiddleware,
     ManagementRequestBodyLimitMiddleware,
     is_mcp_endpoint_path,
-    is_sse_endpoint_path,
 )
 
 
@@ -247,8 +246,6 @@ class MCPAuthMiddleware:
             auth = headers.get(b"authorization", b"").decode("latin-1")
             base = _canonical_mcp_base(scope, headers, self.public_origin)
             # OAuth discovery currently exposes one canonical MCP resource.
-            # Legacy SSE's /sse and /messages routes are two transport legs of
-            # that same resource, not independently token-bound resources.
             resource = f"{base}{self.resource_path}"
             bearer_token = _extract_bearer_token(auth)
             valid = False
@@ -737,18 +734,14 @@ def build_http_app(
     lifecycle: RuntimeLifecycle,
     static_token_validator: TokenValidator | None = None,
 ) -> Any:
-    """Build the HTTP/SSE ASGI app with one consistent middleware stack."""
+    """Build the HTTP (streamable-http) ASGI app with one consistent middleware stack."""
 
     if transport == "streamable-http":
         app = mcp.streamable_http_app()
-    elif transport == "sse":
-        app = mcp.sse_app()
     else:
         raise ValueError(f"HTTP app cannot be built for transport: {transport}")
 
-    mcp_path_matcher = (
-        is_sse_endpoint_path if transport == "sse" else is_mcp_endpoint_path
-    )
+    mcp_path_matcher = is_mcp_endpoint_path
 
     install_runtime_lifespan(app, lifecycle)
     app.add_middleware(

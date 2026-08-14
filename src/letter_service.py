@@ -5,9 +5,8 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
-from identity import identity_names
 from stored_data import stored_data_marker
-from utils import normalize_memory_title, strip_wikilinks
+from utils import get_ai_name, normalize_memory_title, strip_wikilinks
 
 
 class LetterService:
@@ -19,7 +18,16 @@ class LetterService:
         self.embedding_engine = embedding_engine
 
     def _ai_name(self, explicit: str = "") -> str:
-        return str(explicit or "").strip() or identity_names(self.config)["ai_name"]
+        explicit_name = str(explicit or "").strip()
+        if explicit_name:
+            return explicit_name
+        identity = self.config.get("identity") or {}
+        configured_name = (
+            str(identity.get("ai_name") or "").strip()
+            if isinstance(identity, dict)
+            else ""
+        )
+        return configured_name or get_ai_name()
 
     def _content_error(self, content: str) -> str:
         limits = self.config.get("limits", {})
@@ -74,6 +82,10 @@ class LetterService:
         ai_name: str = "",
         *,
         event_actor: str = "llm",
+        lock_type: str = "",
+        unlock_date: str | None = None,
+        locked_by: str = "",
+        writer_name: str = "",
     ) -> tuple[str, str]:
         """Create one canonical letter and return its ID and stored author."""
 
@@ -114,6 +126,10 @@ class LetterService:
             source_tool="letter",
             event_actor=event_actor,
             extra_metadata=extra_metadata,
+            lock_type=lock_type,
+            unlock_date=unlock_date,
+            locked_by=locked_by,
+            writer_name=writer_name,
         )
         return bucket_id, normalized_author
 

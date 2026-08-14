@@ -30,6 +30,7 @@ import logging
 import asyncio
 import inspect
 import time
+from contextlib import asynccontextmanager
 from typing import Any, Awaitable
 import httpx
 
@@ -318,18 +319,36 @@ _gh_auto_interval: int = int(_gh_cfg.get("auto_interval_minutes") or 0)
 
 
 # --- Create MCP server instance / 创建 MCP 服务器实例 ---
-# host="0.0.0.0" so Docker container's SSE is externally reachable
+# host="0.0.0.0" so Docker container's HTTP transport is externally reachable
 # stdio mode ignores host (no network)
 #
 # 历史上的 /mcp-extra 已退休；所有工具与 HTTP custom_route 都挂在唯一实例上。
 # Streamable HTTP 固定返回单个 JSON-RPC 对象并采用无状态请求，兼容不会
-# 保存 Mcp-Session-Id 的客户端，同时不影响 stdio 与 legacy SSE。
+# 保存 Mcp-Session-Id 的客户端，同时不影响 stdio。
+_stdio_runtime_lifecycle = None
+
+
+@asynccontextmanager
+async def _stdio_lifespan(_server):
+    lifecycle = _stdio_runtime_lifecycle
+    if lifecycle is None:
+        yield {}
+        return
+
+    await lifecycle.start()
+    try:
+        yield {}
+    finally:
+        await lifecycle.stop()
+
+
 mcp = FastMCP(
     "Ombre Brain",
     host=_BIND_HOST,
     port=OMBRE_PORT,
     json_response=True,
     stateless_http=True,
+    lifespan=_stdio_lifespan if config.get("transport", "stdio") == "stdio" else None,
 )
 
 
@@ -741,7 +760,7 @@ if __name__ == "__main__":
         build_http_app,
     )
 
-    if transport in ("sse", "streamable-http"):
+    if transport == "streamable-http":
         import uvicorn
         from current_schedulers import CurrentSchedulers
         from web import ollama_local as _ollama_local
@@ -872,6 +891,22 @@ if __name__ == "__main__":
             port=OMBRE_PORT,
             proxy_headers=False,
         )
-    else:
-        # stdio: canonical manifest tools are already registered on mcp.
+    elif transport == "stdio":
+        # stdio uses the same embedding outbox lifecycle as HTTP so durable
+        # writes never fall back to blocking provider calls.
+        _stdio_runtime_lifecycle = RuntimeLifecycle(
+            logger=logger,
+            embedding_outbox=embedding_outbox,
+            boot_marker_path=os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                ".boot_fails",
+            ),
+        )
         mcp.run(transport=transport)
+    else:
+        logger.error(
+            f"不支持的 transport：{transport!r}。合法值仅 streamable-http、stdio；"
+            "legacy SSE 传输已下线，请改用 streamable-http 并更新 config.yaml / "
+            "OMBRE_TRANSPORT。"
+        )
+        raise SystemExit(1)

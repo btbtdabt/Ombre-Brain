@@ -10,6 +10,7 @@ from tools.breath._verbatim import render_stored_bucket
 from tools.breath.importance import surface_by_importance
 from tools.breath.search import surface_search
 from tools.breath.surface import surface_default
+from utils import strip_wikilinks
 
 
 class ExplodingDehydrator:
@@ -162,12 +163,15 @@ async def test_query_multiple_buckets_return_each_body_exactly(bucket_mgr, monke
         for content in contents
     ]
     stored = {bucket_id: (await bucket_mgr.get(bucket_id))["content"] for bucket_id in ids}
+    # 展示文本只做双链正则清理（strip_wikilinks），不改磁盘原文：
+    # 磁盘上 [[原始双链]] 仍保留括号，但 breath 返回的展示文本会去掉它们。
+    displayed = {bucket_id: strip_wikilinks(content) for bucket_id, content in stored.items()}
     dehydrator = _install_runtime(bucket_mgr)
     monkeypatch.setattr("tools.breath.search.random.random", lambda: 1.0)
 
     output = await _search("群星校验词")
 
-    for bucket_id, expected in stored.items():
+    for bucket_id, expected in displayed.items():
         actual = _returned_body(output, bucket_id, len(expected))
         assert actual == expected
         assert _sha256(actual) == _sha256(expected)
@@ -185,6 +189,51 @@ async def test_catalog_still_returns_metadata_without_body(bucket_mgr):
     assert "目录校验 | 测试 | 9" in output
     assert body not in output
     assert dehydrator.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_breath_marks_hidden_source_evidence_without_inlining_it(
+    bucket_mgr, monkeypatch
+):
+    source_ref = "src_" + "a" * 64
+    body = "只返回这条记忆正文，不自动展开背后的聊天原文。"
+    bucket_id = await bucket_mgr.create(
+        content=body,
+        title="京都计划",
+        domain=["旅行"],
+        importance=8,
+        source_refs=[{"ref": source_ref, "ranges": [[1, 3]]}],
+    )
+    _install_runtime(bucket_mgr)
+    monkeypatch.setattr("tools.breath.search.random.random", lambda: 1.0)
+
+    output = await dispatch(query=bucket_id, max_tokens=10000)
+
+    assert body in output
+    assert "[source_available:true | source_title:京都计划 | use:source_read]" in output
+    assert source_ref not in output
+
+
+@pytest.mark.asyncio
+async def test_catalog_marks_source_availability_without_returning_body(bucket_mgr):
+    source_ref = "src_" + "b" * 64
+    body = "目录里绝不能出现的原文或记忆正文。"
+    await bucket_mgr.create(
+        content=body,
+        name="京都旅行",
+        title="京都旅行",
+        domain=["旅行"],
+        importance=9,
+        source_refs=[{"ref": source_ref, "ranges": [[1, 1]]}],
+    )
+    _install_runtime(bucket_mgr)
+
+    output = await dispatch(catalog=True)
+
+    assert "京都旅行 | 旅行 | 9" in output
+    assert "[source_available:true | source_title:京都旅行 | use:source_read]" in output
+    assert body not in output
+    assert source_ref not in output
 
 
 @pytest.mark.asyncio

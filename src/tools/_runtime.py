@@ -34,6 +34,7 @@ from operation_runtime import run_optional_operation
 # --- 共享对象引用，由 server.py 在启动时通过 init(...) 注入 ---
 config: Any = None
 bucket_mgr: Any = None
+deletion_requests: Any = None
 dehydrator: Any = None
 decay_engine: Any = None
 embedding_engine: Any = None

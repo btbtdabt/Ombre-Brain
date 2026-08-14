@@ -17,6 +17,8 @@ import web.meta as meta
 
 _GEN_PATH = Path(__file__).resolve().parents[1] / "deploy" / "gen_update_manifest.py"
 _spec = importlib.util.spec_from_file_location("gen_update_manifest", _GEN_PATH)
+assert _spec is not None
+assert _spec.loader is not None
 gen = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(gen)
 
@@ -62,6 +64,23 @@ def test_manifest_excludes_pycache(tmp_path):
     paths = {e["path"] for e in m["files"]}
     assert paths == {"src/server.py", "src/util.py", "frontend/app.js"}
     assert m["version"] == "9.9.9"
+
+
+def test_check_rejects_stale_manifest_version(tmp_path, monkeypatch):
+    fresh = {
+        "version": "9.9.9",
+        "rollout_strategy": "single-node",
+        "files": [],
+    }
+    manifest_path = tmp_path / "update_manifest.json"
+    manifest_path.write_text(
+        json.dumps({**fresh, "version": "9.9.8"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(gen, "_MANIFEST_PATH", str(manifest_path))
+    monkeypatch.setattr(gen, "build_manifest", lambda: fresh)
+
+    assert gen.main(["gen_update_manifest.py", "--check"]) == 1
 
 
 def test_generated_manifest_passes_do_update_verifier(tmp_path):

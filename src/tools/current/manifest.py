@@ -35,6 +35,7 @@ from .services import (
     darkroom_view,
     delete_bucket_comment,
     letter_read,
+    letter_lock_update,
     letter_write,
     reminder_create,
     reminder_list,
@@ -86,6 +87,7 @@ CURRENT_TOOL_NAMES = (
     "read_bucket",
     "list_buckets_light",
     "letter_write",
+    "letter_lock_update",
     "letter_read",
     "comment_bucket",
     "delete_bucket_comment",
@@ -101,7 +103,7 @@ CURRENT_TOOL_NAMES = (
     "introspection",
 )
 
-# P0 exposes these 15 names on its FastMCP surface. The current handler is
+# P0 exposes these 16 names on its FastMCP surface. The current handler is
 # canonical for every overlap; non-overlapping names use focused adapters or
 # compatibility handlers in this package.
 P0_TOOL_NAMES = (
@@ -117,6 +119,7 @@ P0_TOOL_NAMES = (
     "pulse",
     "plan",
     "letter_write",
+    "letter_lock_update",
     "letter_read",
     "I",
     "dream",
@@ -145,6 +148,7 @@ TOOL_MANIFEST = (
             read_bucket,
             list_buckets_light,
             letter_write,
+            letter_lock_update,
             letter_read,
             comment_bucket,
             delete_bucket_comment,

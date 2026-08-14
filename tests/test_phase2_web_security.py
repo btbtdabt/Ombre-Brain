@@ -6,6 +6,7 @@ from urllib.parse import urlsplit
 
 import httpx
 import pytest
+from openai import AsyncOpenAI
 from starlette.datastructures import Headers
 from starlette.requests import Request
 
@@ -506,8 +507,9 @@ async def test_openai_compat_passes_configured_extra_body(tmp_path):
                 choices=[SimpleNamespace(message=SimpleNamespace(content="OK"))]
             )
 
-    dehydrator.client = SimpleNamespace(
-        chat=SimpleNamespace(completions=Completions())
+    dehydrator.client = cast(
+        AsyncOpenAI,
+        SimpleNamespace(chat=SimpleNamespace(completions=Completions())),
     )
     try:
         result = await dehydrator._chat_once("system", "user")
@@ -516,6 +518,85 @@ async def test_openai_compat_passes_configured_extra_body(tmp_path):
 
     assert result == "OK"
     assert captured["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+@pytest.mark.parametrize(
+    ("model", "expected_limit_key"),
+    [
+        ("gpt-5", "max_completion_tokens"),
+        ("openai/gpt-5-mini", "max_completion_tokens"),
+        ("models/gpt-5.1", "max_completion_tokens"),
+        ("gpt-50x", "max_tokens"),
+        ("deepseek-v4-flash", "max_tokens"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_openai_compat_uses_model_specific_completion_limit(
+    tmp_path,
+    model,
+    expected_limit_key,
+):
+    dehydrator = Dehydrator(
+        {
+            "buckets_dir": str(tmp_path),
+            "dehydration": {"api_key": "test-key", "model": model},
+        }
+    )
+    captured = {}
+
+    class Completions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="OK"))]
+            )
+
+    dehydrator.client = cast(
+        AsyncOpenAI,
+        SimpleNamespace(chat=SimpleNamespace(completions=Completions())),
+    )
+    try:
+        result = await dehydrator._chat_once("system", "user", max_tokens=7)
+    finally:
+        dehydrator.close()
+
+    other_limit_key = (
+        "max_tokens"
+        if expected_limit_key == "max_completion_tokens"
+        else "max_completion_tokens"
+    )
+    assert result == "OK"
+    assert captured[expected_limit_key] == 7
+    assert other_limit_key not in captured
+
+
+@pytest.mark.asyncio
+async def test_dehydration_probe_delegates_to_active_provider_dispatch(monkeypatch):
+    calls = []
+
+    class ActiveDehydrator:
+        api_key = "probe-key"
+        api_format = "openai_compat"
+
+        async def _chat_once(self, system, user, **kwargs):
+            calls.append((system, user, kwargs))
+            return "OK"
+
+    monkeypatch.setattr(config_api_web.sh, "_require_auth", lambda _request: None)
+    monkeypatch.setattr(config_api_web.sh, "dehydrator", ActiveDehydrator())
+    mcp = FakeMCP()
+    config_api_web.register(mcp)
+
+    response = await mcp.routes[("POST", "/api/test/dehydration")](object())
+
+    assert response.status_code == 200
+    assert calls == [
+        (
+            "Connection health probe. Reply briefly.",
+            "Reply with OK.",
+            {"max_tokens": 5, "temperature": 0.0},
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -783,6 +864,7 @@ async def test_mcp_exception_secrets_never_reach_response_persistence_or_logs(
         "pulse",
         "plan",
         "letter_write",
+        "letter_lock_update",
         "letter_read",
         "I",
     ),
@@ -840,3 +922,48 @@ async def test_chunked_multipart_raw_stream_is_bounded_before_form_result():
 
     assert request.received == 2
     assert request._receive is request.original_receive
+
+
+def test_safe_error_detail_redacts_credential_forms():
+    """异常正文可以给出去，但三类常见凭证形态必须先抹掉。"""
+    from errors import safe_error_detail
+
+    detail = safe_error_detail(
+        RuntimeError(
+            "call failed: Authorization: Bearer abc123secret, "
+            "api_key=sk-livesecretvalue123456 at https://provider.invalid"
+        )
+    )
+
+    assert "abc123secret" not in detail
+    assert "sk-livesecretvalue123456" not in detail
+    assert "[REDACTED]" in detail
+    # 非凭证信息要保留，否则脱敏就等于把排查线索一起删了
+    assert "call failed" in detail
+
+
+def test_safe_error_detail_falls_back_and_bounds_length():
+    """空正文回落到异常类名；超长正文截断，避免把整页 traceback 塞给客户端。"""
+    from errors import safe_error_detail
+
+    assert safe_error_detail(RuntimeError("")) == "RuntimeError"
+    assert len(safe_error_detail(RuntimeError("x" * 5000))) <= 200
+
+
+@pytest.mark.asyncio
+async def test_tool_return_redacts_credentials_on_broad_failure(monkeypatch):
+    """工具层 broad-except 的回传不得把凭证原样送到 MCP 客户端。"""
+    import tools._runtime as rt
+    from tools.breath.catalog import surface_catalog
+
+    class ExplodingBucketMgr:
+        async def list_all(self, include_archive=False):
+            raise RuntimeError("disk backend rejected api_key=sk-livesecretvalue123456")
+
+    monkeypatch.setattr(rt, "bucket_mgr", ExplodingBucketMgr(), raising=False)
+
+    result = await surface_catalog()
+
+    assert "sk-livesecretvalue123456" not in result
+    assert "[REDACTED]" in result
+    assert "获取记忆目录失败" in result

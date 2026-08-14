@@ -10,6 +10,7 @@ from typing import Any
 
 from backup_manager import VaultBackupManager
 from darkroom import DarkroomStore
+from deletion_requests import DeletionRequestStore
 from dream_engine import DreamEngine
 from entity_edges import EntityEdgeStore, extract_entity_edges_from_bucket
 from gateway_state import GatewayStateStore
@@ -168,6 +169,7 @@ class RuntimeCollaborators:
     identity_semantic_store: IdentitySemanticStore = field(init=False)
     word_map_store: WordMapStore = field(init=False)
     darkroom_store: DarkroomStore = field(init=False)
+    deletion_requests: DeletionRequestStore = field(init=False)
     gateway_state_store: GatewayStateStore = field(init=False)
     raw_event_store: RawEventStore = field(init=False)
     reminder_store: ReminderStore = field(init=False)
@@ -196,6 +198,11 @@ class RuntimeCollaborators:
         self.identity_semantic_store = IdentitySemanticStore(self.config)
         self.word_map_store = WordMapStore(self.config)
         self.darkroom_store = DarkroomStore(self.config)
+        self.deletion_requests = DeletionRequestStore(
+            self.config["buckets_dir"],
+            self.bucket_mgr,
+            self.embedding_engine,
+        )
         gateway_db = os.path.join(self.config["buckets_dir"], "gateway_state.db")
         self.gateway_state_store = GatewayStateStore(gateway_db)
         self.raw_event_store = RawEventStore(self.config)
@@ -261,6 +268,7 @@ class RuntimeCollaborators:
             "reminder_store": self.reminder_store,
             "letter_service": self.letter_service,
             "darkroom_store": self.darkroom_store,
+            "deletion_requests": self.deletion_requests,
             "memory_edge_store": self.memory_edge_store,
             "memory_moment_store": self.memory_moment_store,
             "memory_node_store": self.memory_node_store,
@@ -292,6 +300,7 @@ class RuntimeCollaborators:
             "backup_manager": self.backup_manager,
             "source_store": self.source_store,
             "darkroom_store": self.darkroom_store,
+            "deletion_requests": self.deletion_requests,
             "dream_engine": self.dream_engine,
             "memory_edge_store": self.memory_edge_store,
             "memory_moment_store": self.memory_moment_store,

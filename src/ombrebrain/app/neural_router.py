@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 import json
-from typing import Any, Mapping
+from typing import Any, Mapping, NotRequired, TypedDict
 
 from ombrebrain.domain.commands import CommandKind
 
@@ -19,6 +19,7 @@ class OrganTool(str, Enum):
     RELEASE = "release"
     I = "I"
     LETTER_WRITE = "letter_write"
+    LETTER_LOCK_UPDATE = "letter_lock_update"
     LETTER_READ = "letter_read"
     PLAN = "plan"
 
@@ -142,11 +143,21 @@ _PUBLIC_TO_ORGAN: dict[str, tuple[str, OrganTool]] = {
     "i": ("I", OrganTool.I),
     "letter": ("letter_write", OrganTool.LETTER_WRITE),
     "letter_write": ("letter_write", OrganTool.LETTER_WRITE),
+    "letter_lock_update": ("letter_lock_update", OrganTool.LETTER_LOCK_UPDATE),
     "letter_read": ("letter_read", OrganTool.LETTER_READ),
     "plan": ("plan", OrganTool.PLAN),
 }
 
-_ROUTE_TABLE: dict[OrganTool, dict[str, object]] = {
+class _RouteSpec(TypedDict):
+    subsystem: NeuralSubsystem
+    command_kind: CommandKind
+    writes_memory: bool
+    surface_budget: NotRequired[str]
+    policy_boundaries: tuple[str, ...]
+    capability_tags: tuple[str, ...]
+
+
+_ROUTE_TABLE: dict[OrganTool, _RouteSpec] = {
     OrganTool.HOLD: {
         "subsystem": NeuralSubsystem.ENGRAM_ENCODING,
         "command_kind": CommandKind.HOLD,
@@ -224,6 +235,13 @@ _ROUTE_TABLE: dict[OrganTool, dict[str, object]] = {
         "writes_memory": False,
         "policy_boundaries": ("non-cognition-boundary", "raw-artifact-preserved"),
         "capability_tags": ("memory:read", "tools:letter_read"),
+    },
+    OrganTool.LETTER_LOCK_UPDATE: {
+        "subsystem": NeuralSubsystem.ARTIFACT_TRACE,
+        "command_kind": CommandKind.TRACE,
+        "writes_memory": True,
+        "policy_boundaries": ("letter-lock-metadata-only", "raw-artifact-preserved"),
+        "capability_tags": ("memory:write", "tools:letter_lock_update"),
     },
     OrganTool.PLAN: {
         "subsystem": NeuralSubsystem.UNRESOLVED_TENSION_MEMORY,

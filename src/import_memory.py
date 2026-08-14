@@ -39,6 +39,7 @@ from typing import Any, Awaitable, Callable, cast
 import jieba
 from rapidfuzz import fuzz
 
+from errors import safe_error_detail
 from identity import effective_human_name, identity_names
 
 from runtime_values import (
@@ -47,13 +48,8 @@ from runtime_values import (
     int_between as _int_between,
     iso_date_key as _date_key,
 )
-from tools._common import (
-    _HIGH_IMP_THRESHOLD,
-    _quota_turn,
-    enforce_high_importance_quota,
-    is_terminal_memory_metadata,
-    occupies_high_importance_quota_slot,
-)
+from tools._common import is_terminal_memory_metadata
+from tools.plan.core import is_letter_bucket
 from utils import (
     LOCAL_TZ,
     atomic_write_text,
@@ -157,17 +153,8 @@ _IMPORT_ERROR_RULES = (
 
 
 def _safe_import_error_detail(exc: BaseException) -> str:
-    """Return a bounded provider error while redacting common credentials."""
-
-    detail = str(exc).strip() or type(exc).__name__
-    detail = re.sub(r"(?i)(bearer\s+)[^\s,;]+", r"\1[REDACTED]", detail)
-    detail = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "[REDACTED]", detail)
-    detail = re.sub(
-        r"(?i)((?:api[_-]?key|token)\s*[=:]\s*)[^\s,;]+",
-        r"\1[REDACTED]",
-        detail,
-    )
-    return detail[:_CHUNK_ERR_PREVIEW]
+    """Use the shared bounded, credential-safe provider error formatter."""
+    return safe_error_detail(exc)
 
 
 def diagnose_import_errors(errors: list[object]) -> list[dict[str, str]]:
@@ -2727,7 +2714,7 @@ class ImportEngine:
         return True
 
     async def _create_import_bucket(self, item: dict) -> str:
-        """Create one imported memory under the ordinary high quota."""
+        """Create one imported memory; importance remains an ordinary score."""
         requested_importance = item.get(
             "importance", _DEFAULT_IMPORTANCE
         )
@@ -2740,46 +2727,21 @@ class ImportEngine:
         if event_date:
             extra_metadata["import_event_date"] = event_date
 
-        async def create(
-            final_importance: int,
-            *,
-            defer_derived_index: bool = False,
-        ) -> str:
-            return await self.bucket_mgr.create(
-                content=item["content"],
-                tags=item.get("tags", []),
-                importance=final_importance,
-                domain=item.get("domain", ["未分类"]),
-                valence=item.get("valence", _DEFAULT_VALENCE),
-                arousal=item.get("arousal", _DEFAULT_AROUSAL),
-                name=item.get("name") or None,
-                source="import",
-                source_tool="import",
-                event_actor="human",
-                imported=True,
-                date=event_date or None,
-                extra_metadata=extra_metadata,
-                defer_derived_index=defer_derived_index,
-            )
-
-        if requested_importance >= _HIGH_IMP_THRESHOLD:
-            async with _quota_turn("high_importance"):
-                final_importance = await enforce_high_importance_quota(
-                    requested_importance,
-                    bucket_mgr=self.bucket_mgr,
-                )
-                bucket_id = await create(
-                    final_importance,
-                    defer_derived_index=True,
-                )
-            post_index = getattr(
-                self.bucket_mgr, "_index_after_update", None
-            )
-            if callable(post_index):
-                post_index_fn = cast(Callable[..., Awaitable[bool]], post_index)
-                await post_index_fn(bucket_id, content_changed=True)
-            return bucket_id
-        return await create(requested_importance)
+        return await self.bucket_mgr.create(
+            content=item["content"],
+            tags=item.get("tags", []),
+            importance=requested_importance,
+            domain=item.get("domain", ["未分类"]),
+            valence=item.get("valence", _DEFAULT_VALENCE),
+            arousal=item.get("arousal", _DEFAULT_AROUSAL),
+            name=item.get("name") or None,
+            source="import",
+            source_tool="import",
+            event_actor="human",
+            imported=True,
+            date=event_date or None,
+            extra_metadata=extra_metadata,
+        )
 
     async def _process_single_chunk(self, chunk: dict, preserve_raw: bool) -> bool:
         """Extract memories from one chunk and durably store each item."""
@@ -3443,13 +3405,6 @@ class ImportEngine:
 
                     derived_state = {}
                     async with AsyncExitStack() as commit_stack:
-                        # An incoming 9/10 can promote an ordinary low bucket.
-                        # Hold the same global quota turn as MCP/Web writers
-                        # from the final re-read through the durable update.
-                        if importance >= _HIGH_IMP_THRESHOLD:
-                            await commit_stack.enter_async_context(
-                                _quota_turn("high_importance")
-                            )
                         bucket_turn = getattr(
                             self.bucket_mgr, "_bucket_turn", None
                         )
@@ -3510,23 +3465,6 @@ class ImportEngine:
                         except (TypeError, ValueError, OverflowError):
                             old_importance = _DEFAULT_IMPORTANCE
                         merged_importance = max(old_importance, importance)
-                        projected_metadata = dict(locked_metadata)
-                        projected_metadata["importance"] = merged_importance
-                        if (
-                            occupies_high_importance_quota_slot(
-                                projected_metadata
-                            )
-                            and not occupies_high_importance_quota_slot(
-                                locked_metadata
-                            )
-                        ):
-                            merged_importance = (
-                                await enforce_high_importance_quota(
-                                    merged_importance,
-                                    bucket_mgr=self.bucket_mgr,
-                                )
-                            )
-
                         old_v = (
                             locked_metadata.get("valence")
                             or _DEFAULT_VALENCE
@@ -3613,7 +3551,8 @@ class ImportEngine:
         all_buckets = await self.bucket_mgr.list_all(include_archive=False)
         dynamic_buckets = [
             b for b in all_buckets
-            if b["metadata"].get("type") == "dynamic"
+            if not is_letter_bucket(b)
+            and b["metadata"].get("type") == "dynamic"
             and not b["metadata"].get("pinned")
             and not b["metadata"].get("resolved")
         ]

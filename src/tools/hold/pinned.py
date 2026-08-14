@@ -22,14 +22,12 @@ permanent 目录，不衰减、不会被合并掉。
 ========================================
 """
 
-from collections.abc import Awaitable, Callable
-from typing import cast
+from typing import Awaitable, Callable, cast
 
 from utils import normalize_memory_title
 
 from .. import _runtime as rt
 from .._common import check_pinned_quota, _quota_turn
-from .metadata import default_hold_analysis, normalize_hold_metadata
 
 
 async def store_pinned(
@@ -41,15 +39,31 @@ async def store_pinned(
     title: str = "",
     meaning: str = "",
     media: list | str | None = None,
+    explicit_domain: list[str] | None = None,
+    source_refs: list[dict] | None = None,
 ) -> str:
     try:
         analysis = await rt.dehydrator.analyze(content)
     except Exception as e:
         rt.logger.warning(f"Auto-tagging failed, using defaults / 自动打标失败: {e}")
-        analysis = default_hold_analysis()
+        analysis = {
+            "domain": ["未分类"], "valence": 0.5, "arousal": 0.3,
+            "tags": [], "suggested_name": "",
+        }
 
-    metadata = normalize_hold_metadata(analysis, extra_tags, valence, arousal)
-    final_title = title or normalize_memory_title(metadata.suggested_name)
+    analyzed_domain = analysis.get("domain") or ["未分类"]
+    if not isinstance(analyzed_domain, list):
+        analyzed_domain = ["未分类"]
+    final_domain = explicit_domain or analyzed_domain
+    _v = analysis.get("valence", 0.5)
+    _a = analysis.get("arousal", 0.3)
+    final_valence = valence if 0 <= valence <= 1 else (float(_v) if _v is not None else 0.5)
+    final_arousal = arousal if 0 <= arousal <= 1 else (float(_a) if _a is not None else 0.3)
+    _raw_tags = analysis.get("tags") or []
+    model_tags = _raw_tags if isinstance(_raw_tags, list) else []
+    all_tags = list(dict.fromkeys(extra_tags if extra_tags else model_tags))
+    suggested_name = analysis.get("suggested_name", "")
+    final_title = title or normalize_memory_title(suggested_name)
 
     # 配额判定 + 落盘必须在同一把锁里：两个并发 hold(pinned=True) 都可能在
     # 对方提交前读到同一个「未满」快照，检查和创建隔着一次 await 就会互相看不见。
@@ -60,13 +74,14 @@ async def store_pinned(
 
         bucket_id = await rt.bucket_mgr.create(
             content=content,
-            tags=metadata.tags,
+            tags=all_tags,
             importance=10,
-            domain=metadata.domains,
-            valence=metadata.valence,
-            arousal=metadata.arousal,
-            name=metadata.suggested_name or None,
+            domain=final_domain,
+            valence=final_valence,
+            arousal=final_arousal,
+            name=suggested_name or None,
             title=final_title,
+            source_refs=source_refs,
             bucket_type="permanent",
             pinned=True,
             why_remembered=why_remembered,
@@ -77,12 +92,14 @@ async def store_pinned(
             media=media,
             defer_derived_index=True,
         )
-    post_index = getattr(rt.bucket_mgr, "_index_after_update", None)
+    post_index = cast(
+        Callable[..., Awaitable[object]] | None,
+        getattr(rt.bucket_mgr, "_index_after_update", None),
+    )
     if callable(post_index):
-        post_index_fn = cast(Callable[..., Awaitable[bool]], post_index)
-        await post_index_fn(
+        await post_index(
             bucket_id,
             content_changed=True,
             meaning_changed=bool(meaning),
         )
-    return f"📌钉选→{bucket_id} {','.join(str(d) for d in metadata.domains if d is not None)}"
+    return f"📌钉选→{bucket_id} {','.join(str(d) for d in final_domain if d is not None)}"

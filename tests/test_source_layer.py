@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import errno
 import os
+from pathlib import Path
+from typing import Any, cast
 from unittest.mock import MagicMock
 
-import frontmatter
 import pytest
 
 import tools._runtime as rt
@@ -246,7 +247,10 @@ async def test_hold_explicit_tags_extend_model_suggestions(
     monkeypatch.setattr(rt, "fire_webhook", None)
     monkeypatch.setattr(rt, "mark_op", None)
 
-    result = await hold(content="人工标签优先。", tags=["人工标签"])
+    result = await hold(
+        content="人工标签优先。",
+        tags=cast(Any, ["人工标签"]),
+    )
     bucket_id = result.split("→", 1)[1].split()[0]
     bucket = await bucket_mgr.get(bucket_id)
     assert bucket["metadata"]["tags"] == ["模型标签", "人工标签"]
@@ -254,25 +258,164 @@ async def test_hold_explicit_tags_extend_model_suggestions(
 
 
 @pytest.mark.asyncio
-async def test_source_ref_append_rejects_corrupt_existing_refs_without_data_loss(
-    bucket_mgr,
+async def test_hold_explicit_domain_wins_over_model_suggestion(
+    bucket_mgr, monkeypatch
 ):
-    bucket_id = await bucket_mgr.create(content="已有正文", title="来源保护")
+    class Dehydrator:
+        async def analyze(self, _content):
+            return {
+                "domain": ["模型域"],
+                "valence": 0.5,
+                "arousal": 0.3,
+                "tags": [],
+                "suggested_name": "模型标题",
+            }
+
+        def invalidate_cache(self, _content):
+            return None
+
+    class Decay:
+        async def ensure_started(self):
+            return None
+
+    monkeypatch.setattr(rt, "config", {"limits": {}, "merge_threshold": 75})
+    monkeypatch.setattr(rt, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(rt, "dehydrator", Dehydrator())
+    monkeypatch.setattr(rt, "decay_engine", Decay())
+    monkeypatch.setattr(rt, "logger", MagicMock())
+    monkeypatch.setattr(rt, "fire_webhook", None)
+    monkeypatch.setattr(rt, "mark_op", None)
+
+    result = await hold(content="人工 domain 优先。", domain="人工域")
+    bucket_id = result.split("→", 1)[1].split()[0]
     bucket = await bucket_mgr.get(bucket_id)
-    path = bucket["path"]
-    post = frontmatter.load(path)
-    post["source_refs"] = "not-a-list"
-    with open(path, "w", encoding="utf-8") as handle:
-        handle.write(frontmatter.dumps(post))
-    original = open(path, "rb").read()
+    assert bucket["metadata"]["domain"] == ["人工域"]
 
-    with pytest.raises(ValueError, match="source_refs 必须是列表"):
-        await bucket_mgr.update(
-            bucket_id,
-            source_refs_append=[{"ref": "src_" + "a" * 64, "ranges": [[1, 1]]}],
-        )
 
-    assert open(path, "rb").read() == original
+@pytest.mark.asyncio
+async def test_hold_optional_source_content_uses_shared_source_layer(
+    bucket_mgr, monkeypatch
+):
+    class Dehydrator:
+        async def analyze(self, _content):
+            return {
+                "domain": ["旅行"],
+                "valence": 0.8,
+                "arousal": 0.5,
+                "tags": ["京都"],
+                "suggested_name": "京都计划",
+            }
+
+        def invalidate_cache(self, _content):
+            return None
+
+    class Decay:
+        async def ensure_started(self):
+            return None
+
+    store = SourceStore(bucket_mgr.base_dir)
+    monkeypatch.setattr(rt, "config", {"limits": {}, "merge_threshold": 75})
+    monkeypatch.setattr(rt, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(rt, "dehydrator", Dehydrator())
+    monkeypatch.setattr(rt, "decay_engine", Decay())
+    monkeypatch.setattr(rt, "source_store", store)
+    monkeypatch.setattr(rt, "logger", MagicMock())
+    monkeypatch.setattr(rt, "fire_webhook", None)
+    monkeypatch.setattr(rt, "mark_op", None)
+
+    source = "第一行：讨论目的地\n第二行：决定去京都\n第三行：约定时间\n"
+    existing_ref = store.put(source)
+    result = await hold(
+        content="我们决定下个月一起去京都。",
+        title="京都计划",
+        source_content=source,
+    )
+    bucket_id = result.split("→", 1)[1].split()[0]
+    bucket = await bucket_mgr.get(bucket_id)
+    refs = bucket["metadata"]["source_refs"]
+
+    assert refs[0]["ref"] == existing_ref
+    assert len(list((Path(bucket_mgr.base_dir) / "_sources").glob("*.source"))) == 1
+    assert refs[0]["ranges"] == [[1, 3]]
+    assert store.read(refs[0]["ref"]) == source
+
+    event = await source_read(bucket_id, "京都计划", scope="event")
+    assert "第一行：讨论目的地" in event
+    assert "第三行：约定时间" in event
+
+
+@pytest.mark.asyncio
+async def test_hold_source_ranges_select_event_and_merge_appends_evidence(
+    bucket_mgr, monkeypatch
+):
+    class Dehydrator:
+        async def analyze(self, _content):
+            return {
+                "domain": ["旅行"],
+                "valence": 0.8,
+                "arousal": 0.5,
+                "tags": [],
+                "suggested_name": "去了京都",
+            }
+
+        def invalidate_cache(self, _content):
+            return None
+
+    class Decay:
+        async def ensure_started(self):
+            return None
+
+    store = SourceStore(bucket_mgr.base_dir)
+    monkeypatch.setattr(rt, "config", {"limits": {}, "merge_threshold": 75})
+    monkeypatch.setattr(rt, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(rt, "dehydrator", Dehydrator())
+    monkeypatch.setattr(rt, "decay_engine", Decay())
+    monkeypatch.setattr(rt, "source_store", store)
+    monkeypatch.setattr(rt, "logger", MagicMock())
+    monkeypatch.setattr(rt, "fire_webhook", None)
+    monkeypatch.setattr(rt, "mark_op", None)
+
+    memory = "我们今天真的去了京都。"
+    first = await hold(
+        content=memory,
+        title="去了京都",
+        source_content="前情\n今天到了京都\n去了清水寺\n收尾\n",
+        source_ranges=[[2, 3]],
+    )
+    bucket_id = first.split("→", 1)[1].split()[0]
+    event = await source_read(bucket_id, "去了京都", scope="event")
+    assert "今天到了京都" in event
+    assert "去了清水寺" in event
+    assert "前情" not in event
+    assert "收尾" not in event
+
+    second = await hold(
+        content=memory,
+        title="去了京都",
+        source_content="另一段独立原话",
+    )
+    assert second.startswith("合并→")
+    bucket = await bucket_mgr.get(bucket_id)
+    assert len(bucket["metadata"]["source_refs"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_hold_source_ranges_require_source_content(bucket_mgr, monkeypatch):
+    class Decay:
+        async def ensure_started(self):
+            return None
+
+    monkeypatch.setattr(rt, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(rt, "decay_engine", Decay())
+    monkeypatch.setattr(rt, "mark_op", None)
+
+    result = await hold(
+        content="这条不应该写进去。",
+        title="无原文",
+        source_ranges=[[1, 1]],
+    )
+    assert "source_ranges 需要同时提供 source_content" in result
+    assert await bucket_mgr.list_all() == []
 
 
 @pytest.mark.asyncio

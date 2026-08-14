@@ -44,6 +44,7 @@ def dehydrator_for(api_format: str) -> Dehydrator:
     dehydrator.timeout_seconds = 15
     dehydrator.thinking_mode = ""
     dehydrator.thinking_budget = 0
+    dehydrator.extra_body = {}
     dehydrator.client = None
     return dehydrator
 

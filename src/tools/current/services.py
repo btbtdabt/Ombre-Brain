@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 from .._common import check_content_size, check_metadata_size, check_query_size
+from ..plan.core import (
+    letter_lock_update as p0_letter_lock_update,
+    letter_read as p0_letter_read,
+    letter_write as p0_letter_write,
+)
 from ._helpers import (
     ai_author_name,
     bucket_read_payload,
@@ -144,8 +149,10 @@ async def letter_write(
     title: str = "",
     date: str = "",
     ai_name: str = "",
+    lock_type: str = "none",
+    unlock_date: str = "",
 ) -> str:
-    """永久保存一封独立信件。author 可用 user、ai、当前 AI 名称或自定义署名。"""
+    """永久保存一封独立信件；可选 none、timed 或 permanent 可见时间锁。"""
     if error := check_content_size(content):
         return error
     if error := check_metadata_size(
@@ -154,24 +161,36 @@ async def letter_write(
         title=title,
         date=date,
         ai_name=ai_name,
+        lock_type=lock_type,
+        unlock_date=unlock_date,
     ):
         return error
-    service = require_runtime("letter_service")
-    result = await service.write(
+    result = await p0_letter_write(
         author=author,
         content=content,
         user_name=user_name,
         title=title,
         date=date,
         ai_name=ai_name,
+        lock_type=lock_type,
+        unlock_date=unlock_date,
     )
-    if "→" in result:
-        bucket_id = result.split("→", 1)[1].split(" ", 1)[0]
-        await queue_embedding_refresh(bucket_id)
-        bucket = await require_runtime("bucket_mgr").get(bucket_id)
-        if bucket:
-            refresh_bucket_indexes(bucket)
     return result
+
+
+async def letter_lock_update(
+    letter_id: str,
+    lock_type: str,
+    unlock_date: str = "",
+) -> str:
+    """只修改既有 Letter 的锁元数据；仅创建这把锁的一方可以操作。"""
+
+    return await p0_letter_lock_update(
+        letter_id=letter_id,
+        lock_type=lock_type,
+        unlock_date=unlock_date,
+        caller_side="ai",
+    )
 
 
 async def letter_read(
@@ -190,8 +209,7 @@ async def letter_read(
         date_to=date_to,
     ):
         return error
-    service = require_runtime("letter_service")
-    return await service.read(
+    return await p0_letter_read(
         query=query,
         limit=limit,
         author=author,
@@ -371,6 +389,7 @@ __all__ = (
     "darkroom_view",
     "delete_bucket_comment",
     "letter_read",
+    "letter_lock_update",
     "letter_write",
     "reminder_create",
     "reminder_list",

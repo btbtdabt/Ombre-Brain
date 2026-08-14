@@ -206,6 +206,10 @@ def test_letter_service_create_preserves_canonical_source_and_actor(tmp_path: Pa
             title="Shared\ncontract",
             ai_name="Nocturne",
             event_actor="human",
+            lock_type="permanent",
+            unlock_date="9999-12-31",
+            locked_by="human",
+            writer_name="Amy",
         )
     )
     bucket = asyncio.run(manager.get(bucket_id))
@@ -217,7 +221,31 @@ def test_letter_service_create_preserves_canonical_source_and_actor(tmp_path: Pa
     assert bucket["metadata"]["source_tool"] == "letter"
     assert bucket["metadata"]["author"] == "Nocturne"
     assert bucket["metadata"]["title"] == "Shared contract"
+    assert bucket["metadata"]["lock_type"] == "permanent"
+    assert bucket["metadata"]["unlock_date"] == "9999-12-31"
+    assert bucket["metadata"]["locked_by"] == "human"
+    assert bucket["metadata"]["writer_name"] == "Amy"
     assert event["payload"]["event_actor"] == "human"
+
+
+def test_letter_service_prefers_configured_identity_over_environment(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = _config(tmp_path)
+    config["identity"] = {"ai_name": "秋"}
+    monkeypatch.setenv("AI_NAME", "WrongEnvName")
+    manager = BucketManager(config)
+    letters = LetterService(config, manager, EmbeddingEngine(config))
+
+    bucket_id, author = asyncio.run(
+        letters.create(author="ai", content="configured identity")
+    )
+
+    bucket = asyncio.run(manager.get(bucket_id))
+    assert author == "秋"
+    assert bucket is not None
+    assert bucket["metadata"]["author"] == "秋"
 
 
 def test_letter_write_rejects_overlong_title_without_creating_bucket(tmp_path: Path) -> None:
