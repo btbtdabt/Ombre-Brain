@@ -8,8 +8,8 @@ verification evidence.
 
 ## Recorded Baselines
 
-- P0luz primary baseline: `v2.13.1` / `0bb1e4d`
-- Yinglianchun secondary baseline: `2651e2a`
+- P0luz primary baseline: `v2.17.5` / `278668e`
+- Yinglianchun secondary baseline: `284c9c7`
 - Historical deployed root runtime: `8e68a7d`
 - P0luz-base production cutover: `c806f78`
 
@@ -102,7 +102,7 @@ fixed access token remains a resource-bound compatibility credential.
 
 ### 2026-08-14 P0luz 2.17.5 memory lifecycle, Letter locks, deletion approval, and Ying raw-event sync
 
-This candidate batch reviews `0bb1e4d..278668e` from P0luz and
+This verified batch reviews `0bb1e4d..278668e` from P0luz and
 `2651e2a..284c9c7` from Yinglianchun. P0luz remains the implementation base.
 The Yinglianchun date-window correction is ported at the existing modular raw
 event boundary instead of introducing a second runtime owner.
@@ -136,8 +136,15 @@ The combined public MCP contract contains 32 unique tools: P0luz's expanded
 16-tool core plus 16 retained current/Yinglianchun extensions, each registered
 once through `src/tools/current/manifest.py` on the same `/mcp` endpoint.
 
-Verification and baseline advancement are recorded after the exact candidate
-commit passes isolated staging and production-contract smoke tests.
+Verification complete for integration commit `f55f646`:
+
+- Full pytest suite: **3144 passed / 110 skipped / 0 failures**.
+- Whole-tree Ruff: **clean**; Pyright on every changed Python file: **0 errors**.
+- Hot-update manifest: **298 files**, version `2.17.5`, exact repository-byte
+  check passed.
+- Local and VPS Docker builds passed. The isolated VPS Brain and Gateway both
+  returned healthy status on fresh storage, reported version `2.17.5`, and the
+  Brain registered the expected **32 unique MCP tools**.
 
 ### 2026-08-05 P0luz source evidence, Spark, I sediment, and Ying generation-failure sync
 
