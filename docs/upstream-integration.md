@@ -8,7 +8,7 @@ verification evidence.
 
 ## Recorded Baselines
 
-- P0luz primary baseline: `v2.17.5` / `278668e`
+- P0luz primary baseline: `v2.17.9` / `594d636`
 - Yinglianchun secondary baseline: `284c9c7`
 - Historical deployed root runtime: `8e68a7d`
 - P0luz-base production cutover: `c806f78`
@@ -136,9 +136,21 @@ Local verification before isolated staging:
   intentionally dormant v3/distributed stack and historical compatibility
   tests.
 
-The recorded P0luz baseline remains at 2.17.5 until this exact combined commit
-passes isolated staging. Production evidence and the baseline advance are
-recorded only after that gate succeeds.
+Isolated VPS staging completed for integration commit `4aae235` before the
+baseline advanced:
+
+- Image `ombre-brain:stage-4aae235` was built from a detached worktree at the
+  exact commit, with fresh staging buckets/state and production data untouched.
+- Brain and Gateway health returned HTTP 200 and reported version `2.17.9` with
+  the configured Claude Opus 5 main route, Gemini 3.7 Flash auxiliary routes,
+  and the configured reranker ready.
+- Authenticated MCP initialize/list returned **39 tools / 39 unique names**;
+  a read-only `pulse` call returned HTTP 200 without a tool error.
+- Brain and Gateway startup/call logs contained no error or traceback.
+
+This staging evidence advances the recorded P0luz baseline to `v2.17.9` /
+`594d636`. Production cutover and post-cutover alignment are verified against
+the follow-up commit that records this evidence.
 
 ### 2026-08-14 P0luz 2.17.5 memory lifecycle, Letter locks, deletion approval, and Ying raw-event sync
 
