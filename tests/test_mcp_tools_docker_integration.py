@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 import pytest
+from tools.current.manifest import REGISTERED_TOOL_NAMES
 
 MCP_URL = os.environ.get("OMBRE_DOCKER_INTEGRATION_URL", "").strip()
 MCP_TOKEN = os.environ.get("OMBRE_DOCKER_MCP_TOKEN", "").strip()
@@ -24,42 +25,8 @@ EXPECT_COMPRESSION_PROVIDER = os.environ.get(
 ).strip().lower() in {"1", "true", "yes", "on"}
 pytestmark = pytest.mark.skipif(not MCP_URL, reason="Docker MCP integration service is not configured")
 
-EXPECTED_TOOLS = {
-    "breath",
-    "breath_search",
-    "breath_advanced",
-    "hold",
-    "grow",
-    "source_read",
-    "trace",
-    "anchor",
-    "release",
-    "pulse",
-    "plan",
-    "letter_write",
-    "letter_lock_update",
-    "letter_read",
-    "I",
-    "dream",
-}
-EXPECTED_TOOL_ORDER = (
-    "breath",
-    "breath_search",
-    "breath_advanced",
-    "hold",
-    "grow",
-    "source_read",
-    "trace",
-    "dream",
-    "anchor",
-    "release",
-    "pulse",
-    "plan",
-    "letter_write",
-    "letter_lock_update",
-    "letter_read",
-    "I",
-)
+EXPECTED_TOOL_ORDER = REGISTERED_TOOL_NAMES
+EXPECTED_TOOLS = set(EXPECTED_TOOL_ORDER)
 
 EXPECTED_TOOL_PROPERTIES = {
     "breath": set(),
@@ -96,7 +63,22 @@ EXPECTED_TOOL_PROPERTIES = {
         "source_ranges",
     },
     "grow": {"content", "items", "test_data"},
-    "source_read": {"bucket_id", "expected_title", "scope", "cursor", "max_tokens"},
+    "source_read": {
+        "bucket_id", "expected_title", "scope", "cursor", "max_tokens",
+        "source_slots", "all_sources",
+    },
+    "source_attach": {
+        "bucket_id", "expected_title", "source_content", "source_ranges",
+    },
+    "source_detach": {"bucket_id", "expected_title", "source_slot"},
+    "source_restore": {"bucket_id", "expected_title", "source_slot"},
+    "relation_read": {"bucket_id", "expected_title"},
+    "relation_attach": {
+        "bucket_id", "expected_title", "target_bucket_id", "relation_type",
+        "label",
+    },
+    "relation_detach": {"bucket_id", "expected_title", "relation_slot"},
+    "relation_restore": {"bucket_id", "expected_title", "relation_slot"},
     "trace": {
         "bucket_id",
         "name",
@@ -145,6 +127,15 @@ EXPECTED_REQUIRED_PROPERTIES = {
     "breath_search": {"query"},
     "hold": {"content"},
     "source_read": {"bucket_id", "expected_title"},
+    "source_attach": {"bucket_id", "expected_title", "source_content"},
+    "source_detach": {"bucket_id", "expected_title", "source_slot"},
+    "source_restore": {"bucket_id", "expected_title", "source_slot"},
+    "relation_read": {"bucket_id", "expected_title"},
+    "relation_attach": {
+        "bucket_id", "expected_title", "target_bucket_id", "relation_type",
+    },
+    "relation_detach": {"bucket_id", "expected_title", "relation_slot"},
+    "relation_restore": {"bucket_id", "expected_title", "relation_slot"},
     "trace": {"bucket_id"},
     "anchor": {"bucket_id"},
     "release": {"bucket_id"},
@@ -386,6 +377,13 @@ def test_manifest_exposes_exactly_the_documented_canonical_tools(mcp_client):
         ("hold", {}, "content"),
         ("grow", {"items": {"not": "a list"}}, "items"),
         ("source_read", {}, "bucket_id"),
+        ("source_attach", {}, "bucket_id"),
+        ("source_detach", {}, "bucket_id"),
+        ("source_restore", {}, "bucket_id"),
+        ("relation_read", {}, "bucket_id"),
+        ("relation_attach", {}, "bucket_id"),
+        ("relation_detach", {}, "bucket_id"),
+        ("relation_restore", {}, "bucket_id"),
         ("trace", {}, "bucket_id"),
         ("anchor", {}, "bucket_id"),
         ("release", {}, "bucket_id"),
@@ -414,6 +412,40 @@ def test_all_tools_reject_schema_invalid_arguments(mcp_client, tool, arguments, 
         ("hold", {"content": "unknown-field-probe", "test_data": True}),
         ("grow", {"items": []}),
         ("source_read", {"bucket_id": "unknown", "expected_title": "unknown"}),
+        (
+            "source_attach",
+            {
+                "bucket_id": "unknown",
+                "expected_title": "unknown",
+                "source_content": "probe",
+            },
+        ),
+        (
+            "source_detach",
+            {"bucket_id": "unknown", "expected_title": "unknown", "source_slot": 1},
+        ),
+        (
+            "source_restore",
+            {"bucket_id": "unknown", "expected_title": "unknown", "source_slot": 1},
+        ),
+        ("relation_read", {"bucket_id": "unknown", "expected_title": "unknown"}),
+        (
+            "relation_attach",
+            {
+                "bucket_id": "unknown",
+                "expected_title": "unknown",
+                "target_bucket_id": "also-unknown",
+                "relation_type": "related_to",
+            },
+        ),
+        (
+            "relation_detach",
+            {"bucket_id": "unknown", "expected_title": "unknown", "relation_slot": 1},
+        ),
+        (
+            "relation_restore",
+            {"bucket_id": "unknown", "expected_title": "unknown", "relation_slot": 1},
+        ),
         ("trace", {"bucket_id": "missing-unknown-field-probe"}),
         ("anchor", {"bucket_id": "missing-unknown-field-probe"}),
         ("release", {"bucket_id": "missing-unknown-field-probe"}),

@@ -168,7 +168,7 @@ matching:
 # AI 调用 breath() 不显式传 max_* 时使用这些默认；前端「浮现默认参数」面板会回写到这里。
 surfacing:
   breath_max_results: 20          # 1-50, hard cap of buckets returned per breath
-  breath_max_tokens: 10000        # 500-20000, total token cap per breath
+  breath_max_tokens: 10000        # 500-40000, total token cap per breath; 40000 is opt-in headroom
   feel_max_tokens: 6000           # 500-20000, full-text budget for feel history; older feels collapse to one-line summaries
   # iter 1.8: weighted sampling for breath surfacing mode（无参数浮现）
   # 加权采样：从 top_k 候选里按 score**(1/temperature) 抽 sample_k 个，让"想起"带轻微随机性。

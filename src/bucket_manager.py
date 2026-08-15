@@ -41,7 +41,7 @@ import tempfile
 import uuid
 from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable, Sequence
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import date, datetime
 from functools import wraps
 from pathlib import Path
@@ -1763,7 +1763,10 @@ class BucketManager:
                     str(writer_name)
                 ).strip()[:120]
         if source_refs:
-            metadata["source_refs"] = source_refs
+            from ombrebrain.storage.source_store import source_links_from_metadata, active_source_refs_from_links
+
+            metadata["source_links"] = source_links_from_metadata({"source_refs": source_refs})
+            metadata["source_refs"] = active_source_refs_from_links(metadata["source_links"])
         if imported:
             metadata["imported"] = True
         if test_data:
@@ -2464,6 +2467,68 @@ class BucketManager:
             )
         return committed
 
+    async def mutate_source_links(self, bucket_id: str, mutation: Any) -> Any:
+        """Atomically change evidence bindings only, including archived buckets.
+
+        The callback receives the loaded frontmatter post and returns
+        ``(changed, result)``.  This deliberately bypasses normal update()
+        lifecycle/recency behaviour while retaining the per-bucket write turn.
+        """
+        async with self._bucket_turn(bucket_id):
+            file_path = self._find_bucket_file(bucket_id)
+            if not file_path:
+                return None
+            try:
+                post = frontmatter.load(file_path)
+            except Exception:
+                return None
+            changed, result = mutation(post)
+            if changed:
+                _atomic_write_text(file_path, frontmatter.dumps(post))
+            return result
+
+    async def mutate_relation_links(
+        self,
+        bucket_id: str,
+        mutation: Any,
+        *,
+        target_bucket_id: str = "",
+    ) -> Any:
+        """Atomically change Relation V1 metadata under stable bucket turns.
+
+        When a target is supplied, source and target turns are acquired in
+        sorted ID order.  The callback then receives both loaded posts, so an
+        edge can validate its target and commit the source ledger as one
+        decision without deadlocking concurrent A→B and B→A operations.
+        """
+        normalized_source = str(bucket_id or "").strip()
+        normalized_target = str(target_bucket_id or "").strip()
+        lock_ids = sorted({normalized_source, normalized_target} - {""})
+        async with AsyncExitStack() as stack:
+            for lock_id in lock_ids:
+                await stack.enter_async_context(self._bucket_turn(lock_id))
+            file_path = self._find_bucket_file(normalized_source)
+            if not file_path:
+                return None
+            try:
+                post = frontmatter.load(file_path)
+            except Exception:
+                return None
+            if normalized_target:
+                target_post = None
+                target_path = self._find_bucket_file(normalized_target)
+                if target_path:
+                    try:
+                        target_post = frontmatter.load(target_path)
+                    except Exception:
+                        target_post = None
+                changed, result = mutation(post, target_post)
+            else:
+                changed, result = mutation(post)
+            if changed:
+                _atomic_write_text(file_path, frontmatter.dumps(post))
+            return result
+
     async def _update_locked(
         self,
         bucket_id: str,
@@ -2669,13 +2734,11 @@ class BucketManager:
         if "title" in kwargs and kwargs["title"]:
             post["title"] = kwargs["title"]
         if "source_refs_append" in kwargs and kwargs["source_refs_append"]:
-            from ombrebrain.storage.source_store import normalize_source_refs
+            from ombrebrain.storage.source_store import append_source_links, active_source_refs_from_links
 
-            existing_refs = normalize_source_refs(post.get("source_refs") or [])
-            appended_refs = normalize_source_refs(kwargs["source_refs_append"])
-            post["source_refs"] = normalize_source_refs(
-                [*existing_refs, *appended_refs]
-            )
+            links = append_source_links(post.metadata, kwargs["source_refs_append"])
+            post["source_links"] = links
+            post["source_refs"] = active_source_refs_from_links(links)
         if "resolved" in kwargs:
             post["resolved"] = kwargs["resolved"]
         if "pinned" in kwargs:

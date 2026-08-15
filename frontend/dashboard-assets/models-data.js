@@ -363,7 +363,7 @@
     ];
     var SURFACING_LIMIT_FIELDS = [
       { path: 'surfacing.breath_max_results', label: 'Breath maximum results', type: 'number', min: 1, max: 50, step: 1, default: 10 },
-      { path: 'surfacing.breath_max_tokens', label: 'Breath token limit', type: 'number', min: 500, max: 20000, step: 100, default: 4000 },
+      { path: 'surfacing.breath_max_tokens', label: 'Breath token limit', type: 'number', min: 500, max: 40000, step: 100, default: 4000 },
       { path: 'surfacing.feel_max_tokens', label: 'Feel token limit', type: 'number', min: 500, max: 20000, step: 100, default: 4000 },
     ];
 

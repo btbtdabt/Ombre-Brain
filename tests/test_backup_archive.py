@@ -446,6 +446,7 @@ async def test_export_restore_round_trip_preserves_source_evidence(tmp_path):
     await migrate.apply({})
 
     restored = await target_manager.get(bucket_id)
+    assert restored is not None
     assert restored["metadata"]["source_refs"] == [
         {"ref": ref, "ranges": [[2, 2]]}
     ]
@@ -469,7 +470,9 @@ async def test_legacy_backup_with_dangling_source_ref_warns_but_restores_bucket(
     )
     # Recreate the v2.10.0 package shape directly: its manifest was valid for
     # the files it carried, but source evidence was not part of that file set.
-    bucket_path = Path(source_manager._find_bucket_file(bucket_id))
+    bucket_file = source_manager._find_bucket_file(bucket_id)
+    assert bucket_file is not None
+    bucket_path = Path(bucket_file)
     bucket_member = f"buckets/{bucket_path.relative_to(source_vault).as_posix()}"
     export_meta = json.dumps({
         "exported_at": "now",
@@ -513,7 +516,9 @@ async def test_legacy_backup_with_dangling_source_ref_warns_but_restores_bucket(
     assert parsed["ok"] is True
     assert "原文证据引用没有对应文件" in parsed["integrity_warning"]
     await migrate.apply({})
-    assert (await target_manager.get(bucket_id))["content"] == "旧版事件"
+    restored = await target_manager.get(bucket_id)
+    assert restored is not None
+    assert restored["content"] == "旧版事件"
 
 
 @pytest.mark.asyncio
@@ -587,6 +592,34 @@ async def test_keep_both_maps_imported_vector_to_new_id(tmp_path):
     imported = next(bucket for bucket in buckets if bucket["content"] == "imported version")
     assert imported["id"] != "memory-1"
     assert await target_engine.get_embedding(imported["id"]) == [0.7, 0.8]
+
+
+def test_keep_both_relation_target_remap_preserves_other_ledger_fields(tmp_path):
+    path = _write_bucket(tmp_path, bucket_id="source")
+    post = frontmatter.load(path)
+    post["relation_links"] = [{
+        "target_bucket_id": "old-target", "type": "causes",
+        "label": "", "status": "detached",
+    }]
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
+    migrate = object.__new__(MigrateEngine)
+
+    def _atomic_write(path: str, rendered: str) -> None:
+        Path(path).write_text(rendered, encoding="utf-8")
+
+    migrate._atomic_write = _atomic_write
+
+    migrate._remap_imported_relation_targets(
+        {"source": str(path)},
+        {"old-target": "new-target"},
+        frozenset({"source", "old-target"}),
+    )
+
+    relation_links = frontmatter.load(path).metadata["relation_links"]
+    assert isinstance(relation_links, list)
+    remapped = relation_links[0]
+    assert isinstance(remapped, dict)
+    assert remapped == {"target_bucket_id": "new-target", "type": "causes", "label": "", "status": "detached"}
 
 
 @pytest.mark.asyncio

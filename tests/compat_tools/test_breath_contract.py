@@ -35,6 +35,23 @@ async def _bucket(
 
 
 @pytest.mark.asyncio
+async def test_breath_explicit_token_headroom_caps_at_40000(
+    current_runtime,
+    monkeypatch,
+):
+    captured: dict[str, int] = {}
+
+    async def fake_surface_breath(**kwargs):
+        captured["max_tokens"] = kwargs["max_tokens"]
+        return "surface"
+
+    monkeypatch.setattr(current_memory, "surface_breath", fake_surface_breath)
+
+    assert await current.breath(max_tokens=50000, include_related=False) == "surface"
+    assert captured == {"max_tokens": 40000}
+
+
+@pytest.mark.asyncio
 async def test_breath_surfacing_honors_core_limit_and_self_anchor_boundary(current_runtime):
     protected_id = await _bucket(
         current_runtime,
@@ -199,12 +216,12 @@ async def test_parameter_free_breath_reports_omissions_and_preserves_dream(
 ):
     await _bucket(
         current_runtime,
-        "Oversized protected memory. " * 500,
+        "Oversized pinned memory. " * 500,
         "Oversized Core",
         importance=10,
-        extra_metadata={"protected": True},
+        extra_metadata={"pinned": True},
     )
-    await _bucket(
+    dynamic_id = await _bucket(
         current_runtime,
         "Oversized dynamic memory. " * 500,
         "Oversized Dynamic",
@@ -227,9 +244,41 @@ async def test_parameter_free_breath_reports_omissions_and_preserves_dream(
 
     assert "===== 梦境 =====" in result
     assert "token 预算不足" in result
-    assert "有 2 条主要浮现记忆" in result
+    assert "ordinary surfacing skipped" in result
+    assert dynamic_id not in result
     assert "当前约使用 0/40 token" not in result
     assert "权重池平静" not in result
+
+
+@pytest.mark.asyncio
+async def test_parameter_free_breath_surfaces_dynamic_after_all_core_fits(
+    current_runtime,
+):
+    core_id = await _bucket(
+        current_runtime,
+        "Small pinned memory.",
+        "Small Core",
+        importance=10,
+        extra_metadata={"pinned": True},
+    )
+    dynamic_id = await _bucket(
+        current_runtime,
+        "Small dynamic memory.",
+        "Small Dynamic",
+        importance=9,
+    )
+
+    result = await current.breath(
+        max_results=1,
+        max_tokens=10000,
+        include_related=False,
+        include_core=True,
+        core_limit=1,
+    )
+
+    assert core_id in result
+    assert dynamic_id in result
+    assert "ordinary surfacing skipped" not in result
 
 
 @pytest.mark.asyncio

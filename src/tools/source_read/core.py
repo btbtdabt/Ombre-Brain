@@ -6,7 +6,7 @@ import asyncio
 import unicodedata
 from typing import Any
 
-from ombrebrain.storage.source_store import normalize_source_refs
+from ombrebrain.storage.source_store import source_links_from_metadata
 from utils import count_tokens_approx, normalize_memory_title
 
 from .. import _runtime as rt
@@ -120,6 +120,8 @@ async def dispatch(
     scope: str = "event",
     cursor: int = 0,
     max_tokens: int = _DEFAULT_MAX_TOKENS,
+    source_slots: list[int] | None = None,
+    all_sources: bool = False,
 ) -> str:
     bucket_id = str(bucket_id or "").strip()
     expected_title = _normalized_title(expected_title)
@@ -148,11 +150,41 @@ async def dispatch(
         return "标题不匹配，拒绝读取原文。请使用该桶的精确 title。"
 
     try:
-        source_refs = normalize_source_refs(metadata.get("source_refs") or [])
+        links = source_links_from_metadata(metadata)
     except ValueError:
         return "该桶的原文证据引用格式无效，拒绝读取。"
-    if not source_refs:
+    if not links:
         return "该桶没有原文证据引用。"
+    if source_slots is not None and all_sources:
+        return "source_slots 与 all_sources 不能同时使用。"
+    if source_slots is None and not all_sources and (
+        len(links) > 1 or any(link["status"] != "active" for link in links)
+    ):
+        return "source manifest\n" + "\n".join(
+            f"slot={index} | ranges=" + ",".join(f"{a}-{b}" for a, b in link["ranges"])
+            + f" | {link['status']}"
+            for index, link in enumerate(links, 1)
+        )
+    if source_slots is not None:
+        if not isinstance(source_slots, list) or any(
+            isinstance(slot, bool) or not isinstance(slot, int)
+            for slot in source_slots
+        ):
+            return "source_slots 必须是整数列表。"
+        normalized_slots = sorted(set(source_slots))
+        selected: list[dict[str, Any]] = []
+        for slot in normalized_slots:
+            if slot < 1 or slot > len(links):
+                return f"source_slot={slot} 不存在。"
+            link = links[slot - 1]
+            if link["status"] != "active":
+                return f"source_slot={slot} 已 detached；请先 source_restore。"
+            selected.append(link)
+        source_refs = selected
+    else:
+        source_refs = [link for link in links if link["status"] == "active"]
+    if not source_refs:
+        return "该桶没有活动的原文证据引用。"
     if scope == "event" and not any(item["ranges"] for item in source_refs):
         return (
             "该桶未声明事件原文范围，拒绝将整份原文作为事件返回。"

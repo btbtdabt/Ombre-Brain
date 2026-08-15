@@ -257,7 +257,7 @@ async def breath(
     if metadata_error := check_metadata_size(domain=domain, tags=tags):
         return metadata_error
     max_results = int_between(max_results, 20, 1, 50)
-    max_tokens = int_between(max_tokens, 10000, 0, 20000)
+    max_tokens = int_between(max_tokens, 10000, 0, 40000)
     importance_min = int_between(importance_min, -1, -1, 10)
     tags = str(tags or "")
     catalog = bool_value(catalog, False)

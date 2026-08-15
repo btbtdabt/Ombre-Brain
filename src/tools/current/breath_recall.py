@@ -89,6 +89,26 @@ _SURFACE_BUDGET_NOTICE = (
     "已返回正文均保持完整，未截断或摘要。"
     "当前约使用 {used}/{limit} token，如需被省略的整桶请提高 max_tokens 后重试。"
 )
+_BREATH_SAFETY_CAP = 40_000
+_CORE_BUDGET_NOTICE = (
+    "token 预算不足：核心准则 required≈{required} tokens（完整渲染核心准则总计），"
+    "limit={limit} tokens，omitted={omitted} 条；普通浮现已跳过（ordinary surfacing skipped）。"
+)
+
+
+def _core_budget_notice(*, required: int, limit: int, omitted: int) -> str:
+    notice = _CORE_BUDGET_NOTICE.format(
+        required=required,
+        limit=limit,
+        omitted=omitted,
+    )
+    if limit < _BREATH_SAFETY_CAP:
+        return (
+            notice
+            + "如需返回更多核心准则，可由用户明确提高 max_tokens；"
+            "当前版本最高 40000。"
+        )
+    return notice + "已达到当前版本 40000 token 安全上限；请精简核心准则后重试。"
 
 
 def _relevance_options():
@@ -717,54 +737,57 @@ async def surface_breath(
 
     token_budget = max_tokens
     primary_omitted = 0
+    core_omitted = 0
+    core_required_tokens = 0
     core_results = []
-    core_budget = min(token_budget, max(0, int(max_tokens * 0.25)))
     for bucket in selected_core:
         entry, tokens = render_stored_bucket(
             bucket,
             f"📌 [核心准则] [bucket_id:{bucket.get('id', '')}]",
         )
-        if tokens > core_budget or tokens > token_budget:
-            primary_omitted += 1
+        core_required_tokens += tokens
+        if tokens > token_budget:
+            core_omitted += 1
             continue
         core_results.append(entry)
-        core_budget -= tokens
         token_budget -= tokens
 
     anchor_results = []
     surfaced_sources = []
     anchor_budget = min(token_budget, max(0, int(max_tokens * 0.18)))
-    for bucket in selected_anchors:
-        entry, tokens = render_stored_bucket(
-            bucket,
-            f"⚓ [长期锚点] [bucket_id:{bucket.get('id', '')}]",
-        )
-        if tokens > anchor_budget or tokens > token_budget:
-            primary_omitted += 1
-            continue
-        anchor_results.append(entry)
-        surfaced_sources.append(bucket)
-        anchor_budget -= tokens
-        token_budget -= tokens
+    if not core_omitted:
+        for bucket in selected_anchors:
+            entry, tokens = render_stored_bucket(
+                bucket,
+                f"⚓ [长期锚点] [bucket_id:{bucket.get('id', '')}]",
+            )
+            if tokens > anchor_budget or tokens > token_budget:
+                primary_omitted += 1
+                continue
+            anchor_results.append(entry)
+            surfaced_sources.append(bucket)
+            anchor_budget -= tokens
+            token_budget -= tokens
 
     dynamic_results = []
-    for bucket in candidates:
-        if token_budget <= 0:
-            break
-        score = rt.decay_engine.calculate_score(bucket.get("metadata", {}))
-        entry, tokens = render_stored_bucket(
-            bucket,
-            f"[权重:{score:.2f}] [bucket_id:{bucket.get('id', '')}]",
-        )
-        if tokens > token_budget:
-            primary_omitted += 1
-            continue
-        dynamic_results.append(entry)
-        surfaced_sources.append(bucket)
-        token_budget -= tokens
+    if not core_omitted:
+        for bucket in candidates:
+            if token_budget <= 0:
+                break
+            score = rt.decay_engine.calculate_score(bucket.get("metadata", {}))
+            entry, tokens = render_stored_bucket(
+                bucket,
+                f"[权重:{score:.2f}] [bucket_id:{bucket.get('id', '')}]",
+            )
+            if tokens > token_budget:
+                primary_omitted += 1
+                continue
+            dynamic_results.append(entry)
+            surfaced_sources.append(bucket)
+            token_budget -= tokens
 
     related_block = ""
-    if include_related and surfaced_sources and related_per_memory > 0:
+    if not core_omitted and include_related and surfaced_sources and related_per_memory > 0:
         related_block = await _diffused_bucket_blocks(
             surfaced_sources,
             all_buckets,
@@ -797,7 +820,15 @@ async def surface_breath(
     if dream:
         parts.append(dream)
         response_tokens += count_tokens_approx(dream)
-    if primary_omitted:
+    if core_omitted:
+        parts.append(
+            _core_budget_notice(
+                required=core_required_tokens,
+                limit=max_tokens,
+                omitted=core_omitted,
+            )
+        )
+    elif primary_omitted:
         parts.append(
             _SURFACE_BUDGET_NOTICE.format(
                 omitted=primary_omitted,

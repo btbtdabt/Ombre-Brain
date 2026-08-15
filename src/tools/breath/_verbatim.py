@@ -4,7 +4,11 @@ This module is intentionally small so the compatibility patch can be removed
 without touching retrieval, ranking, or bucket storage.
 """
 
-from ombrebrain.storage.source_store import normalize_source_refs
+from ombrebrain.storage.relation_store import relation_hint
+from ombrebrain.storage.source_store import (
+    active_source_refs_from_links,
+    source_links_from_metadata,
+)
 from utils import count_tokens_approx, strip_wikilinks
 
 
@@ -44,7 +48,7 @@ def source_available_hint(bucket: dict) -> str:
     """
     meta = bucket.get("metadata", {}) or {}
     try:
-        refs = normalize_source_refs(meta.get("source_refs") or [])
+        refs = active_source_refs_from_links(source_links_from_metadata(meta))
     except ValueError:
         return ""
     if not refs:
@@ -71,6 +75,9 @@ def render_stored_bucket(
     source_hint = source_available_hint(bucket)
     if source_hint:
         rendered += f"\n{source_hint}"
+    hint = relation_hint(bucket)
+    if hint:
+        rendered += f"\n{hint}"
     if footprint:
         rendered += f"\n{footprint}"
     return rendered, count_tokens_approx(rendered)

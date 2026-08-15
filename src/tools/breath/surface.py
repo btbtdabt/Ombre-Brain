@@ -47,6 +47,11 @@ _BUDGET_NOTICE = (
     "已返回正文均保持完整，未截断或摘要。"
     "当前约使用 {used}/{limit} token，如需被省略的整桶请提高 max_tokens 后重试。"
 )
+_BREATH_SAFETY_CAP = 40_000
+_PIN_BUDGET_NOTICE = (
+    "token 预算不足：核心准则 required≈{required} tokens（完整渲染核心准则总计），"
+    "limit={limit} tokens，omitted={omitted} 条；普通浮现已跳过（ordinary surfacing skipped）。"
+)
 
 
 def _can_surface(bucket: dict) -> bool:
@@ -55,6 +60,21 @@ def _can_surface(bucket: dict) -> bool:
 
 def _budget_notice(*, omitted: int, used: int, limit: int) -> str:
     return _BUDGET_NOTICE.format(omitted=omitted, used=used, limit=limit)
+
+
+def _pin_budget_notice(*, required: int, limit: int, omitted: int) -> str:
+    notice = _PIN_BUDGET_NOTICE.format(
+        required=required,
+        limit=limit,
+        omitted=omitted,
+    )
+    if limit < _BREATH_SAFETY_CAP:
+        return (
+            notice
+            + "如需返回更多核心准则，可由用户明确提高 max_tokens / "
+            "surfacing.breath_max_tokens；当前版本最高 40000。"
+        )
+    return notice + "已达到当前版本 40000 token 安全上限；请精简或取消部分核心准则后重试。"
 
 
 async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -> str:
@@ -96,10 +116,10 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
     core_filter_notice = ""
     if tag_filter and pinned_buckets:
         core_filter_notice = "[说明：tags 仅过滤普通浮现记忆；核心准则按设计始终注入。]"
-    pinned_ids = {b["id"] for b in pinned_buckets}
     pinned_results = []
     token_budget = max_tokens
-    primary_omitted = 0
+    pinned_omitted = 0
+    pinned_required_tokens = 0
     for b in pinned_buckets:
         try:
             rendered, entry_tokens = render_stored_bucket(
@@ -107,8 +127,9 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
                 f"📌 [核心准则] [bucket_id:{b['id']}]",
                 _footprint(b),
             )
+            pinned_required_tokens += entry_tokens
             if entry_tokens > token_budget:
-                primary_omitted += 1
+                pinned_omitted += 1
                 continue
             pinned_results.append(rendered)
             token_budget -= entry_tokens
@@ -175,7 +196,6 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
         and int(b["metadata"].get("importance") or 0) >= 8
     ][:2]
     cold_start_ids = {b["id"] for b in cold_start}
-    _ = pinned_ids  # suppress unused-var warning; used implicitly for logging only
     scored_deduped = [b for b in scored if b["id"] not in cold_start_ids]
     scored_with_cold = cold_start + scored_deduped
 
@@ -232,27 +252,35 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
     candidates = candidates[:max_results]
 
     dynamic_results = []
-    for b in candidates:
-        try:
-            score = rt.decay_engine.calculate_score(b["metadata"])
-            rendered, entry_tokens = render_stored_bucket(
-                b,
-                f"[权重:{score:.2f}] [bucket_id:{b['id']}]",
-                _footprint(b),
-            )
-            if entry_tokens > token_budget:
-                primary_omitted += 1
+    dynamic_omitted = 0
+    if not pinned_omitted:
+        for b in candidates:
+            try:
+                score = rt.decay_engine.calculate_score(b["metadata"])
+                rendered, entry_tokens = render_stored_bucket(
+                    b,
+                    f"[权重:{score:.2f}] [bucket_id:{b['id']}]",
+                    _footprint(b),
+                )
+                if entry_tokens > token_budget:
+                    dynamic_omitted += 1
+                    continue
+                dynamic_results.append(rendered)
+                token_budget -= entry_tokens
+            except Exception as e:
+                rt.logger.warning(f"Failed to render surfaced bucket / 浮现渲染失败: {e}")
                 continue
-            dynamic_results.append(rendered)
-            token_budget -= entry_tokens
-        except Exception as e:
-            rt.logger.warning(f"Failed to render surfaced bucket / 浮现渲染失败: {e}")
-            continue
 
     if not pinned_results and not dynamic_results:
-        if primary_omitted:
+        if pinned_omitted:
+            return _pin_budget_notice(
+                required=pinned_required_tokens,
+                limit=max_tokens,
+                omitted=pinned_omitted,
+            )
+        if dynamic_omitted:
             return _budget_notice(
-                omitted=primary_omitted,
+                omitted=dynamic_omitted,
                 used=max_tokens - token_budget,
                 limit=max_tokens,
             )
@@ -297,7 +325,7 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
                     cond_b = False
             if cond_a or cond_b:
                 passive_pool.append(b)
-        if passive_pool and not primary_omitted:
+        if passive_pool and not pinned_omitted and not dynamic_omitted:
             random.shuffle(passive_pool)
             for b in passive_pool[:2]:
                 try:
@@ -319,7 +347,7 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
     # 设计意图：让已解决的记忆有小概率重新出现，制造"忽然想起"的温度。
     # 与无结果兜底逻辑并存；不替换主流程。
     dream_results: list[str] = []
-    if not primary_omitted and random.random() < 0.03:
+    if not pinned_omitted and not dynamic_omitted and random.random() < 0.03:
         try:
             shown_ids = {b["id"] for b in candidates}
             resolved_pool = [
@@ -364,10 +392,18 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
         parts.append("=== 久未浮现 ===\n" + "\n---\n".join(passive_results))
     if dream_results:
         parts.append("=== 偶然想起 ===\n" + "\n---\n".join(dream_results))
-    if primary_omitted:
+    if pinned_omitted:
+        parts.append(
+            _pin_budget_notice(
+                required=pinned_required_tokens,
+                limit=max_tokens,
+                omitted=pinned_omitted,
+            )
+        )
+    if dynamic_omitted:
         parts.append(
             _budget_notice(
-                omitted=primary_omitted,
+                omitted=dynamic_omitted,
                 used=max_tokens - token_budget,
                 limit=max_tokens,
             )

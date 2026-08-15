@@ -1021,6 +1021,7 @@ def test_mcp_token_regenerate_serializes_disk_and_runtime_commit_across_loops(
         {"dehydration": {"timeout_seconds": 0}},
         {"surfacing": {"breath_max_results": 0}},
         {"surfacing": {"breath_max_tokens": 499}},
+        {"surfacing": {"breath_max_tokens": 40001}},
         {"surfacing": {"feel_max_tokens": 20001}},
         {"surfacing": {"sampling": {"top_k": 0}}},
         {"surfacing": {"sampling": {"sample_k": 21}}},
@@ -1084,7 +1085,7 @@ async def test_dashboard_config_persists_validated_numeric_types(monkeypatch):
                 "host_port": "8123",
                 "surfacing": {
                     "breath_max_results": "11",
-                    "breath_max_tokens": "12000",
+                    "breath_max_tokens": "35000",
                     "feel_max_tokens": "7000",
                     "sampling": {
                         "enabled": True,
@@ -1103,14 +1104,14 @@ async def test_dashboard_config_persists_validated_numeric_types(monkeypatch):
     assert runtime["host_port"] == 8123
     assert runtime["surfacing"] == {
         "breath_max_results": 11,
-        "breath_max_tokens": 12000,
+        "breath_max_tokens": 35000,
         "feel_max_tokens": 7000,
     }
     assert persisted["merge_threshold"] == 42
     assert persisted["host_port"] == 8123
     assert persisted["surfacing"] == {
         "breath_max_results": 11,
-        "breath_max_tokens": 12000,
+        "breath_max_tokens": 35000,
         "feel_max_tokens": 7000,
         "sampling": {
             "enabled": True,

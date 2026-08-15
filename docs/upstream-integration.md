@@ -100,6 +100,46 @@ fixed access token remains a resource-bound compatibility credential.
 
 ## Integration Batch Ledger
 
+### 2026-08-15 P0luz 2.17.9 source/relation bindings and breath headroom
+
+This integration batch reviews `278668e..594d636` from P0luz. Yinglianchun
+`main` remains at the recorded `284c9c7` baseline, so there are no secondary
+upstream commits to port in this range. P0luz remains the implementation base;
+the author's new tools are adapted into the canonical current-tool manifest
+rather than registered a second time in `src/server.py`.
+
+| Source commit(s) | Disposition | Evidence |
+| --- | --- | --- |
+| P0luz `60b16cc` | Merged from the author and adapted to the current breath composer | Selected pinned memories consume the explicit token budget before anchors, dynamic memories, related memories, or Dream overlays. If the selected core cannot fit, ordinary surfacing is skipped instead of silently displacing a pin. Current Dream overlays remain available when the selected core fits. |
+| P0luz `1815fb0` | Merged through the shared configuration boundary | Explicit `breath_max_tokens` accepts up to 40,000 tokens across YAML, Dashboard controls, API validation, and the canonical MCP adapter. The ordinary default remains unchanged and `feel_max_tokens` retains its 20,000-token ceiling. |
+| P0luz `d9fbc22`, `1d6694e` | Merged from the author and registered through the canonical manifest | Reversible source attachments use an append-only `source_links` ledger with an active `source_refs` projection. Attach, detach, restore, selective read, immutable content-addressed evidence, archive/lock behavior, backup closure, import preflight, and index non-mutation are covered by the author's applicable tests. Final blob publication occurs under the bucket mutation lock after the repeated title/limit checks, so a rejected concurrent attach does not leave an unreachable source object. |
+| P0luz `69c6c60`, `8ea3541`, `9669f02` | Merged from the author and registered through the canonical manifest | Reversible typed memory relations remain metadata-only, preserve unrelated bucket lifecycle fields, remap safely during import, render bounded hints in breath/Dream, and expose read/attach/detach/restore through the shared `/mcp` endpoint. Restore revalidates the current target, and import detaches every active target that was not successfully mapped into the destination vault. |
+| P0luz `467ac02` | Merged from the author | Claude conversation exports are recognized by import preflight without weakening the existing bounded parser, provenance, or migration safety boundaries. |
+| P0luz `08afeed`, `73d9bd7`, `b64bfbd`, `5e98d58` | Merged from the author and regenerated for the combined tree | Version/changelog history advances through 2.17.9; the final hot-update manifest is generated from the combined Git index rather than retaining an upstream-only file inventory. |
+| P0luz `c84a7e6`, `08965bf`, `bb7fdae`, `594d636` | Merged by ancestry | These merge commits contain only the already classified author changes and introduce no competing runtime owner. |
+
+The combined public MCP contract contains **39 unique tools**: P0luz's current
+23-tool surface plus 16 retained current/Yinglianchun extensions. Every tool is
+registered once through `src/tools/current/manifest.py`, exposed through the
+same authenticated `/mcp` endpoint, and represented in the Docker contract
+snapshot.
+
+Local verification before isolated staging:
+
+- Focused source/relation/breath/backup/migration/manifest suite: **263 passed / 0 failed**.
+- Full pytest suite: **3207 passed / 117 skipped / 0 failed**.
+- Whole-tree Ruff: **clean**; all **35 changed Python files**: **0 Pyright
+  errors / 0 warnings**.
+- The `src` Pyright debt audit is **61 errors / 21 warnings**, improved from the
+  recorded **68/21** baseline without weakening its configuration. The full
+  repository audit is **349 errors / 21 warnings**, concentrated in the
+  intentionally dormant v3/distributed stack and historical compatibility
+  tests.
+
+The recorded P0luz baseline remains at 2.17.5 until this exact combined commit
+passes isolated staging. Production evidence and the baseline advance are
+recorded only after that gate succeeds.
+
 ### 2026-08-14 P0luz 2.17.5 memory lifecycle, Letter locks, deletion approval, and Ying raw-event sync
 
 This verified batch reviews `0bb1e4d..278668e` from P0luz and

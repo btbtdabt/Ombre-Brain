@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from .. import relation_bindings as p0_relation_bindings
+from ..relation_read import dispatch as p0_relation_read
+from .. import source_bindings as p0_source_bindings
 from ..anchor import anchor_release, anchor_set
 from ..i import dispatch as p0_i
 from ..plan import plan_create
@@ -41,14 +44,99 @@ async def source_read(
     scope: str = "event",
     cursor: int = 0,
     max_tokens: int = 6000,
+    source_slots: list[int] | None = None,
+    all_sources: bool = False,
 ) -> str:
-    """显式读取一个记忆桶对应的原文证据。必须同时给出精确 bucket_id 与该桶的显式 title；不做语义搜索、不扩散到相关桶、不调用模型。scope=event 只读该事件声明的行范围，scope=full_source 读取整份共享原文。内容过长时返回 next_cursor，继续以同一桶和标题分页读取。"""
+    """显式读取一个记忆桶对应的原文证据。必须给出精确 bucket_id 与 title；多 Source 默认只回 slot/ranges/status 清单，显式 source_slots 或 all_sources 才读活动原文。分页时保持同一桶、标题、scope 与 Source 选择。"""
     return await p0_source_read(
         bucket_id=bucket_id,
         expected_title=expected_title,
         scope=scope,
         cursor=cursor,
         max_tokens=max_tokens,
+        source_slots=source_slots,
+        all_sources=all_sources,
+    )
+
+
+async def source_attach(
+    bucket_id: str,
+    expected_title: str,
+    source_content: str,
+    source_ranges: list[list[int]] | None = None,
+) -> str:
+    """给精确 bucket_id + title 的已有桶后补一份独立不可变 Source；只改证据绑定，不改正文、活跃度或生命周期。"""
+    return await p0_source_bindings.attach(
+        bucket_id,
+        expected_title,
+        source_content,
+        source_ranges,
+    )
+
+
+async def source_detach(
+    bucket_id: str,
+    expected_title: str,
+    source_slot: int,
+) -> str:
+    """断开一个稳定 Source slot，只停用本桶绑定，不删除共享 Source blob，也不改变桶生命周期。"""
+    return await p0_source_bindings.detach(bucket_id, expected_title, source_slot)
+
+
+async def source_restore(
+    bucket_id: str,
+    expected_title: str,
+    source_slot: int,
+) -> str:
+    """恢复一个 detached Source slot 的原绑定；只恢复证据引用，不恢复 archived 桶。桶生命周期恢复请用 trace(..., restore=True)。"""
+    return await p0_source_bindings.restore(bucket_id, expected_title, source_slot)
+
+
+async def relation_read(bucket_id: str, expected_title: str) -> str:
+    """读取本普通记忆桶的极简 Relation ledger；不读取目标标题或正文。"""
+    return await p0_relation_read(bucket_id, expected_title)
+
+
+async def relation_attach(
+    bucket_id: str,
+    expected_title: str,
+    target_bucket_id: str,
+    relation_type: str,
+    label: str = "",
+) -> str:
+    """为两个普通记忆桶建立一跳有向 Relation，不创建反向边。"""
+    return await p0_relation_bindings.attach(
+        bucket_id,
+        expected_title,
+        target_bucket_id,
+        relation_type,
+        label,
+    )
+
+
+async def relation_detach(
+    bucket_id: str,
+    expected_title: str,
+    relation_slot: int,
+) -> str:
+    """原位停用一个稳定 Relation slot，不改记忆正文或活跃度。"""
+    return await p0_relation_bindings.detach(
+        bucket_id,
+        expected_title,
+        relation_slot,
+    )
+
+
+async def relation_restore(
+    bucket_id: str,
+    expected_title: str,
+    relation_slot: int,
+) -> str:
+    """恢复一个 detached Relation slot，不恢复 archived 桶生命周期。"""
+    return await p0_relation_bindings.restore(
+        bucket_id,
+        expected_title,
+        relation_slot,
     )
 
 
@@ -73,4 +161,17 @@ i_tool.__name__ = "I"
 I = i_tool  # noqa: E741 - historical public MCP tool name
 
 
-__all__ = ["I", "anchor", "plan", "release", "source_read"]
+__all__ = [
+    "I",
+    "anchor",
+    "plan",
+    "relation_attach",
+    "relation_detach",
+    "relation_read",
+    "relation_restore",
+    "release",
+    "source_attach",
+    "source_detach",
+    "source_read",
+    "source_restore",
+]

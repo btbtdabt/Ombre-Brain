@@ -1392,10 +1392,9 @@ def _normalize_legacy_section(
             )
         elif section == "surfacing" and key == "breath_max_results":
             result[key] = _clean_int(raw, field, 1, 50)
-        elif section == "surfacing" and key in {
-            "breath_max_tokens",
-            "feel_max_tokens",
-        }:
+        elif section == "surfacing" and key == "breath_max_tokens":
+            result[key] = _clean_int(raw, field, 500, 40000)
+        elif section == "surfacing" and key == "feel_max_tokens":
             result[key] = _clean_int(raw, field, 500, 20000)
         elif section == "surfacing" and key == "sampling":
             if not isinstance(raw, dict):
@@ -3011,7 +3010,7 @@ def register(mcp) -> None:
             surfacing_payload = body.get("surfacing") or {}
             for key, low, high in (
                 ("breath_max_results", 1, 50),
-                ("breath_max_tokens", 500, 20000),
+                ("breath_max_tokens", 500, 40000),
                 ("feel_max_tokens", 500, 20000),
             ):
                 if key in surfacing_payload:

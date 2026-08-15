@@ -107,7 +107,7 @@ Ombre-Brain/
 
 每个模块「干什么、边界在哪、依赖谁」：
 
-- **server.py**（约 1000 行）— MCP 服务入口。创建所有组件后调 `tools._runtime.init(...)` 注入依赖；15 个薄封装全部以 `@mcp.tool()` 直接注册到唯一公开实例；对外只暴露 **单连接器 `/mcp`**。
+- **server.py**（约 1000 行）— MCP 服务入口。创建所有组件后调 `tools._runtime.init(...)` 注入依赖；39 个公开工具由 `tools.current.manifest` 统一注册到唯一公开实例；对外只暴露 **单连接器 `/mcp`**。
 - **tools/**（MCP 工具应用层）— 详见下面「1.x tools/ 包结构」。
 - **web/**（HTTP/Dashboard 路由层）— 详见下面「1.y web/ 包结构」。从旧 server.py 巨石里拆出的 16 个域模块，每个导出 `register(mcp)`；cookie/CSRF/会话鉴权等共享依赖在 `web/_shared.py`（类比 `tools/_runtime.py`）。
 - **bucket_manager.py** — 桶 CRUD + 多维加权搜索 + `touch()` 激活刷新 + `_time_ripple()` 时间涟漪 + 文件搬运（archive/permanent 之间）。
@@ -265,12 +265,18 @@ feel 桶自身：
 
 ---
 
-## 3. MCP 工具规格（共 15 个）
+## 3. MCP 工具规格（共 39 个）
 
-> **单连接器（iter 2.2）**：当前 16 个工具统一由连接器 `/mcp` 暴露。
-> 历史上（iter 2.1）曾拆成两个 FastMCP 实例。2.8.5 起删除历史容器，当前 16 个工具全部直接注册到唯一 `mcp`。
+> **单连接器（iter 2.2）**：当前 39 个工具统一由连接器 `/mcp` 暴露，并由
+> `src/tools/current/manifest.py` 唯一注册。历史上（iter 2.1）曾拆成两个
+> FastMCP 实例；当前运行时不再直接在 `server.py` 维护第二份工具清单。
 > - 高频 8 个 —— `breath` / `breath_search` / `breath_advanced` / `hold` / `grow` / `source_read` / `trace` / `dream`
-> - 低频 8 个 —— `anchor` / `release` / `pulse` / `plan` / `letter_write` / `letter_lock_update` / `letter_read` / `I`
+> - P0 低频 15 个 —— `source_attach` / `source_detach` / `source_restore` /
+>   `relation_read` / `relation_attach` / `relation_detach` / `relation_restore` /
+>   `anchor` / `release` / `pulse` / `plan` / `letter_write` /
+>   `letter_lock_update` / `letter_read` / `I`
+> - current/Ying 额外 16 个 —— 精确桶读取、年轮、画像、Darkroom、Reminder、
+>   自省和索引维护工具；完整顺序以 canonical manifest 为准。
 
 ### 3.1 `breath` / `breath_search` / `breath_advanced` — 检索/浮现
 
@@ -287,7 +293,7 @@ feel 桶自身：
 3. **浮现模式**（无 `query`；`breath()` 固定走这里）：pinned/显式 permanent 桶展示为「核心准则」+ 未解决桶按衰减分排序，**冷启动**（`activation_count==0 && importance>=8`）的桶最多 2 个插到最前；后续排序**有两条互斥路径**：当 `surfacing.sampling.enabled=true` 时走加权无放回采样（`top_k` / `sample_k` / `temperature` 控制；详见 §7.1），否则走原 Top-1 固定 + Top-2~20 随机洗牌；按 `max_results` 硬截断。**排除 anchor 与 protected 桶**：anchor 是坐标系；protected 只防衰减，不进入核心准则、未解决、久未浮现或偶遇池。浮现**不调用** `touch()`。每条返回正文后附一行紧凑 `👣 Footprint`，只表达创建、补充、淡去、归档、恢复等有意义的变迁，不展示 touch/索引噪声。**末尾追加 `=== 久未浮现 ===` 段**：从久未激活的高重要度桶里随机抽 1～2 条，模拟「突然想起来」。
 4. **检索模式**（有 `query`；`breath_search()` 固定走这里）：每个 query 只生成一次查询向量，与 rapidfuzz/BM25 多维评分共同进入 `BucketManager.search()` → 过滤 `feel/plan/letter`，**pinned/permanent/protected 仍可被显式检索命中**：pinned/permanent 加 `📌 [核心准则]`，protected 加 `🛡️ [受保护记忆]` → 纯语义候选相似度 `>=0.65` 标 `[语义关联]`，且不能绕过 domain/tags/type 过滤 → 活跃桶命中时 `touch()`。查询也会检索 archive；归档命中返回保留的 Markdown 原文与 Footprint，明确邀请模型判断是否值得再次回忆，并显示 `trace(bucket_id="...", restore=True)`。查询只发现、不自动恢复，也不 touch 归档桶。结果不足时保留设计上的自由联想，但 protected 不进入这一非命中随机通道。embedding 不可用时明确提示后继续关键词/BM25；桶一旦命中，返回层直接使用当前存储的完整 `content`，不调用 dehydrate、不剥除 wikilink、不截断或改写。**不过滤 anchor**（设计：主动检索时希望能找到坐标系桶）。catalog 同样保留 protected 并使用相同的受保护标记。
 
-(实现注意：`tags="feel"` 在第一个分支被映射为 `domain="feel"` 后清出 tag_filter；其它 tag 走 AND 过滤；`max_tokens` 上限 20000，`max_results` 上限 50；`importance_min` 模式下硬上限 20 条不可调；浮现模式中钉选桶**不计入** `max_results` 上限。)
+(实现注意：`tags="feel"` 在第一个分支被映射为 `domain="feel"` 后清出 tag_filter；其它 tag 走 AND 过滤；`max_tokens` 显式上限 40000，默认仍为 10000；`max_results` 上限 50；`importance_min` 模式下硬上限 20 条不可调；浮现模式中钉选桶**不计入** `max_results` 上限。)
 
 ### 3.1.1 Footprint 与显式恢复
 
@@ -322,7 +328,18 @@ feel 桶自身：
 
 ### 3.3.1 `source_read` — 单桶原文核对
 
-签名：`source_read(bucket_id, expected_title, scope="event", cursor=0, max_tokens=6000)`
+签名：`source_read(bucket_id, expected_title, scope="event", cursor=0, max_tokens=6000, source_slots=None, all_sources=False)`
+
+`metadata.source_refs` 是 active 证据的兼容投影；`metadata.source_links` 是稳定
+ledger，每项含 `{ref, ranges, status}`，固定列表位置加一就是公开 slot。旧桶只有
+`source_refs` 时按原顺序解释为 active link，读取不会回写。多 Source 或包含
+detached Source 时，默认 `source_read` 只返回 slot/ranges/status 清单；显式传
+`source_slots` 或 `all_sources=True` 才读取 active 原文。
+
+`source_attach(bucket_id, expected_title, source_content, source_ranges=None)` 添加
+active link；`source_detach(...)` 原位暂停；`source_restore(...)` 恢复原 slot。
+三者只修改证据绑定，不改变正文、生命周期、活跃度或 embedding。active 投影最多
+32 项，完整 ledger 最多 128 项，超限明确拒绝。
 
 - 精确校验桶 ID 与显式标题；任一不符即拒绝，不做语义搜索、相关桶扩散或 LLM 处理。
 - `scope="event"` 只返回该桶声明的非空原文行范围；空范围失败关闭，行号超过实际内容时整次拒绝，不允许退化为全文。`scope="full_source"` 必须显式请求并返回共享原文全文，因此可能包含其他事件对应的相邻文字。
@@ -330,6 +347,19 @@ feel 桶自身：
 - 每次只处理一个桶，逐源读取并只保留当前分页窗口。最终响应头与正文共同受 `max_tokens` 约束；过长时返回非零 `next_cursor`，必须显式续读，不静默摘要。
 - 原文默认受 `limits.max_grow_input_bytes`（默认 2 MiB）约束，即使配置关闭该软限制也有 10 MiB 硬上限。不支持硬链接的 NAS/SMB/FUSE 会在发布时使用跨进程 sidecar 锁，且不会覆盖已经存在的不可变证据。
 - 精确桶 ID + 标题是读取意图门禁而非认证机制。远程可达的公网或局域网部署必须使用 OAuth/Token；stdio 与经安全门禁确认的本机回环模式继续遵循既有部署边界。正文始终包在“不可信存储数据”标记中。架构边界见 [ADR-0001](adr/ADR-0001-source-evidence-layer.md)。
+
+### 3.3.2 Relation V1 — 可逆的一跳记忆关系
+
+`relation_attach(bucket_id, expected_title, target_bucket_id, relation_type, label="")`
+只在两个真实存在的普通记忆桶之间建立一条有向关系。机器类型固定为
+`caused_by`、`causes`、`continuation_of`、`continues`、`related_to` 或
+`same_event`；可选 label 只改变展示文字。
+
+`relation_read(bucket_id, expected_title)` 返回稳定 slot、类型、label、目标 ID 与
+状态，不读取目标标题或正文。`relation_detach(...)` 原位暂停，
+`relation_restore(...)` 恢复原 slot。Relation 不生成反向边，不参与候选生成、
+排序、embedding、activation、decay 或递归图遍历；breath/catalog 只给已选普通桶
+追加最多两条极简 hint。ledger 最多 128 项，其中 active 最多 32 项。
 
 ### 3.4 `trace` — 修改/删除
 
@@ -521,7 +551,7 @@ dream 侧配合（`tools/dream/hints.py` + `output.py`）：
 | `/api/env-vars` | GET | 🔒 | dashboard 设置页「⑤ 环境变量」只读区：当前进程读到的所有 `OMBRE_*`，敏感字段脱敏 |
 | `/api/env-config` | GET | 🔒 | 可写 6 字段的当前值（脱敏） |
 | `/api/env-config` | POST | 🔒 | 热更新 6 字段并写回 `.env`（重启仍有效） |
-| `/mcp/*` | — | 公开 | FastMCP 单连接器：全部 16 个工具 —— breath / breath_search / breath_advanced / hold / grow / source_read / dream / trace / anchor / release / pulse / plan / letter_write / letter_lock_update / letter_read / **I** |
+| `/mcp/*` | — | 公开 | FastMCP 单连接器：`src/tools/current/manifest.py` 注册的全部 39 个工具；历史 `/mcp-extra` 已退役。 |
 
 🔒 = 需要 cookie 认证，未认证返回 `JSON {error, setup_needed}` 状态码 401。
 
@@ -1512,7 +1542,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 
 | 值 | 位置 | 用途 |
 |---|---|---|
-| `10000` / `20000` | `breath` | max_tokens 默认 / 上限 |
+| `10000` / `40000` | `breath` | max_tokens 默认 / 显式 opt-in 安全上限 |
 | `20` / `50` | `breath` | max_results 默认 / 上限 |
 | `2` | `breath` 浮现 | 冷启动桶数上限 |
 | `8` | 冷启动 | importance >= 8 才进入冷启动 |
@@ -1642,7 +1672,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 |---|---|---|
 | Dashboard 401 | `web/_shared.py` + `web/auth.py` | 会话鉴权 helper；检查 cookie `ombre_session`；`OMBRE_DASHBOARD_PASSWORD` 是否正确 |
 | 改密码报「环境变量密码」错误 | `web/auth.py` | `auth_change_password` 检测 `OMBRE_DASHBOARD_PASSWORD` 设置时禁用 |
-| HTTP 模式下 Claude.ai 连不上 | `server.py` | `__main__` CORS 中间件；`_app = mcp.streamable_http_app()`（单连接器，16 个工具直接注册在 `mcp`）；URL 末尾必须 `/mcp` |
+| HTTP 模式下 Claude.ai 连不上 | `server.py` | `__main__` CORS 中间件；`_app = mcp.streamable_http_app()`（单连接器，39 个工具由 canonical manifest 注册）；URL 末尾必须 `/mcp` |
 | docker compose 重启后桶丢失 | — | 使用 `OMBRE_HOST_VAULT_DIR` 将宿主机目录 bind mount 到 `/app/buckets`；该目录同时持久化桶、配置和 Tunnel token |
 | Dashboard 改 host vault 不生效 | `web/import_api.py` | 容器无法修改启动前确定的宿主机挂载；Docker 内界面只读，必须编辑宿主机 compose 同目录 `.env` 后 `--force-recreate` |
 | keepalive 失败 | `server.py` | `_keepalive_loop`；检查 `OMBRE_PORT` 实际监听端口 |

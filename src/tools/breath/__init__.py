@@ -111,7 +111,7 @@ async def dispatch(
     if max_tokens <= 0:
         max_tokens = default_tokens
     max_results = min(max_results, 50)
-    max_tokens = min(max_tokens, 20000)
+    max_tokens = min(max_tokens, 40000)
     tag_filter = [t.strip() for t in tags.split(",") if t.strip()]
     memory_max_tokens = max_tokens
 

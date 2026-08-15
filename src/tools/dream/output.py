@@ -240,6 +240,8 @@ def format_dream_output(
         aro = float(meta.get("arousal") or 0.3)
         created = meta.get("created", "")
         last_active = meta.get("last_active", "")
+        from ombrebrain.storage.relation_store import relation_hint
+        hint = relation_hint(b)
         parts.append(
             (
                 b,
@@ -252,7 +254,7 @@ def format_dream_output(
                         f"ID: {b['id']}"
                         f"{_miss_lines(meta)}\n"
                     ),
-                    footprint=_footprint(b),
+                    footprint=(hint + "\n" if hint else "") + _footprint(b),
                 ),
             )
         )
