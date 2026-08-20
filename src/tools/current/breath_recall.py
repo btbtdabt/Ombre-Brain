@@ -29,6 +29,7 @@ from memory_relevance import (
     recall_search_query,
     relevance_multiplier,
 )
+from ombrebrain.storage.quote_store import quotes_from_metadata, render_quotes
 from recall_pipeline import (
     TASK_ONLY_MOMENT_SECTIONS,
     TEMPERATURE_MOMENT_SECTIONS,
@@ -416,6 +417,7 @@ async def _format_direct_bucket(
     *,
     query: str,
     render_mode: str,
+    with_quotes: bool,
 ) -> str:
     if token_budget <= 0:
         return ""
@@ -441,13 +443,14 @@ async def _format_direct_bucket(
         matched_label = (
             "matched_fragment" if meta.get("source_record_fragment_seed") else "matched_source_record"
         )
-        return _trim_tokens(
+        rendered = _trim_tokens(
             f"{header} bucket_capsule\n{capsule}\n{matched_label}: {matched}",
             token_budget,
         )
+        return _append_quote_block(rendered, bucket, token_budget, with_quotes)
     original_block = f"{header} bucket_original\n{original}".strip()
     if count_tokens_approx(original_block) <= token_budget:
-        return original_block
+        return _append_quote_block(original_block, bucket, token_budget, with_quotes)
 
     wants_capsule = render_mode == "full" or (
         render_mode == "auto" and (_high_value(bucket) or _detail_query(query))
@@ -464,7 +467,8 @@ async def _format_direct_bucket(
                     f"{header} bucket_capsule\n{capsule}\n"
                     f"matched_moment: {_moment_text(moment, 220)}"
                 )
-                return _trim_tokens(block, token_budget)
+                rendered = _trim_tokens(block, token_budget)
+                return _append_quote_block(rendered, bucket, token_budget, with_quotes)
             except Exception as exc:
                 _warning("Direct bucket capsule failed: %s", exc)
 
@@ -483,7 +487,24 @@ async def _format_direct_bucket(
     ][:2]
     if contexts:
         parts.append("语境:\n" + "\n".join(contexts))
-    return _trim_tokens("\n".join(parts), token_budget)
+    rendered = _trim_tokens("\n".join(parts), token_budget)
+    return _append_quote_block(rendered, bucket, token_budget, with_quotes)
+
+
+def _append_quote_block(
+    rendered: str,
+    bucket: dict,
+    token_budget: int,
+    with_quotes: bool,
+) -> str:
+    if not with_quotes:
+        return rendered
+    metadata = bucket.get("metadata") if isinstance(bucket, dict) else {}
+    quote_block = render_quotes(quotes_from_metadata(metadata or {}))
+    if not quote_block:
+        return rendered
+    candidate = f"{rendered}\n{quote_block}" if rendered else quote_block
+    return candidate if count_tokens_approx(candidate) <= token_budget else rendered
 
 
 def _format_secondary_moment(moment: dict) -> str:
@@ -1337,6 +1358,7 @@ async def _bucket_search_mode(
     is_session_start: bool,
     auto_surface: bool,
     debug: bool,
+    with_quotes: bool,
 ) -> str:
     direct_results = []
     returned = []
@@ -1394,6 +1416,7 @@ async def _bucket_search_mode(
             max_tokens - token_used,
             query=query,
             render_mode=render_mode,
+            with_quotes=with_quotes,
         )
         if not entry:
             break
@@ -1504,6 +1527,7 @@ async def _graph_search_mode(
     is_session_start: bool,
     auto_surface: bool,
     debug: bool,
+    with_quotes: bool,
 ) -> str:
     store = getattr(rt, "memory_moment_store", None)
     if store is None:
@@ -1524,6 +1548,7 @@ async def _graph_search_mode(
             is_session_start=is_session_start,
             auto_surface=auto_surface,
             debug=debug,
+            with_quotes=with_quotes,
         )
     bucket_map = {
         str(bucket["id"]): bucket
@@ -1567,6 +1592,7 @@ async def _graph_search_mode(
             is_session_start=is_session_start,
             auto_surface=auto_surface,
             debug=debug,
+            with_quotes=with_quotes,
         )
 
     explicit_lookup = _policy().plan_query(query).explicit_old_memory
@@ -1618,6 +1644,7 @@ async def _graph_search_mode(
             max_tokens - token_used,
             query=query,
             render_mode=render_mode,
+            with_quotes=with_quotes,
         )
         if not entry:
             break
@@ -1771,6 +1798,7 @@ async def search_breath(
     auto_surface: bool,
     direct_render_mode: str,
     retrieval_mode: str,
+    with_quotes: bool = False,
 ) -> str:
     """Run current-main's keyword/vector seeds through bucket or moment recall."""
     if auto_surface and _policy().is_auto_query_too_vague(query):
@@ -1813,6 +1841,7 @@ async def search_breath(
             is_session_start=is_session_start,
             auto_surface=auto_surface,
             debug=debug,
+            with_quotes=with_quotes,
         )
     return await _graph_search_mode(
         query=query,
@@ -1835,4 +1864,5 @@ async def search_breath(
         is_session_start=is_session_start,
         auto_surface=auto_surface,
         debug=debug,
+        with_quotes=with_quotes,
     )

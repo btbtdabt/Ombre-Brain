@@ -41,6 +41,7 @@ async def store_pinned(
     media: list | str | None = None,
     explicit_domain: list[str] | None = None,
     source_refs: list[dict] | None = None,
+    quotes: list[dict] | None = None,
 ) -> str:
     try:
         analysis = await rt.dehydrator.analyze(content)
@@ -82,6 +83,7 @@ async def store_pinned(
             name=suggested_name or None,
             title=final_title,
             source_refs=source_refs,
+            quotes=quotes,
             bucket_type="permanent",
             pinned=True,
             why_remembered=why_remembered,

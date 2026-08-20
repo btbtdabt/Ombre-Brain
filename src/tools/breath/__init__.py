@@ -7,7 +7,7 @@ breath 是「我睁眼看看自己记得什么」。这个文件根据参数把�
 五个分支文件之一：
 
 - catalog.py：catalog=True → 目录模式（每桶一行元数据，0 LLM，最省 token）
-- feel.py：domain="feel"（或 tags 含 feel/__feel__）→ 拉所有 feel 桶
+- feel.py：独立 feel(query) 或兼容 domain="feel" → 只检索相关 feel 桶
 - importance.py：importance_min >= 1 → 跳过语义，按 importance 拉前 20
 - surface.py：query 为空 → 浮现模式（pinned + 加权采样未解决桶 + passive）
 - search.py：有 query → 检索模式（关键词 + 向量双通道 + 随机漂浮）
@@ -29,6 +29,8 @@ breath 是「我睁眼看看自己记得什么」。这个文件根据参数把�
 
 from typing import Optional
 
+from utils import parse_bool
+
 from .. import _runtime as rt
 from .._common import (
     check_metadata_size,
@@ -37,7 +39,7 @@ from .._common import (
 from .catalog import surface_catalog
 from .feel import surface_feels
 from .importance import surface_by_importance
-from .surface import surface_default
+from .surface import surface_default, surface_plans
 from .search import surface_search
 
 
@@ -59,6 +61,7 @@ async def dispatch(
     catalog: Optional[bool] = False,
     date_from: Optional[str] = "",
     date_to: Optional[str] = "",
+    quotes: Optional[bool] = False,
 ) -> str:
     # --- Null-safe coercion ---
     query = "" if query is None else str(query)
@@ -78,6 +81,7 @@ async def dispatch(
         catalog = False
     date_from = "" if date_from is None else str(date_from)
     date_to = "" if date_to is None else str(date_to)
+    quotes = parse_bool(quotes, default=False)
 
     query_err = check_query_size(query)
     if query_err:
@@ -100,6 +104,7 @@ async def dispatch(
         "catalog": catalog,
         "date_from": date_from,
         "date_to": date_to,
+        "quotes": quotes,
     })
     await rt.decay_engine.ensure_started()
 
@@ -131,9 +136,16 @@ async def dispatch(
         domain = "feel"
         tag_filter = [t for t in tag_filter if t not in ("feel", "__feel__")]
 
-    # --- Feel 通道优先：即使无 query 也直接拉 feel ---
+    # --- Feel 通道：3.0.0 起必须带关键词，不再全量返回（见 feel.py） ---
     if domain.strip().lower() == "feel":
-        return await _with_deletion_requests(await surface_feels(max_tokens=memory_max_tokens))
+        return await _with_deletion_requests(
+            await surface_feels(query=query, max_tokens=memory_max_tokens)
+        )
+
+    # --- Plan 通道：与 feel 同构。plan 不参与普通浮现，没有这个分流时
+    # domain="plan" 会落到下面的浮现模式，返回核心准则而不是 plan。 ---
+    if domain.strip().lower() == "plan":
+        return await _with_deletion_requests(await surface_plans(max_tokens=memory_max_tokens))
 
     # --- importance_min 模式：跳过语义，按 importance 降序 ---
     if importance_min >= 1:
@@ -162,4 +174,5 @@ async def dispatch(
         tag_filter=tag_filter,
         date_from=date_from,
         date_to=date_to,
+        with_quotes=quotes,
     ))

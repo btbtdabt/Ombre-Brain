@@ -42,6 +42,7 @@ async def test_secret_persist_failure_rolls_back_only_its_own_config_paths(
 ) -> None:
     runtime = {
         "buckets_dir": "vault",
+        "timezone": "Asia/Shanghai",
         "gateway": {"cooldown_hours": 6},
         "surfacing": {"sampling": {"top_k": 3}},
     }
@@ -112,6 +113,7 @@ async def test_secret_persist_failure_rolls_back_only_its_own_config_paths(
             {
                 "persist": True,
                 "persist_env": True,
+                "timezone": "America/New_York",
                 "gateway": {
                     "cooldown_hours": 7,
                     "domain_sentinel_api_key": "new-secret",
@@ -125,6 +127,8 @@ async def test_secret_persist_failure_rolls_back_only_its_own_config_paths(
     assert not writer.is_alive()
     assert writer_errors == []
     assert runtime["gateway"] == {"cooldown_hours": 6}
+    assert runtime["timezone"] == "Asia/Shanghai"
     assert runtime["surfacing"]["sampling"]["top_k"] == 99
     assert persisted["gateway"] == {"cooldown_hours": 6}
+    assert persisted["timezone"] == "Asia/Shanghai"
     assert persisted["surfacing"]["sampling"]["top_k"] == 99

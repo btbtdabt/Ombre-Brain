@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+from collections.abc import Iterable
 from copy import deepcopy
 from dataclasses import dataclass
 from functools import wraps
@@ -29,6 +30,7 @@ from .memory import (
     breath_search,
     dream,
     entity_edge_backfill,
+    feel,
     grow,
     hold,
     introspection,
@@ -97,6 +99,7 @@ CURRENT_TOOL_NAMES = (
     "breath",
     "breath_search",
     "breath_advanced",
+    "feel",
     "read_bucket",
     "list_buckets_light",
     "letter_write",
@@ -123,6 +126,7 @@ P0_TOOL_NAMES = (
     "breath",
     "breath_search",
     "breath_advanced",
+    "feel",
     "hold",
     "grow",
     "source_read",
@@ -146,6 +150,7 @@ P0_TOOL_NAMES = (
 )
 
 COMPATIBILITY_TOOL_NAMES = ("darkroom_status", "darkroom_release", "dream")
+EXTRA_TOOL_NAMES = ("letter_write", "letter_lock_update", "letter_read")
 
 
 TOOL_MANIFEST = (
@@ -165,6 +170,7 @@ TOOL_MANIFEST = (
         for handler in (
             breath_search,
             breath_advanced,
+            feel,
             read_bucket,
             list_buckets_light,
             letter_write,
@@ -233,14 +239,27 @@ def register_current_tools(
     mcp: Any,
     *,
     invoker: ToolInvoker | None = None,
+    tool_names: Iterable[str] | None = None,
 ) -> dict[str, ToolHandler]:
     """Register the canonical union surface on a FastMCP-compatible object.
 
     ``invoker`` lets the process assembly apply one logging/error envelope to
     every handler while ``functools.wraps`` preserves the declared MCP schema.
     """
+    selected_names = (
+        REGISTERED_TOOL_NAMES
+        if tool_names is None
+        else tuple(str(name) for name in tool_names)
+    )
+    if len(selected_names) != len(set(selected_names)):
+        raise RuntimeError("duplicate tool requested from current tool manifest")
+    unknown = set(selected_names) - set(TOOL_BY_NAME)
+    if unknown:
+        raise RuntimeError(f"unknown current tools requested: {sorted(unknown)}")
+
     registered: dict[str, ToolHandler] = {}
-    for spec in TOOL_MANIFEST:
+    for name in selected_names:
+        spec = TOOL_BY_NAME[name]
         handler = spec.handler if invoker is None else _invocation_handler(spec, invoker)
         registered[spec.name] = mcp.tool(
             name=spec.name,
@@ -271,6 +290,7 @@ register_tools = register_current_tools
 __all__ = [
     "COMPATIBILITY_TOOL_NAMES",
     "CURRENT_TOOL_NAMES",
+    "EXTRA_TOOL_NAMES",
     "P0_TOOL_NAMES",
     "REGISTERED_TOOL_NAMES",
     "TOOL_BY_NAME",

@@ -1,24 +1,169 @@
-"""Validation and presentation helpers for Relation V1 sidecar ledgers."""
+"""Validation and presentation helpers for Relation sidecar ledgers."""
 from __future__ import annotations
 
+import secrets
 from typing import Any
 
 MAX_RELATION_LINKS = 64
 MAX_ACTIVE_RELATION_LINKS = 16
 MAX_RELATION_LABEL_CHARS = 20
 MAX_RELATION_TYPE_CHARS = 32
-_RELATION_TYPES = frozenset({
+MAX_RELATION_ID_CHARS = 64
+_FIXED_RELATION_TYPES = frozenset({
     "caused_by", "causes", "continuation_of", "continues", "related_to",
     "same_event",
 })
-_DEFAULT_DISPLAY_LABELS = {
-    "caused_by": "\u539f\u56e0",
-    "causes": "\u7ed3\u679c",
-    "continuation_of": "\u524d\u6bb5",
-    "continues": "\u540e\u7eed",
-    "related_to": "\u76f8\u5173",
-    "same_event": "\u540c\u4e00\u4e8b\u4ef6",
+_RELATION_TYPES = _FIXED_RELATION_TYPES | {"custom"}
+_REVERSE_RELATION_TYPES = {
+    "caused_by": "causes",
+    "causes": "caused_by",
+    "continuation_of": "continues",
+    "continues": "continuation_of",
+    "related_to": "related_to",
+    "same_event": "same_event",
+    "custom": "custom",
 }
+_DEFAULT_DISPLAY_LABELS = {
+    "caused_by": "原因",
+    "causes": "结果",
+    "continuation_of": "前段",
+    "continues": "后续",
+    "related_to": "相关",
+    "same_event": "同一事件",
+}
+
+
+# ============================================================
+# 自动建立关系（3.2.0）
+# ------------------------------------------------------------
+# 关联不是一个决定，是一个结果。我不会先想"我要把这两段记忆连起来"再去建立它——
+# 是因为涉及同一个人、发生在同一个地方、带来同样的感受，所以它们本来就连着，
+# 我只是**发现**它们连着。所以这件事交给后端，模型不感知。
+#
+# 判定只用规则 + 向量相似度，**不调 LLM**：写入路径上加 LLM 调用会拖慢 hold、
+# 多一个会失败的外部依赖，而 relation 只是 hint，不值得这个代价。
+#
+# 阈值来自 2026-08-18 对 917 桶真实记忆的全量扫描（见施工单 §3.1 调整记录）：
+#   related_to 原定 0.65 会建出 7,620 条，47.8% 的桶撞上每桶上限——
+#   一旦大面积撞上限，阈值就形同虚设，决定挂哪几条的变成"截断时谁排前八"。
+#   上调到 0.72 后每桶中位 2 条，只有 3.5% 需要截断。
+# ============================================================
+
+AUTO_SAME_EVENT_MIN_SCORE = 0.85
+AUTO_SAME_EVENT_MAX_HOURS = 6.0
+AUTO_CONTINUATION_MIN_SCORE = 0.75
+AUTO_CONTINUATION_MAX_HOURS = 72.0
+AUTO_RELATED_MIN_SCORE = 0.72
+# 每桶 active 自动关系上限。detached 历史保留但不占活跃预算；防热点桶连成
+# 蜘蛛网，不是常规裁剪手段——正常情况下绝大多数桶远达不到这个数。
+AUTO_MAX_LINKS_PER_BUCKET = 8
+
+
+def generate_relation_id() -> str:
+    """Return the shared identifier stored on both views of one relation."""
+
+    return f"rel_{secrets.token_hex(6)}"
+
+
+def auto_link_has_capacity(existing: list[dict[str, Any]]) -> bool:
+    """Return whether one automatic link can be added without evicting a pair.
+
+    Automatic relations are mirrored in two buckets.  Evicting a low-scoring
+    local view here would leave its peer in a third bucket dangling, so the
+    bidirectional write path only appends while both endpoints have active and
+    physical ledger capacity.  Detached history consumes only physical space.
+    """
+
+    if len(existing) >= MAX_RELATION_LINKS:
+        return False
+    active_manual_count = sum(
+        not link.get("auto") and link.get("status") == "active"
+        for link in existing
+    )
+    active_automatic_count = sum(
+        bool(link.get("auto")) and link.get("status") == "active"
+        for link in existing
+    )
+    budget = max(0, AUTO_MAX_LINKS_PER_BUCKET - active_manual_count)
+    return active_automatic_count < budget
+
+
+def infer_auto_relation_type(score: float, hours_apart: float | None) -> str | None:
+    """按相似度与时间差推断该建哪种关系；判不出来就返回 None。
+
+    只建三种。`caused_by` / `causes` / `custom` **永远不自动建**——
+    因果需要语义理解，规则判不了，宁可不建也不能瞎建。
+
+    时间差未知（缺 created）时不建带时间条件的两种，降级到 related_to。
+    """
+    try:
+        score = float(score)
+    except (TypeError, ValueError):
+        return None
+    if score < AUTO_RELATED_MIN_SCORE:
+        return None
+    if (
+        score >= AUTO_SAME_EVENT_MIN_SCORE
+        and hours_apart is not None
+        and hours_apart <= AUTO_SAME_EVENT_MAX_HOURS
+    ):
+        return "same_event"
+    if (
+        score >= AUTO_CONTINUATION_MIN_SCORE
+        and hours_apart is not None
+        and hours_apart <= AUTO_CONTINUATION_MAX_HOURS
+    ):
+        return "continuation_of"
+    return "related_to"
+
+
+def merge_auto_links(
+    existing: list[dict[str, Any]],
+    incoming: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """把新推断的自动关系并进已有 links，返回归一化后的结果。
+
+    - **手动关系一条都不动**：`auto` 为假的 link 原样保留，自动的才参与裁剪。
+      虽然 3.0.0 之后已经没有手动入口，存量数据仍然存在，不该被后来的自动
+      推断挤掉。
+    - 同一个 target 已存在则跳过，不重复也不改写它原来的类型。
+    - detached 自动关系作为历史保留，不占 active 上限。
+    - active 关系超过每桶上限时按相似度保留最高的几条。
+    """
+    kept = list(existing or [])
+    seen = {str(link.get("target_bucket_id") or "") for link in kept}
+    manual = [link for link in kept if not link.get("auto")]
+    detached_auto = [
+        link
+        for link in kept
+        if link.get("auto") and link.get("status") != "active"
+    ]
+    active_auto = [
+        link
+        for link in kept
+        if link.get("auto") and link.get("status") == "active"
+    ]
+
+    for link in incoming:
+        target = str(link.get("target_bucket_id") or "")
+        if not target or target in seen:
+            continue
+        seen.add(target)
+        if link.get("auto") and link.get("status") != "active":
+            detached_auto.append(link)
+        else:
+            active_auto.append(link)
+
+    active_manual_count = sum(link.get("status") == "active" for link in manual)
+    active_budget = max(0, AUTO_MAX_LINKS_PER_BUCKET - active_manual_count)
+    total_budget = max(
+        0,
+        MAX_RELATION_LINKS - len(manual) - len(detached_auto),
+    )
+    active_auto.sort(
+        key=lambda item: float(item.get("score") or 0.0), reverse=True
+    )
+    return manual + detached_auto + active_auto[: min(active_budget, total_budget)]
 
 
 def normalize_relation_type(value: Any) -> str:
@@ -26,8 +171,16 @@ def normalize_relation_type(value: Any) -> str:
         raise ValueError("relation_type 必须是字符串安全键")
     value = value.strip().lower()
     if value not in _RELATION_TYPES:
-        raise ValueError("relation_type must be one of the six supported relation types")
+        raise ValueError("relation_type must be one of the six fixed types or custom")
     return value
+
+
+def reverse_relation_type(value: Any) -> str:
+    return _REVERSE_RELATION_TYPES[normalize_relation_type(value)]
+
+
+def is_fixed_relation_type(value: Any) -> bool:
+    return normalize_relation_type(value) in _FIXED_RELATION_TYPES
 
 
 def normalize_relation_label(value: Any) -> str:
@@ -43,14 +196,25 @@ def normalize_relation_label(value: Any) -> str:
     return value
 
 
-def normalize_relation_links(value: Any) -> list[dict[str, str]]:
+def normalize_relation_id(value: Any) -> str:
+    if value in (None, ""):
+        return ""
+    if not isinstance(value, str):
+        raise ValueError("relation_id 必须是字符串")
+    value = value.strip()
+    if not value or "\r" in value or "\n" in value or len(value) > MAX_RELATION_ID_CHARS:
+        raise ValueError("relation_id 格式无效")
+    return value
+
+
+def normalize_relation_links(value: Any) -> list[dict[str, Any]]:
     if value in (None, ""):
         return []
     if not isinstance(value, list):
         raise ValueError("relation_links 必须是列表")
     if len(value) > MAX_RELATION_LINKS:
         raise ValueError(f"relation_links 过多（{len(value)} > {MAX_RELATION_LINKS}）")
-    links: list[dict[str, str]] = []
+    links: list[dict[str, Any]] = []
     for item in value:
         if not isinstance(item, dict):
             raise ValueError("relation_links 每项必须是对象")
@@ -66,15 +230,50 @@ def normalize_relation_links(value: Any) -> list[dict[str, str]]:
         status = status.strip().lower()
         if status not in {"active", "detached"}:
             raise ValueError("relation_links status 必须是 active 或 detached")
-        links.append({"target_bucket_id": target_bucket_id, "type": normalize_relation_type(item.get("type")), "label": normalize_relation_label(item.get("label")), "status": status})
+        relation_type = normalize_relation_type(item.get("type"))
+        label = normalize_relation_label(item.get("label"))
+        if relation_type == "custom" and not label:
+            raise ValueError("custom relation 必须有 label")
+        relation_id = normalize_relation_id(item.get("relation_id"))
+        normalized: dict[str, Any] = {
+            "target_bucket_id": target_bucket_id,
+            "type": relation_type,
+            "label": label,
+            "status": status,
+        }
+        # auto 标记让自动建立的关系可以被区分和整体回滚；score 留着是为了
+        # 上限截断时知道该保留哪几条。两者都只在自动关系上出现。
+        if item.get("auto"):
+            normalized["auto"] = True
+            raw_score = item.get("score")
+            try:
+                score = (
+                    round(float(raw_score), 4)
+                    if isinstance(raw_score, (str, int, float))
+                    else None
+                )
+            except (TypeError, ValueError):
+                score = None
+            if score is not None:
+                normalized["score"] = score
+        # V1 历史单向边没有 relation_id，保留原形不强制迁移。
+        if relation_id:
+            normalized["relation_id"] = relation_id
+        links.append(normalized)
     if sum(item["status"] == "active" for item in links) > MAX_ACTIVE_RELATION_LINKS:
         raise ValueError(f"活动 relation_links 过多（>{MAX_ACTIVE_RELATION_LINKS}）")
     return links
 
 
 def relation_display_label(relation_type: str, label: str | None = "") -> str:
-    """Render a Relation label without changing its raw type or ledger data."""
-    return label or _DEFAULT_DISPLAY_LABELS.get(relation_type, relation_type)
+    """Render a short human-facing label without reading the target bucket."""
+    relation_type = normalize_relation_type(relation_type)
+    label = normalize_relation_label(label)
+    if relation_type == "custom":
+        return label or "自定义"
+    base = _DEFAULT_DISPLAY_LABELS.get(relation_type, relation_type)
+    # 新建的固定六型不写 label；旧 V1 若已存在 label，仍保留展示以免丢信息。
+    return f"{base}·{label}" if label else base
 
 
 def relation_hint(bucket: dict, limit: int = 2) -> str:
@@ -85,11 +284,12 @@ def relation_hint(bucket: dict, limit: int = 2) -> str:
         links = normalize_relation_links(meta.get("relation_links"))
     except ValueError:
         return ""
+    active = [link for link in links if link["status"] == "active"]
     rows = []
-    for link in links:
-        if link["status"] == "active":
-            label = relation_display_label(link["type"], link["label"])
-            rows.append(f"↳ {label} → {link['target_bucket_id']}")
-            if len(rows) >= limit:
-                break
+    for link in active[:limit]:
+        label = relation_display_label(link["type"], link["label"])
+        rows.append(f"↳ {label} → {link['target_bucket_id']}")
+    hidden = len(active) - len(rows)
+    if hidden > 0:
+        rows.append(f"↳ 另有 {hidden} 条 relation")
     return "\n".join(rows)

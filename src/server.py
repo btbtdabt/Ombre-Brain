@@ -13,14 +13,16 @@ web._shared，再从 tools.current.manifest 注册唯一的公共工具清单。
 - Dashboard / HTTP 路由全部已拆分到 src/web/<域>.py（每个模块 register(mcp)），
   本文件仅在启动时调用 web.register_all(mcp) 装配；共享依赖见 web/_shared.py
 - 仍保留在本文件：进程启动、引擎初始化、GitHub 后台同步循环、Webhook 推送、
-  MCP Bearer 鉴权中间件、单连接器 /mcp 装配、uvicorn 拉起
+  MCP Bearer 鉴权中间件、主 `/mcp` 与可选 Letter 镜像 `/mcp-extra` 装配、
+  uvicorn 拉起
 
 不做什么（边界）：
 - 不在这里写 hold/breath/dream 等业务逻辑（全在 tools/* 下）
 - 不写 HTTP 路由处理（全在 web/* 下）；不写 LLM prompt（dehydrator 负责）
 - 不直接读写桶文件（bucket_manager 负责）
 
-对外暴露：单个 mcp 实例及 manifest 注册的公共工具；HTTP 路由在 src/web/*
+对外暴露：主 mcp 实例及 manifest 注册的全部公共工具；mcp_extra 仅镜像同一
+manifest 中的 Letter 工具；HTTP 路由在 src/web/*
 ========================================
 """
 
@@ -57,6 +59,7 @@ from server_app import build_remote_transport_app as _build_remote_transport_app
 # MCP 工具由 declarative manifest 统一注册；本文件只负责进程装配与调用 envelope。
 from tools import _runtime as _tools_runtime
 from tools.current.manifest import (
+    EXTRA_TOOL_NAMES,
     P0_TOOL_NAMES,
     REGISTERED_TOOL_NAMES,
     TOOL_BY_NAME,
@@ -322,7 +325,8 @@ _gh_auto_interval: int = int(_gh_cfg.get("auto_interval_minutes") or 0)
 # host="0.0.0.0" so Docker container's HTTP transport is externally reachable
 # stdio mode ignores host (no network)
 #
-# 历史上的 /mcp-extra 已退休；所有工具与 HTTP custom_route 都挂在唯一实例上。
+# 主 /mcp 保留全部工具；/mcp-extra 从同一 manifest 镜像 Letter 工具。
+# HTTP custom_route 仍只注册在主实例，避免维护第二份 Web 路由。
 # Streamable HTTP 固定返回单个 JSON-RPC 对象并采用无状态请求，兼容不会
 # 保存 Mcp-Session-Id 的客户端，同时不影响 stdio。
 _stdio_runtime_lifecycle = None
@@ -349,6 +353,17 @@ mcp = FastMCP(
     json_response=True,
     stateless_http=True,
     lifespan=_stdio_lifespan if config.get("transport", "stdio") == "stdio" else None,
+)
+
+# Optional compatibility mirror.  Letter tools remain available on the main
+# connector; this endpoint lets clients adopt P0luz 3.2.0's split topology.
+mcp_extra = FastMCP(
+    "Ombre Brain Extra",
+    host=_BIND_HOST,
+    port=OMBRE_PORT,
+    json_response=True,
+    stateless_http=True,
+    streamable_http_path="/mcp-extra",
 )
 
 
@@ -706,6 +721,25 @@ def _install_current_tool_surface() -> dict[str, Any]:
 _current_registered_tools = _install_current_tool_surface()
 
 
+def _install_extra_tool_surface() -> dict[str, Any]:
+    manager = getattr(mcp_extra, "_tool_manager", None)
+    tools = getattr(manager, "_tools", None)
+    if not isinstance(tools, dict):
+        raise RuntimeError("FastMCP extra tool registry is unavailable")
+    registered = register_current_tools(
+        mcp_extra,
+        invoker=_invoke_current_tool,
+        tool_names=EXTRA_TOOL_NAMES,
+    )
+    if set(registered) != set(EXTRA_TOOL_NAMES):
+        raise RuntimeError("extra MCP tool registration incomplete")
+    logger.info("MCP extra surface registered: %s tools", len(registered))
+    return registered
+
+
+_extra_registered_tools = _install_extra_tool_surface()
+
+
 # =============================================================
 # Dashboard API endpoints (for lightweight Web UI)
 # 仪表板 API（轻量 Web UI 用）
@@ -804,11 +838,13 @@ if __name__ == "__main__":
             token_validator=_mcp_token_validator,
             lifecycle=_runtime_lifecycle,
             static_token_validator=_mcp_static_token_validator,
+            mcp_extra=mcp_extra,
         )
         if transport == "streamable-http":
             logger.info(
-                "MCP 单连接器 /mcp：%s 个工具统一对外暴露",
+                "MCP /mcp：%s 个工具；/mcp-extra：%s 个信件工具镜像",
                 len(REGISTERED_TOOL_NAMES),
+                len(EXTRA_TOOL_NAMES),
             )
         logger.info("CORS middleware enabled for remote transport / 已启用 CORS 中间件")
         logger.info(

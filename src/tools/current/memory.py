@@ -8,6 +8,7 @@ import uuid
 from typing import Any
 
 from entity_edges import extract_entity_edges_from_bucket
+from ombrebrain.storage.quote_store import normalize_quotes
 from profile_facts import profile_key
 from runtime_values import age_hours_since
 from self_anchor import is_self_anchor_bucket
@@ -29,9 +30,12 @@ from .._common import (
     merge_or_create,
 )
 from ..breath import dispatch as p0_breath_dispatch
+from ..breath.feel import surface_feels
 from ..dream import dispatch as p0_dream_dispatch
 from ..grow.core import grow_items as p0_grow_items
+from ..grow.retry_guard import request_fingerprint, run_once
 from ..hold import _prepare_source_refs
+from .._relation_link import link_new_bucket
 from ..trace import dispatch as p0_trace_dispatch
 from ._helpers import (
     ai_author_name,
@@ -249,6 +253,7 @@ async def breath(
     retrieval_mode: str = "graph",
     mode: str = "",
     session_id: str = "",
+    quotes: bool = False,
 ) -> str:
     """只读检索记忆。查主题用 query；新窗口轻交接用 mode="handoff"；date 或 query 里的日期可查当天普通记忆；domain="feel"/"whisper" 读私密通道，domain="daily_impression" 才读日印象。日期支持 2026-06-15、2026.06.15、2026年6月15日、25年6月15日、6月15日。"""
     await ensure_decay_started()
@@ -276,6 +281,7 @@ async def breath(
             importance_min=importance_min,
             tags=tags,
             catalog=catalog,
+            quotes=quotes,
         )
 
     # A generated bucket ID is an address only when it already exists.  The
@@ -293,6 +299,7 @@ async def breath(
             valence=valence,
             arousal=arousal,
             max_results=max_results,
+            quotes=quotes,
         )
 
     include_related = bool_value(include_related, True)
@@ -422,6 +429,7 @@ async def breath(
         auto_surface=auto_surface,
         direct_render_mode=direct_render_mode,
         retrieval_mode=retrieval_mode,
+        with_quotes=bool_value(quotes, False),
     )
 
 
@@ -429,9 +437,26 @@ async def breath_search(
     query: str,
     domain: str = "",
     max_results: int = 20,
+    quotes: bool = False,
 ) -> str:
-    """按关键词或语义检索记忆；domain 可预筛主题域，max_results 控制条数。"""
-    return await breath(query=query, domain=domain, max_results=max_results)
+    """按关键词或语义检索记忆，逐字返回当前正文。domain 可限定主题域，max_results 控制条数。quotes=True 时，直接命中的桶若保存过关键原话，会把引语附在正文后；默认不返回引语。"""
+    return await breath(
+        query=query,
+        domain=domain,
+        max_results=max_results,
+        quotes=quotes,
+    )
+
+
+async def feel(query: str, max_tokens: int = 10000) -> str:
+    """按关键词检索旧感受；逐字返回相关 feel，不返回未命中内容。"""
+    await ensure_decay_started()
+    if query_error := check_query_size(str(query or "")):
+        return query_error
+    return await surface_feels(
+        query=str(query or "").strip(),
+        max_tokens=int_between(max_tokens, 10000, 500, 20000),
+    )
 
 
 async def breath_advanced(
@@ -585,6 +610,7 @@ async def _create_current_bucket(
     grow_batch_id: str = "",
     extra_metadata: dict | None = None,
     source_refs: list[dict] | None = None,
+    quotes: list[dict] | None = None,
 ) -> str:
     manager = require_runtime("bucket_mgr")
     bucket_id = await manager.create(
@@ -606,12 +632,15 @@ async def _create_current_bucket(
         source_tool=source_tool,
         grow_batch_id=grow_batch_id,
         source_refs=source_refs,
+        quotes=quotes,
         allow_embedding_fallback=True,
         extra_metadata=extra_metadata,
     )
     bucket = await manager.get(bucket_id)
     if bucket:
         refresh_bucket_indexes(bucket)
+    if not test_data and bucket_type == "dynamic" and source_tool in {"hold", "grow"}:
+        asyncio.create_task(link_new_bucket(bucket_id, content))
     return bucket_id
 
 
@@ -634,8 +663,9 @@ async def hold(
     test_data: bool = False,
     source_content: str = "",
     source_ranges: list | None = None,
+    quotes: list | None = None,
 ) -> str:
-    """写一条长期记忆。单个事实/承诺/偏好用 hold；旧记忆的新感受用 comment_bucket；悄悄话用 whisper=True。date 可传事件日期；title 可选，传了就用给定标题，不传则自动生成。media 可传服务器上传临时目录内的路径，或 data_base64+filename 项。普通记忆不用填写 domain，系统会自动判断；维护自我锚点等特殊桶时可显式传 domain。显式 valence/arousal 会覆盖自动情绪。普通记忆 content 的最小写入就是正文；只有确实需要结构化时才按需使用 ### moment、### original、### reflection；reflection 必须写成“我……”第一人称。不要写 ### affect_anchor、### followup 或 ### todo：长期回应变化写进 reflection，到时提醒用 reminder_create。feel=True/whisper=True 时 content 只能写第一人称正文，不写标题或任何 Markdown 分段。"""
+    """写一条长期记忆。单个事实/承诺/偏好用 hold；旧记忆的新感受用 comment_bucket；悄悄话用 whisper=True。date 可传事件日期；title 可选，传了就用给定标题，不传则自动生成。media 可传服务器上传临时目录内的路径，或 data_base64+filename 项。普通记忆的 domain 由系统自动判断；维护特殊桶时可显式传入。显式 valence/arousal 会覆盖自动情绪。普通记忆 content 的最小写入就是正文；需要结构化时按需使用 ### moment、### original、### reflection，reflection 使用“我……”第一人称。长期回应变化写进 reflection，到时提醒用 reminder_create。feel=True/whisper=True 时 content 使用第一人称正文。quotes 保存当下明确值得逐字保留的关键原话，可传字符串列表，或带 text/speaker/at 的对象列表；最多 3 句、每句 100 字，超限整次写入会被拒绝。引语仅在显式 breath_search(quotes=True) 时返回。"""
     await ensure_decay_started()
     content = str(content or "").strip()
     if not content:
@@ -662,6 +692,10 @@ async def hold(
     source_refs, source_error = _prepare_source_refs(source_content, source_ranges)
     if source_error:
         return source_error
+    try:
+        quote_items = normalize_quotes(quotes) if quotes not in (None, "", []) else []
+    except ValueError as exc:
+        return f"引语无效，未创建任何桶：{exc}"
 
     async def create_whisper() -> str:
         bucket_id = await _create_current_bucket(
@@ -678,6 +712,7 @@ async def hold(
             why_remembered=why_remembered,
             meaning=meaning,
             source_refs=source_refs,
+            quotes=quote_items or None,
         )
         return f"🫧whisper→{bucket_id}"
 
@@ -693,7 +728,7 @@ async def hold(
             manager = require_runtime("bucket_mgr")
             if not await manager.get(source_id):
                 return f"源记忆不存在: {source_id}"
-            if why_remembered or meaning:
+            if why_remembered or meaning or quote_items:
                 feel_valence = (
                     requested_valence if requested_valence is not None else 0.5
                 )
@@ -715,6 +750,7 @@ async def hold(
                     meaning=meaning,
                     triggered_by=source_id,
                     source_refs=source_refs,
+                    quotes=quote_items or None,
                 )
                 update_kwargs: dict[str, bool | float] = {"digested": True}
                 if requested_valence is not None:
@@ -774,6 +810,7 @@ async def hold(
                 why_remembered=why_remembered,
                 meaning=meaning,
                 source_refs=source_refs,
+                quotes=quote_items or None,
             )
         return f"📌钉选→{bucket_id} {','.join(domains)}"
 
@@ -795,6 +832,7 @@ async def hold(
             meaning=meaning,
             test_data=test_data,
             source_refs=source_refs,
+            quotes=quote_items or None,
         )
         is_merged = False
         embed_warning = ""
@@ -808,6 +846,7 @@ async def hold(
             arousal=final_arousal,
             name=name,
             source_refs=source_refs,
+            quotes=quote_items or None,
             raw_merge=True,
             why_remembered=why_remembered,
             source_tool="hold",
@@ -863,7 +902,7 @@ async def _grow_create_item(item: dict, *, batch_id: str, title: str = "") -> tu
     return bucket_id, name or bucket_id
 
 
-async def grow(
+async def _grow_once(
     content: str = "",
     items: list | None = None,
     auto: bool = False,
@@ -957,6 +996,36 @@ async def grow(
     return (
         f"{gate_prefix}{len(items)}条|新{created}合0 batch:{batch_id}\n"
         + "\n".join(results)
+    )
+
+
+async def grow(
+    content: str = "",
+    items: list | None = None,
+    auto: bool = False,
+    source: str = "",
+    title: str = "",
+) -> str:
+    """只有多个已筛选长期记忆点才用 grow；单条事实/承诺/偏好优先 hold，旧记忆补感受优先 comment_bucket。items 是已拆好的最终记忆正文；每项可带 title/content/tags/importance/domain/valence/arousal/why_remembered/source_ranges/quotes。quotes 只用于调用方在写入当下明确选中的关键原话。content 可作为整批共享原文证据，source_ranges 用 1-based 闭区间关联证据。相同请求在 30 分钟内幂等执行一次。普通正文需要结构化时按需使用 ### moment、### original、### reflection，reflection 使用第一人称。"""
+    fingerprint = request_fingerprint(
+        content=str(content or ""),
+        items=items,
+        test_data=False,
+        extra={
+            "auto": bool_value(auto),
+            "source": str(source or "").strip(),
+            "title": str(title or "").strip(),
+        },
+    )
+    return await run_once(
+        fingerprint,
+        lambda: _grow_once(
+            content=content,
+            items=items,
+            auto=auto,
+            source=source,
+            title=title,
+        ),
     )
 
 

@@ -19,6 +19,7 @@ async def test_breath_search_forwards_its_public_arguments(monkeypatch):
         query="project boundary",
         domain="work",
         max_results=7,
+        quotes=True,
     )
 
     assert result == "search result"
@@ -26,6 +27,7 @@ async def test_breath_search_forwards_its_public_arguments(monkeypatch):
         "query": "project boundary",
         "domain": "work",
         "max_results": 7,
+        "quotes": True,
     }
 
 
@@ -91,5 +93,6 @@ async def test_breath_search_mcp_schema_is_small():
         "query",
         "domain",
         "max_results",
+        "quotes",
     }
     assert listed.inputSchema["required"] == ["query"]

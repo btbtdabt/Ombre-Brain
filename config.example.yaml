@@ -20,6 +20,17 @@ transport: "stdio"
 deployment:
   public_url: ""  # e.g. "https://ob.example.com"
 
+# --- AI display name / AI 一方的显示名 ---
+# Used by Letter signatures and P0-facing prompts. Keep it aligned with
+# identity.ai_name when both identity systems are configured. Empty falls back
+# to AI_NAME, then "AI".
+ai_name: ""
+
+# --- Timezone / 时区 ---
+# IANA timezone used for date-only Letter unlock dates. Empty or invalid values
+# fall back to Asia/Shanghai (fixed +08:00 if tzdata is unavailable).
+timezone: "Asia/Shanghai"
+
 # --- Log level / 日志级别 ---
 log_level: "INFO"
 
@@ -160,6 +171,7 @@ scoring_weights:
 # --- Fuzzy matching / 模糊匹配参数 ---
 matching:
   fuzzy_threshold: 50             # Minimum match score (0-100) / 最低匹配分数
+  vector_recall_threshold: 0.55   # Pure semantic candidate gate / 纯语义候选门槛
   max_results: 5                  # Max results per search / 单次搜索最多返回条数
 
 # --- Surfacing defaults / 浮现默认参数 ---

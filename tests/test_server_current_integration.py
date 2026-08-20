@@ -6,7 +6,12 @@ import inspect
 import pytest
 
 from tools import _runtime as tool_runtime
-from tools.current.manifest import P0_TOOL_NAMES, REGISTERED_TOOL_NAMES, TOOL_BY_NAME
+from tools.current.manifest import (
+    EXTRA_TOOL_NAMES,
+    P0_TOOL_NAMES,
+    REGISTERED_TOOL_NAMES,
+    TOOL_BY_NAME,
+)
 from web import _shared as web_runtime
 from web.current_contract import CURRENT_ROUTE_KEYS
 
@@ -16,8 +21,11 @@ async def test_server_exposes_the_exact_current_and_p0_tool_union() -> None:
     import server
 
     tools = await server.mcp.list_tools()
+    extra_tools = await server.mcp_extra.list_tools()
 
+    assert len(REGISTERED_TOOL_NAMES) == 40
     assert {tool.name for tool in tools} == set(REGISTERED_TOOL_NAMES)
+    assert tuple(tool.name for tool in extra_tools) == EXTRA_TOOL_NAMES
     assert set(server._current_registered_tools) == set(REGISTERED_TOOL_NAMES)
     breath = next(tool for tool in tools if tool.name == "breath")
     assert breath.inputSchema["properties"] == {}
@@ -25,6 +33,23 @@ async def test_server_exposes_the_exact_current_and_p0_tool_union() -> None:
     assert "mode" in advanced.inputSchema["properties"]
     assert "session_id" in advanced.inputSchema["properties"]
     assert "catalog" in advanced.inputSchema["properties"]
+    relation_attach = next(tool for tool in tools if tool.name == "relation_attach")
+    assert relation_attach.inputSchema["properties"]["relation_type"]["enum"] == [
+        "caused_by",
+        "causes",
+        "continuation_of",
+        "continues",
+        "related_to",
+        "same_event",
+        "custom",
+    ]
+    assert "bucket_id -> target_bucket_id" in (relation_attach.description or "")
+    assert "quotes" in (
+        next(tool for tool in tools if tool.name == "hold").description or ""
+    )
+    assert "quotes" in (
+        next(tool for tool in tools if tool.name == "grow").description or ""
+    )
 
 
 def test_server_registers_tools_only_from_the_canonical_manifest() -> None:
@@ -47,7 +72,8 @@ def test_server_registers_tools_only_from_the_canonical_manifest() -> None:
                 decorated_tools.append(node.name)
 
     assert decorated_tools == []
-    assert not hasattr(server, "mcp_extra")
+    assert hasattr(server, "mcp_extra")
+    assert set(server._extra_registered_tools) == set(EXTRA_TOOL_NAMES)
     for name in P0_TOOL_NAMES:
         assert getattr(server, name) is TOOL_BY_NAME[name].handler
 

@@ -16,6 +16,10 @@ from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 import pytest
+from tests.mcp_contract_snapshot import (
+    EXPECTED_PARAMETERS,
+    EXPECTED_REQUIRED_PARAMETERS,
+)
 from tools.current.manifest import REGISTERED_TOOL_NAMES
 
 MCP_URL = os.environ.get("OMBRE_DOCKER_INTEGRATION_URL", "").strip()
@@ -29,119 +33,11 @@ EXPECTED_TOOL_ORDER = REGISTERED_TOOL_NAMES
 EXPECTED_TOOLS = set(EXPECTED_TOOL_ORDER)
 
 EXPECTED_TOOL_PROPERTIES = {
-    "breath": set(),
-    "breath_search": {"query", "domain", "max_results", "date_from", "date_to"},
-    "breath_advanced": {
-        "query",
-        "max_tokens",
-        "domain",
-        "valence",
-        "arousal",
-        "max_results",
-        "importance_min",
-        "tags",
-        "catalog",
-        "date_from",
-        "date_to",
-    },
-    "hold": {
-        "content",
-        "title",
-        "tags",
-        "importance",
-        "pinned",
-        "feel",
-        "source_bucket",
-        "valence",
-        "arousal",
-        "why_remembered",
-        "meaning",
-        "media",
-        "test_data",
-        "domain",
-        "source_content",
-        "source_ranges",
-    },
-    "grow": {"content", "items", "test_data"},
-    "source_read": {
-        "bucket_id", "expected_title", "scope", "cursor", "max_tokens",
-        "source_slots", "all_sources",
-    },
-    "source_attach": {
-        "bucket_id", "expected_title", "source_content", "source_ranges",
-    },
-    "source_detach": {"bucket_id", "expected_title", "source_slot"},
-    "source_restore": {"bucket_id", "expected_title", "source_slot"},
-    "relation_read": {"bucket_id", "expected_title"},
-    "relation_attach": {
-        "bucket_id", "expected_title", "target_bucket_id", "relation_type",
-        "label",
-    },
-    "relation_detach": {"bucket_id", "expected_title", "relation_slot"},
-    "relation_restore": {"bucket_id", "expected_title", "relation_slot"},
-    "trace": {
-        "bucket_id",
-        "name",
-        "domain",
-        "valence",
-        "arousal",
-        "importance",
-        "tags",
-        "resolved",
-        "pinned",
-        "protected",
-        "digested",
-        "content",
-        "delete",
-        "status",
-        "weight",
-        "dont_surface",
-        "why_remembered",
-        "meaning_append",
-        "meaning_replace",
-        "media_append",
-        "media_replace",
-        "hard_delete",
-        "delete_reason",
-        "restore",
-        "old_str",
-        "new_str",
-        "deletion_request_id",
-        "deletion_decision",
-        "deletion_ai_reason",
-    },
-    "anchor": {"bucket_id"},
-    "release": {"bucket_id"},
-    "pulse": {"include_archive"},
-    "plan": {"content", "status", "related_bucket", "weight", "why_remembered"},
-    "letter_write": {
-        "author", "content", "user_name", "title", "date", "ai_name",
-        "lock_type", "unlock_date",
-    },
-    "letter_lock_update": {"letter_id", "lock_type", "unlock_date"},
-    "letter_read": {"query", "limit", "author", "date_from", "date_to"},
-    "I": {"content", "aspect", "read", "limit", "promote"},
-    "dream": {"window_hours"},
+    name: set(parameters) for name, parameters in EXPECTED_PARAMETERS.items()
 }
 EXPECTED_REQUIRED_PROPERTIES = {
-    "breath_search": {"query"},
-    "hold": {"content"},
-    "source_read": {"bucket_id", "expected_title"},
-    "source_attach": {"bucket_id", "expected_title", "source_content"},
-    "source_detach": {"bucket_id", "expected_title", "source_slot"},
-    "source_restore": {"bucket_id", "expected_title", "source_slot"},
-    "relation_read": {"bucket_id", "expected_title"},
-    "relation_attach": {
-        "bucket_id", "expected_title", "target_bucket_id", "relation_type",
-    },
-    "relation_detach": {"bucket_id", "expected_title", "relation_slot"},
-    "relation_restore": {"bucket_id", "expected_title", "relation_slot"},
-    "trace": {"bucket_id"},
-    "anchor": {"bucket_id"},
-    "release": {"bucket_id"},
-    "plan": {"content"},
-    "letter_write": {"author", "content"},
-    "letter_lock_update": {"letter_id", "lock_type"},
+    name: set(parameters)
+    for name, parameters in EXPECTED_REQUIRED_PARAMETERS.items()
 }
 
 

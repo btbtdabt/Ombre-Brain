@@ -552,7 +552,14 @@ def register(mcp) -> None:
 
     @mcp.custom_route("/api/bucket/{bucket_id}/archive", methods=["POST"])
     async def api_bucket_archive(request: Request) -> Response:
-        """Submit a human deletion request before archiving a formal bucket."""
+        """Submit the single human archive request for a formal bucket.
+
+        Human-facing archive intentionally uses the delete-to-archive terminal
+        action: after AI approval the Markdown is retained in ``archive/`` and
+        receives ``deleted_at``. The lower-level ``bucket_mgr.archive()`` path
+        remains available to AI/system lifecycle code and keeps its distinct
+        non-tombstone semantics.
+        """
         from starlette.responses import JSONResponse
         err = sh._require_auth(request)
         if err:
@@ -566,7 +573,7 @@ def register(mcp) -> None:
             result = await cast(
                 "DeletionRequestStore", sh.deletion_requests
             ).submit(
-                bucket_id, body.get("reason", ""), action="archive"
+                bucket_id, body.get("reason", ""), action="delete"
             )
             if result.get("ok"):
                 return JSONResponse(result)
@@ -682,7 +689,7 @@ def register(mcp) -> None:
             result = await cast(
                 "DeletionRequestStore", sh.deletion_requests
             ).submit_batch(
-                list(dict.fromkeys(ids)), body.get("reason", ""), action="archive"
+                list(dict.fromkeys(ids)), body.get("reason", ""), action="delete"
             )
             status = 400 if result.get("code") == "reason_required" else 200
             return JSONResponse({"action": action, **result}, status_code=status)

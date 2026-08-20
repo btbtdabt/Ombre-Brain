@@ -132,6 +132,7 @@ class PublicToolDesignContract:
                     "delete_bucket_comment",
                     "dream",
                     "entity_edge_backfill",
+                    "feel",
                     "grow",
                     "hold",
                     "i",

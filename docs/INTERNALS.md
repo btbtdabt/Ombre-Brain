@@ -107,7 +107,7 @@ Ombre-Brain/
 
 每个模块「干什么、边界在哪、依赖谁」：
 
-- **server.py**（约 1000 行）— MCP 服务入口。创建所有组件后调 `tools._runtime.init(...)` 注入依赖；39 个公开工具由 `tools.current.manifest` 统一注册到唯一公开实例；对外只暴露 **单连接器 `/mcp`**。
+- **server.py**（约 1000 行）— MCP 服务入口。创建所有组件后调 `tools._runtime.init(...)` 注入依赖；40 个公开工具由 `tools.current.manifest` 统一注册到主实例 `/mcp`；可选 `/mcp-extra` 从同一 manifest 镜像三个 Letter 工具，不维护重复实现。
 - **tools/**（MCP 工具应用层）— 详见下面「1.x tools/ 包结构」。
 - **web/**（HTTP/Dashboard 路由层）— 详见下面「1.y web/ 包结构」。从旧 server.py 巨石里拆出的 16 个域模块，每个导出 `register(mcp)`；cookie/CSRF/会话鉴权等共享依赖在 `web/_shared.py`（类比 `tools/_runtime.py`）。
 - **bucket_manager.py** — 桶 CRUD + 多维加权搜索 + `touch()` 激活刷新 + `_time_ripple()` 时间涟漪 + 文件搬运（archive/permanent 之间）。
@@ -238,7 +238,7 @@ hold / grow（Claude 决策）
 ```
 1. breath()                — 必须。浮现未解决记忆
 2. dream()                 — 可选。你或用户觉得需要消化时再调
-3. breath(domain="feel")   — 可选。想读 feel 时再调
+3. feel(query="当前主题")  — 可选。想读相关 feel 时再调
 4. 开始和用户说话
 ```
 
@@ -259,19 +259,20 @@ hold(feel=True, source_bucket="xxx", valence=0.45)
 feel 桶自身：
   - calculate_score() 固定返回 50.0，永不归档
   - 普通 breath 不浮现（被 type 过滤）
-  - 只通过 breath(domain="feel") 或 breath(tags="feel"/"__feel__") 读取
+  - 通过 feel(query) 读取；breath_advanced(domain="feel", query=...) 保留为兼容路径
   - 仍参与 dream 的结晶化检测（>0.7 相似度且 ≥3 条 → 提示升级为 pinned）
 ```
 
 ---
 
-## 3. MCP 工具规格（共 39 个）
+## 3. MCP 工具规格（主端点共 40 个）
 
-> **单连接器（iter 2.2）**：当前 39 个工具统一由连接器 `/mcp` 暴露，并由
-> `src/tools/current/manifest.py` 唯一注册。历史上（iter 2.1）曾拆成两个
-> FastMCP 实例；当前运行时不再直接在 `server.py` 维护第二份工具清单。
+> **统一 manifest、两个视图**：当前 40 个工具全部由主连接器 `/mcp` 暴露，并由
+> `src/tools/current/manifest.py` 唯一注册。可选 `/mcp-extra` 从同一 manifest
+> 镜像三个 Letter 工具；它不是第二份实现或第二份清单。普通客户端只需 `/mcp`，
+> 同时连接两个端点会重复发现 Letter 工具。
 > - 高频 8 个 —— `breath` / `breath_search` / `breath_advanced` / `hold` / `grow` / `source_read` / `trace` / `dream`
-> - P0 低频 15 个 —— `source_attach` / `source_detach` / `source_restore` /
+> - P0 低频 16 个 —— `feel` / `source_attach` / `source_detach` / `source_restore` /
 >   `relation_read` / `relation_attach` / `relation_detach` / `relation_restore` /
 >   `anchor` / `release` / `pulse` / `plan` / `letter_write` /
 >   `letter_lock_update` / `letter_read` / `I`
@@ -283,15 +284,16 @@ feel 桶自身：
 三个入口共用同一个内部实现 `tools/breath/dispatch()`，只是 MCP 层暴露的参数面不同（见 issue #17：claude.ai 按需加载工具时会跳过参数复杂的工具，单个 9 参数的 `breath` 会导致它常年加载不上，拆薄之后 `breath()` 能保证每次对话稳定自动加载）：
 
 - **`breath()`** — 0 参数。等价于 `dispatch()` 全默认，即下面的「浮现模式」。日常每次对话开头调用。
-- **`breath_search(query, domain="", max_results=0)`** — 3 参数。等价于 `dispatch(query=query, domain=domain, max_results=max_results)`，即下面的「检索模式」。按关键词/语义找记忆时用。
+- **`breath_search(query, domain="", max_results=20, quotes=False)`** — 4 参数。等价于 `dispatch(query=query, domain=domain, max_results=max_results, quotes=quotes)`，即下面的「检索模式」。按关键词/语义找记忆时用；只有 `quotes=True` 才附上直接命中桶中显式保存的引语。
 - **`breath_advanced(query="", max_tokens=0, domain="", valence=-1, arousal=-1, max_results=0, importance_min=-1, tags="", catalog=False)`** — 完整 9 参数，历史上单一 `breath` 工具的全部能力（`catalog` 目录模式 / `tags` 过滤 / `importance_min` 批量模式 / `valence`/`arousal` 情感检索 / `max_tokens` 预算）都保留在这里，供需要精细控制的场景用。
+- **`feel(query, max_tokens=10000)`** — 独立的相关感受检索入口。query 必填；向量可用时只返回相似度达标的 feel，异常时明确降级到关键词字面匹配。旧 `breath_advanced(domain="feel", query=...)` 路径继续调用同一实现。
 
 `dispatch()` 内部四种模式（按判定顺序，仅 `breath_advanced` 能触达全部四种；`breath()`/`breath_search()` 分别固定落在模式 3 / 模式 4）：
 
 1. **Feel 通道**（`domain="feel"` 或 `tags` 含 `"feel"`/`"__feel__"`，仅 `breath_advanced`）：直接拉所有 `type==feel` 桶，按 `created` 倒序展示原文，按 `surfacing.feel_max_tokens`（默认 6000）做 token 预算；**超出预算的旧 feel 折叠为 60 字符单行摘要**，并在末尾追加 `更早的 feel 摘要（N 条，已折叠）` 段。**不排除 anchor 桶**（设计：feel 通道只看 type=feel）。
 2. **重要度批量模式**（`importance_min >= 1`，仅 `breath_advanced`）：跳过语义搜索，按 importance 降序返回 ≤20 条；过滤 `feel/plan/letter` 与 `dont_surface=True`；**不过滤 anchor、不过滤 pinned**（设计：主动按 importance 检索时希望能找到所有重要桶）。
 3. **浮现模式**（无 `query`；`breath()` 固定走这里）：pinned/显式 permanent 桶展示为「核心准则」+ 未解决桶按衰减分排序，**冷启动**（`activation_count==0 && importance>=8`）的桶最多 2 个插到最前；后续排序**有两条互斥路径**：当 `surfacing.sampling.enabled=true` 时走加权无放回采样（`top_k` / `sample_k` / `temperature` 控制；详见 §7.1），否则走原 Top-1 固定 + Top-2~20 随机洗牌；按 `max_results` 硬截断。**排除 anchor 与 protected 桶**：anchor 是坐标系；protected 只防衰减，不进入核心准则、未解决、久未浮现或偶遇池。浮现**不调用** `touch()`。每条返回正文后附一行紧凑 `👣 Footprint`，只表达创建、补充、淡去、归档、恢复等有意义的变迁，不展示 touch/索引噪声。**末尾追加 `=== 久未浮现 ===` 段**：从久未激活的高重要度桶里随机抽 1～2 条，模拟「突然想起来」。
-4. **检索模式**（有 `query`；`breath_search()` 固定走这里）：每个 query 只生成一次查询向量，与 rapidfuzz/BM25 多维评分共同进入 `BucketManager.search()` → 过滤 `feel/plan/letter`，**pinned/permanent/protected 仍可被显式检索命中**：pinned/permanent 加 `📌 [核心准则]`，protected 加 `🛡️ [受保护记忆]` → 纯语义候选相似度 `>=0.65` 标 `[语义关联]`，且不能绕过 domain/tags/type 过滤 → 活跃桶命中时 `touch()`。查询也会检索 archive；归档命中返回保留的 Markdown 原文与 Footprint，明确邀请模型判断是否值得再次回忆，并显示 `trace(bucket_id="...", restore=True)`。查询只发现、不自动恢复，也不 touch 归档桶。结果不足时保留设计上的自由联想，但 protected 不进入这一非命中随机通道。embedding 不可用时明确提示后继续关键词/BM25；桶一旦命中，返回层直接使用当前存储的完整 `content`，不调用 dehydrate、不剥除 wikilink、不截断或改写。**不过滤 anchor**（设计：主动检索时希望能找到坐标系桶）。catalog 同样保留 protected 并使用相同的受保护标记。
+4. **检索模式**（有 `query`；`breath_search()` 固定走这里）：每个 query 只生成一次查询向量，与 rapidfuzz/BM25 多维评分共同进入 `BucketManager.search()` → 过滤 `feel/plan/letter`，**pinned/permanent/protected 仍可被显式检索命中**：pinned/permanent 加 `📌 [核心准则]`，protected 加 `🛡️ [受保护记忆]` → 纯语义候选达到 `config.matching.vector_recall_threshold`（默认 `0.55`）后标 `[语义关联]`，且不能绕过 domain/tags/type 过滤 → 活跃桶命中时 `touch()`。查询也会检索 archive；归档命中返回保留的 Markdown 原文与 Footprint，明确邀请模型判断是否值得再次回忆，并显示 `trace(bucket_id="...", restore=True)`。查询只发现、不自动恢复，也不 touch 归档桶。结果不足时保留设计上的自由联想，但 protected 不进入这一非命中随机通道。embedding 不可用时明确提示后继续关键词/BM25；桶一旦命中，返回层直接使用当前存储的完整 `content`，不调用 dehydrate、不剥除 wikilink、不截断或改写。只有显式 `quotes=True` 才会把该直接命中桶保存的引语附在正文后。**不过滤 anchor**（设计：主动检索时希望能找到坐标系桶）。catalog 同样保留 protected 并使用相同的受保护标记。
 
 (实现注意：`tags="feel"` 在第一个分支被映射为 `domain="feel"` 后清出 tag_filter；其它 tag 走 AND 过滤；`max_tokens` 显式上限 40000，默认仍为 10000；`max_results` 上限 50；`importance_min` 模式下硬上限 20 条不可调；浮现模式中钉选桶**不计入** `max_results` 上限。)
 
@@ -551,7 +553,8 @@ dream 侧配合（`tools/dream/hints.py` + `output.py`）：
 | `/api/env-vars` | GET | 🔒 | dashboard 设置页「⑤ 环境变量」只读区：当前进程读到的所有 `OMBRE_*`，敏感字段脱敏 |
 | `/api/env-config` | GET | 🔒 | 可写 6 字段的当前值（脱敏） |
 | `/api/env-config` | POST | 🔒 | 热更新 6 字段并写回 `.env`（重启仍有效） |
-| `/mcp/*` | — | 公开 | FastMCP 单连接器：`src/tools/current/manifest.py` 注册的全部 39 个工具；历史 `/mcp-extra` 已退役。 |
+| `/mcp/*` | — | 公开 | FastMCP 主连接器：`src/tools/current/manifest.py` 注册的全部 40 个工具。 |
+| `/mcp-extra/*` | — | 公开 | 可选 Letter 视图：从同一 manifest 镜像 `letter_write` / `letter_lock_update` / `letter_read`，沿用相同鉴权与请求限制。 |
 
 🔒 = 需要 cookie 认证，未认证返回 `JSON {error, setup_needed}` 状态码 401。
 
@@ -1672,7 +1675,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 |---|---|---|
 | Dashboard 401 | `web/_shared.py` + `web/auth.py` | 会话鉴权 helper；检查 cookie `ombre_session`；`OMBRE_DASHBOARD_PASSWORD` 是否正确 |
 | 改密码报「环境变量密码」错误 | `web/auth.py` | `auth_change_password` 检测 `OMBRE_DASHBOARD_PASSWORD` 设置时禁用 |
-| HTTP 模式下 Claude.ai 连不上 | `server.py` | `__main__` CORS 中间件；`_app = mcp.streamable_http_app()`（单连接器，39 个工具由 canonical manifest 注册）；URL 末尾必须 `/mcp` |
+| HTTP 模式下 Claude.ai 连不上 | `server.py` | `__main__` CORS 中间件；主 `_app = mcp.streamable_http_app()`（40 个工具由 canonical manifest 注册）；URL 末尾通常必须 `/mcp`。只有独立接 Letter 时才使用 `/mcp-extra` |
 | docker compose 重启后桶丢失 | — | 使用 `OMBRE_HOST_VAULT_DIR` 将宿主机目录 bind mount 到 `/app/buckets`；该目录同时持久化桶、配置和 Tunnel token |
 | Dashboard 改 host vault 不生效 | `web/import_api.py` | 容器无法修改启动前确定的宿主机挂载；Docker 内界面只读，必须编辑宿主机 compose 同目录 `.env` 后 `--force-recreate` |
 | keepalive 失败 | `server.py` | `_keepalive_loop`；检查 `OMBRE_PORT` 实际监听端口 |

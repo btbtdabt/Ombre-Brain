@@ -606,7 +606,9 @@ _LIGHT_FILTER_TOKEN_RE = re.compile(r"^[\w.:-]{1,128}$", re.UNICODE)
 
 # --- search 评分 ---
 _VECTOR_TOPK = 50          # embedding 预取 top_k（仅作 semantic 分源，不窄化候选集）
-_VECTOR_RECALL_THRESHOLD = 0.65  # 纯语义候选进入结果池的最低余弦相似度
+# Pure-semantic candidates need a lower gate than mixed lexical candidates.
+# P0luz 3.2.0 calibrated 0.55 against a real vault; deployments may override it.
+_VECTOR_RECALL_THRESHOLD = 0.55
 _RESOLVED_RANK_PENALTY = 0.3   # resolved 桶仅在排序时降权
 _LITERAL_MATCH_BONUS = 25.0    # 查询串原样命中 name/tags/domain/正文时的召回加分（修短查询召回）
 
@@ -664,6 +666,14 @@ class BucketManager:
         self.letter_dir = os.path.join(self.base_dir, "letters")
         self.tombstone_dir = os.path.join(self.base_dir, ".tombstones")
         self.fuzzy_threshold = config.get("matching", {}).get("fuzzy_threshold", 50)
+        try:
+            self.vector_recall_threshold = float(
+                config.get("matching", {}).get(
+                    "vector_recall_threshold", _VECTOR_RECALL_THRESHOLD
+                )
+            )
+        except (TypeError, ValueError):
+            self.vector_recall_threshold = _VECTOR_RECALL_THRESHOLD
         self.max_results = config.get("matching", {}).get("max_results", 5)
 
         # --- Search scoring weights / 检索权重配置 ---
@@ -1598,6 +1608,7 @@ class BucketManager:
         unlock_date: str | None = None,
         locked_by: str = "",
         writer_name: str = "",
+        quotes: Any = None,
     ) -> str:
         """
         Create a new memory bucket, return bucket ID.
@@ -1767,6 +1778,8 @@ class BucketManager:
 
             metadata["source_links"] = source_links_from_metadata({"source_refs": source_refs})
             metadata["source_refs"] = active_source_refs_from_links(metadata["source_links"])
+        if quotes:
+            metadata["quotes"] = self._sanitize_quotes(quotes)
         if imported:
             metadata["imported"] = True
         if test_data:
@@ -2529,6 +2542,54 @@ class BucketManager:
                 _atomic_write_text(file_path, frontmatter.dumps(post))
             return result
 
+    async def mutate_relation_pair(
+        self,
+        left_bucket_id: str,
+        right_bucket_id: str,
+        mutation: Any,
+    ) -> Any:
+        """Atomically mutate mirrored Relation ledgers under ordered locks."""
+        left_bucket_id = str(left_bucket_id or "").strip()
+        right_bucket_id = str(right_bucket_id or "").strip()
+        if not left_bucket_id or not right_bucket_id or left_bucket_id == right_bucket_id:
+            return None
+
+        first_id, second_id = sorted((left_bucket_id, right_bucket_id))
+        async with self._bucket_turn(first_id):
+            async with self._bucket_turn(second_id):
+                left_path = self._find_bucket_file(left_bucket_id)
+                right_path = self._find_bucket_file(right_bucket_id)
+                if not left_path or not right_path:
+                    return None
+                try:
+                    left_post = frontmatter.load(left_path)
+                    right_post = frontmatter.load(right_path)
+                except Exception:
+                    return None
+
+                left_before = frontmatter.dumps(left_post)
+                right_before = frontmatter.dumps(right_post)
+                left_changed, right_changed, result = mutation(left_post, right_post)
+                if not left_changed and not right_changed:
+                    return result
+
+                left_written = False
+                right_written = False
+                try:
+                    if left_changed:
+                        _atomic_write_text(left_path, frontmatter.dumps(left_post))
+                        left_written = True
+                    if right_changed:
+                        _atomic_write_text(right_path, frontmatter.dumps(right_post))
+                        right_written = True
+                except Exception:
+                    if left_written:
+                        _atomic_write_text(left_path, left_before)
+                    if right_written:
+                        _atomic_write_text(right_path, right_before)
+                    raise
+                return result
+
     async def _update_locked(
         self,
         bucket_id: str,
@@ -2602,6 +2663,8 @@ class BucketManager:
             kwargs["source_refs_append"] = normalize_source_refs(
                 kwargs["source_refs_append"]
             )
+        if "quotes_append" in kwargs:
+            kwargs["quotes_append"] = self._sanitize_quotes(kwargs["quotes_append"])
 
         try:
             post = frontmatter.load(file_path)
@@ -2739,6 +2802,18 @@ class BucketManager:
             links = append_source_links(post.metadata, kwargs["source_refs_append"])
             post["source_links"] = links
             post["source_refs"] = active_source_refs_from_links(links)
+        if "quotes_append" in kwargs and kwargs["quotes_append"]:
+            merged_quotes, dropped = self._merge_quotes(
+                post.metadata.get("quotes"), kwargs["quotes_append"]
+            )
+            if merged_quotes:
+                post["quotes"] = merged_quotes
+            if dropped:
+                _ob_push_warning(
+                    "OB-W006",
+                    f"合并到已有记忆后引语超过上限，另外 {dropped} 条未写入"
+                    f"（update:{bucket_id}）",
+                )
         if "resolved" in kwargs:
             post["resolved"] = kwargs["resolved"]
         if "pinned" in kwargs:
@@ -4156,7 +4231,7 @@ class BucketManager:
                 text_match = normalized >= self.fuzzy_threshold or literal_hit
                 semantic_match = (
                     semantic_score is not None
-                    and semantic_score >= _VECTOR_RECALL_THRESHOLD
+                    and semantic_score >= self.vector_recall_threshold
                 )
                 if text_match or semantic_match:
                     # Resolved buckets get ranking penalty (but still reachable by keyword)
@@ -5478,6 +5553,46 @@ class BucketManager:
             + list(range(0x2066, 0x206A))        # bidi isolates 0x2066..0x2069
         }
         return str(text).translate(_ctrl_table)
+
+    @staticmethod
+    def _sanitize_quotes(value: Any) -> list[dict[str, str]]:
+        """Validate quote structure, then apply the normal text sanitizer."""
+        from ombrebrain.storage.quote_store import normalize_quotes
+
+        cleaned: list[dict[str, str]] = []
+        for quote in normalize_quotes(value):
+            entry = {
+                key: BucketManager._sanitize_text(text).strip()
+                for key, text in quote.items()
+            }
+            if entry.get("text"):
+                cleaned.append({key: text for key, text in entry.items() if text})
+        return cleaned
+
+    @staticmethod
+    def _merge_quotes(
+        existing: Any,
+        incoming: Any,
+    ) -> tuple[list[dict[str, str]], int]:
+        """Merge quotes without turning the bounded channel into an archive."""
+        from ombrebrain.storage.quote_store import MAX_QUOTES, quotes_from_metadata
+
+        groups = (
+            quotes_from_metadata({"quotes": existing}),
+            BucketManager._sanitize_quotes(incoming),
+        )
+        merged: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for group in groups:
+            for quote in group:
+                key = (quote["text"], quote.get("speaker", ""))
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(quote)
+        if len(merged) <= MAX_QUOTES:
+            return merged, 0
+        return merged[:MAX_QUOTES], len(merged) - MAX_QUOTES
 
     @staticmethod
     def _sanitize_float_field(value, default: float) -> float:

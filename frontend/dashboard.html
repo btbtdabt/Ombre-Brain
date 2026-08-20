@@ -5504,7 +5504,6 @@ async function showDetail(id) {
         '<button data-bucket-id="' + escAttr(id) + '" onclick="bucketResolve(this.dataset.bucketId)" class="icon-btn">' + (meta.resolved ? '<i data-lucide="rotate-ccw"></i> 取消已解决' : '<i data-lucide="check"></i> 标记已解决') + '</button>' +
         '<button data-bucket-id="' + escAttr(id) + '" onclick="bucketForget(this.dataset.bucketId)" class="icon-btn">' + (meta.dont_surface ? '<i data-lucide="eye"></i> 重新允许浮现' : '<i data-lucide="eye-off"></i> 主动遗忘') + '</button>' +
         '<button data-bucket-id="' + escAttr(id) + '" onclick="bucketArchive(this.dataset.bucketId)" class="icon-btn"><i data-lucide="archive"></i> 归档</button>' +
-        '<button data-bucket-id="' + escAttr(id) + '" onclick="bucketDelete(this.dataset.bucketId)" class="icon-btn" style="color:#b85c3c;"><i data-lucide="trash-2"></i> 删除到档案</button>' +
       '</div>' +
       '<div class="detail-content">' + esc(displayContent) + '</div>' +
       renderEditForm(id, Object.assign({}, meta, {_content_for_edit: b.content}));
@@ -5629,10 +5628,10 @@ async function bucketResolve(id) {
 }
 
 async function bucketArchive(id) {
-  if (!confirm('确认归档此桶？归档后将从浮现/搜索中隐藏，但文件仍保留在 archive/ 目录。\n\nArchive this bucket? It will be hidden from surfacing/search, but the file stays in archive/.')) return;
+  if (!confirm('确认申请归档此桶？需填写理由并由 AI 审批；批准后它将从浮现/搜索中隐藏，文件仍保留在 archive/ 目录并标记为已删除。\n\nRequest archive? AI approval is required. The file remains in archive/ with a deletion marker.')) return;
   var reason = '';
   if (!isKnownErasableTestBucket(id)) {
-    reason = prompt('Why should this memory be archived? A reason is required.');
+    reason = prompt('为什么要归档这条记忆？必须填写理由，由 AI 审批。 / Why should this memory be archived? AI approval is required.');
     if (reason === null) return;
     if (!reason.trim()) { alert('Archive reason is required.'); return; }
   }
@@ -5643,22 +5642,6 @@ async function bucketArchive(id) {
     closeDetail();
     loadBuckets();
   } catch (e) { alert('归档失败: ' + e.message); }
-}
-
-async function bucketDelete(id) {
-  var reason = '';
-  if (!isKnownErasableTestBucket(id)) {
-    reason = prompt('为什么要删除这条记忆？必须填写理由。 / Why should this memory be deleted?');
-    if (reason === null) return;
-    if (!reason.trim()) { alert('必须填写删除理由。 / Deletion reason is required.'); return; }
-  }
-  try {
-    var res = await authFetch(BASE + '/api/bucket/' + encodeURIComponent(id) + '?confirm=true', { method: 'DELETE', headers: {'Content-Type':'application/json'}, body: JSON.stringify({reason: reason}) });
-    if (!res) return;
-    if (!res.ok) throw new Error(await res.text());
-    await showDetail(id);
-    loadBuckets();
-  } catch (e) { alert('删除失败: ' + e.message); }
 }
 
 async function withdrawBucketDeletion(id) {

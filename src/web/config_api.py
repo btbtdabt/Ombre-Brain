@@ -58,6 +58,8 @@ try:
         get_ai_name as _get_ai_name,
         get_owner_name as _get_owner_name,
         get_owner_count as _get_owner_count,
+        get_timezone_name as _get_timezone_name,
+        set_runtime_timezone_name as _set_runtime_timezone_name,
         positive_float as _positive_float,
         parse_bool as _parse_bool,
         atomic_update_config_yaml,
@@ -69,6 +71,8 @@ except ImportError:  # pragma: no cover
         get_ai_name as _get_ai_name,
         get_owner_name as _get_owner_name,
         get_owner_count as _get_owner_count,
+        get_timezone_name as _get_timezone_name,
+        set_runtime_timezone_name as _set_runtime_timezone_name,
         positive_float as _positive_float,
         parse_bool as _parse_bool,
         atomic_update_config_yaml,
@@ -338,6 +342,7 @@ _CONFIG_POST_ROOT_FIELDS = frozenset(
         "memory_diffusion",
         "surfacing",
         "merge_threshold",
+        "timezone",
         "mcp_require_auth",
         "mcp_auth_mode",
         "deployment",
@@ -2345,7 +2350,7 @@ def _runtime_config_paths(body: Mapping[str, Any]) -> tuple[_ConfigPath, ...]:
         )
     paths.extend(
         (key,)
-        for key in ("merge_threshold", "host_port")
+        for key in ("merge_threshold", "host_port", "timezone")
         if key in body
     )
     return tuple(dict.fromkeys(paths))
@@ -2418,6 +2423,7 @@ def _persisted_config_paths(body: Mapping[str, Any]) -> tuple[_ConfigPath, ...]:
             "mcp_require_auth",
             "mcp_auth_mode",
             "host_port",
+            "timezone",
         )
         if key in body
     )
@@ -2857,9 +2863,11 @@ def register(mcp) -> None:
             "surfacing": {
                 "breath_max_results": int(sh.config.get("surfacing", {}).get("breath_max_results") or 20),
                 "breath_max_tokens": int(sh.config.get("surfacing", {}).get("breath_max_tokens") or 10000),
-                "feel_max_tokens": int(sh.config.get("surfacing", {}).get("feel_max_tokens") or 6000),
+                "feel_max_tokens": int(sh.config.get("surfacing", {}).get("feel_max_tokens") or 15000),
             },
             "merge_threshold": sh.config.get("merge_threshold", 75),
+            # 只给日期不写时区时按它理解（Letter 定时锁等）。前端「设置」可改。
+            "timezone": _get_timezone_name(),
             "transport": desired["transport"],
             "transport_effective": runtime_transport,
             "buckets_dir": sh.config.get("buckets_dir", ""),
@@ -3006,6 +3014,36 @@ def register(mcp) -> None:
                 else None
             )
 
+            # --- Timezone ---
+            # 只给日期不写时区时按它理解。必须当场校验：写进去一个解析不了的
+            # 名字，之后每次解析日期都会静默回退 +08:00，用户以为自己设成功了。
+            timezone_value = None
+            if "timezone" in body:
+                raw_tz = str(body.get("timezone") or "").strip()
+                if raw_tz:
+                    if len(raw_tz) > 64:
+                        # 64 是随便定的。世界上最长的 IANA 时区名才 30 出头
+                        # （America/Argentina/ComodRivadavia，去查了，真的存在）。
+                        # 留一倍余量，剩下的当有人手滑。
+                        return JSONResponse(
+                            {"error": "timezone 名称过长"}, status_code=400
+                        )
+                    try:
+                        from zoneinfo import ZoneInfo
+
+                        ZoneInfo(raw_tz)
+                    except Exception:
+                        return JSONResponse(
+                            {
+                                "error": (
+                                    f"无法识别时区「{raw_tz}」。请使用 IANA 时区名，"
+                                    "例如 Asia/Shanghai、UTC、America/New_York。"
+                                )
+                            },
+                            status_code=400,
+                        )
+                timezone_value = raw_tz
+
             surfacing_values: dict[str, int] = {}
             surfacing_payload = body.get("surfacing") or {}
             for key, low, high in (
@@ -3119,6 +3157,7 @@ def register(mcp) -> None:
             "merge_threshold",
             "host_port",
             "surfacing",
+            "timezone",
         }
         if startup_setting_requested and hot_update_keys.intersection(body):
             return JSONResponse(
@@ -3291,6 +3330,11 @@ def register(mcp) -> None:
             sh.config["merge_threshold"] = merge_threshold_value
             updated.append("merge_threshold")
 
+        # --- Timezone ---
+        if timezone_value is not None:
+            sh.config["timezone"] = timezone_value
+            updated.append("timezone")
+
         # MCP 鉴权开关、鉴权模式与公网地址都是启动期快照。它们只写入
         # config.yaml，不能提前发布到 sh.config；否则 OAuth/MCP 中间件仍使用
         # 旧闭包，而诊断与其他路由却会误以为新值已经生效。GET /api/config 会从
@@ -3357,6 +3401,9 @@ def register(mcp) -> None:
 
                 if merge_threshold_value is not None:
                     save_config["merge_threshold"] = merge_threshold_value
+
+                if timezone_value is not None:
+                    save_config["timezone"] = timezone_value
 
                 if mcp_auth_value is not None:
                     security_candidate = dict(save_config)
@@ -3471,6 +3518,12 @@ def register(mcp) -> None:
             for env_name, secret_value in env_updates.items():
                 os.environ[env_name] = secret_value
             updated.append("persisted_to_env")
+
+        # The root timezone controls date-only Letter/Plan timestamps.  Publish
+        # it only after every fallible runtime/YAML/env commit has succeeded so
+        # a failed transaction cannot leave the parser on an uncommitted zone.
+        if timezone_value is not None:
+            _set_runtime_timezone_name(timezone_value)
 
         desired = _desired_startup_state(
             persisted_after if persisted_after is not None else sh.config

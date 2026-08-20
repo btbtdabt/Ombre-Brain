@@ -18,6 +18,7 @@ EXPECTED_CURRENT_TOOL_NAMES = {
     "breath",
     "breath_search",
     "breath_advanced",
+    "feel",
     "read_bucket",
     "list_buckets_light",
     "letter_write",
@@ -41,6 +42,7 @@ EXPECTED_P0_TOOL_NAMES = {
     "breath",
     "breath_search",
     "breath_advanced",
+    "feel",
     "hold",
     "grow",
     "source_read",
@@ -67,6 +69,7 @@ EXPECTED_P0_TOOL_NAMES = {
 DESCRIPTION_MARKERS = {
     "reminder_create": "创建独立照顾备忘",
     "breath": "只读检索记忆",
+    "feel": "按关键词检索旧感受",
     "read_bucket": "按 bucket_id 精确读取完整记忆桶",
     "hold": "写一条长期记忆",
     "darkroom_delete": "保留本地私密备份",

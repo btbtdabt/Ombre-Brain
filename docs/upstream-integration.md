@@ -100,6 +100,36 @@ fixed access token remains a resource-bound compatibility credential.
 
 ## Integration Batch Ledger
 
+### 2026-08-20 P0luz 3.2.0 quotes, bidirectional relations, automatic relations, and connector views
+
+This integration batch reviews `594d636..6f7335d` from P0luz. Yinglianchun
+`main` remains at the recorded `284c9c7` baseline, so there are no secondary
+upstream commits to port in this range. The recorded P0luz baseline remains
+`594d636` until the exact combined commit passes isolated staging.
+
+| Source commit(s) | Disposition | Evidence |
+| --- | --- | --- |
+| P0luz `c7a0883` | Merged from the author and adapted to the unified Dashboard | Human archive/delete-to-archive now has one approval entry and produces a tombstoned archive after approval. Low-level decay/system archive remains a distinct operation. Dashboard and web-path regressions cover both boundaries. |
+| P0luz `d3ceb7a` | Merged from the author | Identical `grow` requests share an in-flight/completed result for 30 minutes, preventing client timeout retries from writing duplicate buckets while allowing genuine failures to be retried. |
+| P0luz `666545f`, `480dfa1` | Superseded by combined-tree release generation | Upstream-only manifests are not retained verbatim. `deploy/gen_update_manifest.py` regenerates hashes from the final combined Git index after all integration changes. |
+| P0luz `691d5d9`, `f809ea1`, `58aa11a` | Merged by ancestry | These merge commits contain only the already classified Dashboard and grow changes. |
+| P0luz `0fbc287`, `d57f520` | Merged from the author and registered through the canonical manifest | New relations are ID-first and bidirectional, fixed relation types automatically mirror reverse semantics, custom labels support an explicit reverse label, detach/restore updates both mirrors under ordered locks, and legacy one-way ledgers remain readable and locally manageable. Tool schemas expose the seven-value enum and optional title guards. |
+| P0luz `14c55ee`, `7c88175` | Merged and superseded by the final 3.2.0 release metadata | The 2.17.10/2.17.11 relation history remains in the changelog; final version files advance to 3.2.0. |
+| P0luz `10d8722` | Selectively merged; destructive surface reduction superseded by the combined compatibility contract | The standalone keyword-scoped `feel` tool, timezone/config corrections, Plan read path, Docker/config fixes, and applicable regressions are retained. Removing Source/Relation actions and shrinking the main connector is intentionally excluded: this fork keeps its established Source, Relation, Gateway, and current/Ying clients through one 40-tool canonical manifest. Contract and server integration tests assert the retained surface. |
+| P0luz `d46e34c`, `033a894` | Merged from the author and adapted to current hold/grow wrappers | Explicit `quotes` can be stored only at write time, with the author's count/length validation and merge warning. Quotes remain outside embeddings and passive surfaces; `breath_search(quotes=True)` is their sole public read path. Static MCP contract snapshots cover the added parameters. |
+| P0luz `176deb7` | Merged and superseded by 3.2.0 release metadata | The 3.1.0 quote history remains in the changelog while version and final manifest advance to 3.2.0. |
+| P0luz `fc95865` | Merged from the author and adapted to shared connector registration | Provider-free automatic relation inference and relevance-ranked Dream feels are retained. `/mcp-extra` is restored with the author's auth/request-size boundaries, but it mirrors the three canonical Letter implementations instead of removing them from the backward-compatible main `/mcp` surface. |
+| P0luz `198b814` | Merged from the author | Pinned/permanent core memories and anchors remain visible through their intended surfaces even when historical data carries `digested`; ordinary digested memories remain passive-hidden. |
+| P0luz `c78d137` | Merged from the author through shared configuration | Pure semantic admission uses configurable `matching.vector_recall_threshold`, defaulting to `0.55`, without changing the seven-dimensional ranking weights or weakening domain/type filters. |
+| P0luz `6da3f05` | Merged from the author | The retrieval design-debt explanation remains in the 3.2.0 changelog alongside the configurable threshold. |
+| P0luz `4249ef8`, `09d075f` | Merged and adapted to the two-view connector contract | Docker/web tests exercise `/mcp-extra` as the Letter-only view while the independent canonical snapshot continues to assert all 40 tools on `/mcp`. Both views use the same handlers and schemas. |
+| P0luz `6f7335d` | Selectively merged into combined documentation and tests | The active `/mcp-extra` behavior is retained. Upstream wording that describes mutually exclusive 13-tool/3-tool connectors is superseded by the tested 40-tool main endpoint plus optional three-tool Letter mirror. |
+
+Pre-staging local verification for this batch is recorded below once the full
+suite, lint, changed-file type checks, update manifest, and container build
+complete. The P0luz baseline advances only after isolated staging verifies the
+exact integration commit and copied production data remains intact.
+
 ### 2026-08-15 P0luz 2.17.9 source/relation bindings and breath headroom
 
 This integration batch reviews `278668e..594d636` from P0luz. Yinglianchun

@@ -827,14 +827,12 @@ async def test_auth_middleware_ignores_forwarded_resource_from_untrusted_peer(
 
 
 @pytest.mark.asyncio
-async def test_auth_middleware_does_not_challenge_retired_mcp_extra_path():
+async def test_auth_middleware_challenges_active_mcp_extra_path():
     downstream = RecordingASGIApp()
     middleware = MCPAuthMiddleware(
         downstream,
         auth_required=True,
-        token_validator=lambda *_args, **_kwargs: pytest.fail(
-            "retired routes must reach the router without OAuth validation"
-        ),
+        token_validator=lambda *_args, **_kwargs: False,
     )
     messages = []
     scope = {
@@ -846,8 +844,12 @@ async def test_auth_middleware_does_not_challenge_retired_mcp_extra_path():
 
     await middleware(scope, _empty_receive, _collect_into(messages))
 
-    assert downstream.scopes == [scope]
-    assert messages[0]["status"] == 204
+    assert downstream.scopes == []
+    assert messages[0]["status"] == 401
+    payload = json.loads(messages[1]["body"])
+    assert payload["resource_metadata"] == (
+        "https://ombre.example/.well-known/oauth-protected-resource/mcp"
+    )
 
 
 @pytest.mark.asyncio

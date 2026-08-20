@@ -290,6 +290,7 @@ async def grow_items(items: list, source_content: str = "", test_data: bool = Fa
                 why_remembered=why_remembered,
                 merge_why_remembered=why_remembered,
                 source_refs=source_refs,
+                quotes=item.get("quotes") or None,
                 source_tool="grow",
                 grow_batch_id=batch_id,
                 raw_merge=True,  # 逐字追加，合并不压缩

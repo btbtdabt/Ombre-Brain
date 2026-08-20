@@ -214,7 +214,7 @@ async def test_catalog_still_returns_metadata_without_body(bucket_mgr):
 
 
 @pytest.mark.asyncio
-async def test_breath_marks_hidden_source_evidence_without_inlining_it(
+async def test_breath_exposes_only_bounded_source_availability_hint(
     bucket_mgr, monkeypatch
 ):
     source_ref = "src_" + "a" * 64
@@ -259,7 +259,7 @@ def test_source_available_hint_supports_source_links_only_metadata():
 
 
 @pytest.mark.asyncio
-async def test_catalog_marks_source_availability_without_returning_body(bucket_mgr):
+async def test_catalog_never_exposes_source_evidence(bucket_mgr):
     source_ref = "src_" + "b" * 64
     body = "目录里绝不能出现的原文或记忆正文。"
     await bucket_mgr.create(
@@ -275,7 +275,8 @@ async def test_catalog_marks_source_availability_without_returning_body(bucket_m
     output = await dispatch(catalog=True)
 
     assert "京都旅行 | 旅行 | 9" in output
-    assert "[source_available:true | source_title:京都旅行 | use:source_read]" in output
+    # 原文回顾能力已删除：目录不再提示原文存在，也绝不泄漏 ref
+    assert "source_available" not in output
     assert body not in output
     assert source_ref not in output
 

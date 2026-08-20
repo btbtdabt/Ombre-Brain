@@ -9,7 +9,8 @@ tools/breath/search.py — 有 query 的检索模式
 关键行为：
 - domain/valence/arousal 作为过滤参数传给 bucket_mgr.search
 - embedding 未配置/未启用/调用失败时明确提示并继续关键词/BM25 检索
-- 向量通道阈值 sim>=0.65；domain/tags/type 过滤与关键词通道完全一致
+- 向量通道阈值由 matching.vector_recall_threshold 控制（默认 0.55）；
+  domain/tags/type 过滤与关键词通道完全一致
 - 命中正文不经过 LLM 摘要、改写或压缩，直接返回当前存储的 content
 - 命中后调 touch()，但不修改本次返回的正文或元数据
 - 检索结果不足时，从低权重旧桶里随机漂出 3-5 条「忽然想起来」
@@ -34,12 +35,13 @@ from datetime import datetime, time
 from typing import Any, cast
 
 from ombrebrain.policy.surfacing import SurfacePolicyVM
+from ombrebrain.storage.quote_store import quotes_from_metadata, render_quotes
 from semantic_search import semantic_score_map
 from .. import _runtime as rt
 from ..plan.core import is_letter_bucket
 from ._filters import bucket_has_tags
 from ._verbatim import render_stored_bucket
-from utils import parse_bool, parse_iso_datetime
+from utils import count_tokens_approx, parse_bool, parse_iso_datetime
 
 _SURFACE_POLICY = SurfacePolicyVM.default()
 
@@ -222,6 +224,7 @@ async def surface_search(
     tag_filter: list,
     date_from: str = "",
     date_to: str = "",
+    with_quotes: bool = False,
 ) -> str:
     domain_filter = [d.strip() for d in domain.split(",") if d.strip()] or None
     q_valence = valence if 0 <= valence <= 1 else None
@@ -307,6 +310,11 @@ async def surface_search(
                 f"[bucket_id:{exact_bucket['id']}]",
                 _footprint(exact_bucket),
             )
+            if with_quotes:
+                quote_block = render_quotes(quotes_from_metadata(meta))
+                if quote_block:
+                    rendered = f"{rendered}\n{quote_block}"
+                    entry_tokens = count_tokens_approx(rendered)
             if entry_tokens > max_tokens:
                 return _BUDGET_NOTICE
             asyncio.create_task(
@@ -406,6 +414,11 @@ async def surface_search(
             rendered, entry_tokens = render_stored_bucket(
                 bucket, header, _footprint(bucket)
             )
+        if with_quotes:
+            quote_block = render_quotes(quotes_from_metadata(meta))
+            if quote_block:
+                rendered = f"{rendered}\n{quote_block}"
+                entry_tokens = count_tokens_approx(rendered)
         if token_used + entry_tokens > max_tokens:
             budget_blocked = True
             break
@@ -475,7 +488,7 @@ async def surface_search(
             await rt.fire_webhook("breath", {"mode": "empty", "matches": 0})
         empty_text = (
             f"没有匹配到「{query}」相关的记忆。\n"
-            "可以换个关键词试试，或用 breath() 看当下权重池；feel 用 breath_advanced(domain=\"feel\")，信件用 letter_read。"
+            "可以换个关键词试试，或用 breath() 看当下权重池；旧感受用 feel(query=...)，信件用 letter_read。"
         )
         return f"{semantic_notice}\n{empty_text}" if semantic_notice else empty_text
 

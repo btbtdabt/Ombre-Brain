@@ -77,6 +77,68 @@ def _pin_budget_notice(*, required: int, limit: int, omitted: int) -> str:
     return notice + "已达到当前版本 40000 token 安全上限；请精简或取消部分核心准则后重试。"
 
 
+async def surface_plans(max_tokens: int) -> str:
+    """Return active plans verbatim within the requested token budget."""
+    try:
+        all_buckets = await rt.bucket_mgr.list_all(include_archive=False)
+        plans = [
+            bucket
+            for bucket in all_buckets
+            if bucket.get("metadata", {}).get("type") == "plan"
+            and not is_letter_bucket(bucket)
+            and bucket.get("metadata", {}).get("status", "active") == "active"
+        ]
+        plans.sort(
+            key=lambda bucket: bucket.get("metadata", {}).get("created", ""),
+            reverse=True,
+        )
+        if not plans:
+            return "没有计划。"
+
+        try:
+            footprint_snapshot = rt.bucket_mgr.footprint_snapshot()
+        except Exception as exc:
+            rt.logger.warning(f"Footprint snapshot unavailable / 足迹读取失败: {exc}")
+            footprint_snapshot = None
+
+        def footprint(bucket: dict) -> str:
+            if footprint_snapshot is None:
+                return "👣 Footprint：暂时无法读取"
+            return footprint_snapshot.summary(
+                str(bucket.get("id") or ""),
+                bucket.get("metadata", {}),
+            )
+
+        lines: list[str] = []
+        used = 0
+        omitted = 0
+        for index, bucket in enumerate(plans):
+            created = bucket["metadata"].get("created", "")
+            entry, cost = render_stored_bucket(
+                bucket,
+                f"[{created}] [bucket_id:{bucket['id']}]",
+                footprint(bucket),
+            )
+            if used + cost <= max_tokens:
+                lines.append(entry)
+                used += cost
+            else:
+                omitted = len(plans) - index
+                break
+        output = (
+            "=== 你的 active plans（新→旧）===\n"
+            "完成了用 trace(bucket_id, status=\"resolved\")，"
+            "放弃了用 trace(bucket_id, status=\"abandoned\")。\n\n"
+            + "\n---\n".join(lines)
+        )
+        if omitted:
+            output += f"\n\n另有 {omitted} 条 plan 因 token 预算不足未返回；正文未截断或摘要。"
+        return output
+    except Exception as exc:
+        rt.logger.error(f"Plan retrieval failed: {exc}")
+        return "读取 plan 失败。"
+
+
 async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -> str:
     try:
         all_buckets = await rt.bucket_mgr.list_all(include_archive=False)

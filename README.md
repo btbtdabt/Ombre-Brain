@@ -6,7 +6,7 @@
 
 A long-term emotional memory system for Claude (and any MCP client). Tags memories using Russell's valence/arousal coordinates, stores them as Obsidian-compatible Markdown, connects via MCP, with forgetting curve and vector semantic search.
 
-> **v2.4.0 noncommercial notice**: v2.4.0 architecture work is intended as source-available public code for personal, learning, research, and noncommercial self-hosting use. Commercial hosting, resale, renamed resale, SaaS resale, or selling modified v2.4.0 builds requires project-owner permission. See [LICENSE.v2.4.0-NONCOMMERCIAL-NOTICE.md](LICENSE.v2.4.0-NONCOMMERCIAL-NOTICE.md).
+> **License notice**: upstream Ombre Brain code remains under its original [MIT license](LICENSE). Additional material in this fork is covered by the terms described in [NOTICE.md](NOTICE.md).
 
 > **开发者文档**：架构 / API / 配置细节请见 [docs/INTERNALS.md](docs/INTERNALS.md)。本 README 只关心『怎么把它跑起来用上』。
 >
@@ -56,29 +56,30 @@ Ombre Brain 的使用者是**模型自己**，不是它背后的人。所以这�
 
 ---
 
-## 它的 39 个工具 / The 39 Tools
+## 它的 40 个工具 / The 40 Tools
 
-39 个工具全部在**一个 MCP 连接器 `/mcp`** 上。P0luz 的 23 个核心工具与 current/Yinglianchun 的 16 个额外能力由 `src/tools/current/manifest.py` 统一注册。
+40 个工具全部在主 MCP 连接器 **`/mcp`** 上。P0luz 的 24 个核心工具与 current/Yinglianchun 的 16 个额外能力由 `src/tools/current/manifest.py` 统一注册。可选端点 `/mcp-extra` 复用同一份 manifest，仅镜像三个 Letter 工具，供希望把信件行为单独接入的客户端使用。
 
 ### P0 高频 8 个
 
 | 工具 | 一句话 |
 |---|---|
 | `breath` | 睁眼。**0 参数**，让权重最高、未解决且未标记 digested 的事浮现 + 置顶核心准则；每条正文后附一行简洁 Footprint。digested 只从默认/被动浮现隐藏，仍可按 query 找回。**每次对话第一件事**。故意做成 0 参数：claude.ai 按需加载工具时会跳过参数复杂的工具，塞太多参数会导致它常年加载不上。 |
-| `breath_search` | 按关键词 / 语义找记忆：`query`（必填）/ `domain` / `max_results`。融合关键词/BM25 + 语义检索，向量不可用时自动退回关键词检索。可命中已归档记忆，但只提示足迹与明确恢复调用，不会自动恢复。 |
+| `breath_search` | 按关键词 / 语义找记忆：`query`（必填）/ `domain` / `max_results` / `quotes`。融合关键词/BM25 + 语义检索，向量不可用时自动退回关键词检索。`quotes=True` 才会附上命中桶中明确保存的关键原话。可命中已归档记忆，但只提示足迹与明确恢复调用，不会自动恢复。 |
 | `breath_advanced` | `breath` 的完整参数版：`catalog=True` 目录模式（每桶一行元数据，0 LLM，最省 token；anchor 带 `⚓ [anchor]`）、`tags`、`importance_min`、`valence`/`arousal`、`max_tokens` 等精细控制，日常用不到时用前两个就够。 |
-| `hold` | 记下当下一件事（一句话级）。`title` 可显式指定最终标题并优先于模型建议；打标失败时仍会原样落盘，绝不压缩正文。 |
-| `grow` | 整理一段长内容（日记 / 总结），自动拆成 2~6 条独立桶，并在首次新建时保存逐条生成的 `why_remembered`。结构化 `items` 可逐字写入最终正文、标题和元数据；同时传 `content` 时，它作为共享原文证据保存。 |
+| `hold` | 记下当下一件事（一句话级）。`title` 可显式指定最终标题并优先于模型建议；打标失败时仍会原样落盘，绝不压缩正文。可用 `quotes` 保存写入当下明确值得逐字保留的最多三句关键原话。 |
+| `grow` | 整理一段长内容（日记 / 总结），自动拆成 2~6 条独立桶，并在首次新建时保存逐条生成的 `why_remembered`。结构化 `items` 可逐字写入最终正文、标题和元数据，也可逐项携带 `quotes`；同时传 `content` 时，它作为共享原文证据保存。 |
 | `source_read` | 凭精确桶 ID + 精确标题读取该桶的隐藏原文证据；默认只读该事件声明的非空行范围，不搜索、不联想，过长则显式分页。 |
 | `trace` | 唯一的元数据写入口：resolved / pinned / 改情感坐标 / 替换正文 / 删除到档案 / 改 plan 状态。长正文可用 `old_str/new_str` 做唯一片段的原子局部替换；只传要改的字段。 |
 | `dream` | 做梦消化最近窗口（默认 48h）有变动的记忆。**不是义务**，需要消化时再调。 |
 
-### P0 低频 15 个
+### P0 低频 16 个
 
 | 工具 | 一句话 |
 |---|---|
 | `source_attach` / `source_detach` / `source_restore` | 给已存在的精确桶后补一份新的不可变原文证据、临时断开某个稳定 slot、或恢复原 slot；不会改正文、生命周期或活跃度。多 Source 默认先用 `source_read` 看精简 slot 清单，再按需读原文。 |
-| `relation_attach` / `relation_read` / `relation_detach` / `relation_restore` | 仅普通记忆桶之间的一跳有向关系。ledger 只保存 target ID；读取只给稳定 slot 的极简清单，detach/restore 可逆且不影响检索、排序或活跃度。 |
+| `relation_attach` / `relation_read` / `relation_detach` / `relation_restore` | 仅普通记忆桶之间的一跳关系。新关系按 bucket ID 定位并在两端写入共享 `relation_id` 的镜像；固定六型自动生成反向语义，custom 可显式给反向 label。读取返回稳定 slot 的极简 ledger，detach/restore 同步两端且不影响检索、排序或活跃度；旧单向关系继续兼容读取和原位管理。 |
+| `feel` | 按必填关键词检索旧感受，只逐字返回相关 feel；语义索引不可用时明确降级到关键词匹配。 |
 | `pulse` | 自检：桶数量、占用、衰减引擎状态、全部桶摘要；anchor 带 `⚓ [anchor]`。「为什么搜不到 X」时第一个调它。 |
 | `plan` | 登记一个承诺 / 待办。不衰减、不浮现，只在 `dream` 末尾出现；后续写新事件会自动判断它是否已闭环。 |
 | `anchor` / `release` | 把**已存在的**桶设 / 解为「坐标系」。anchor 是带 `⚓ [anchor]` 显示标记的冷参考：不主动浮现但可被显式检索命中，硬上限 24。必须先 `hold` 再 `anchor`。 |
@@ -243,9 +244,9 @@ curl http://localhost:18001/health
 }
 ```
 
-重启 Claude Desktop，工具列表里会出现 canonical manifest 中的全部 39 个工具。完整分组和使用时机见 [docs/CLAUDE_PROMPT.md](docs/CLAUDE_PROMPT.md)。
+重启 Claude Desktop，工具列表里会出现 canonical manifest 中的全部 40 个工具。完整分组和使用时机见 [docs/CLAUDE_PROMPT.md](docs/CLAUDE_PROMPT.md)。
 
-> 39 个工具全在同一连接器 `/mcp` 暴露，只配这一个即可。
+> 主连接器 `/mcp` 已暴露全部 40 个工具，只配这一个即可。`/mcp-extra` 只是三个 Letter 工具的可选镜像；不要同时添加两个端点，除非客户端确实需要独立的信件连接器。
 
 ---
 
@@ -322,13 +323,14 @@ Claude.ai                    Ombre Brain 服务器
 
 #### 步骤 3：连接端点
 
-39 个工具全在**一个 MCP 端点 `/mcp`** 上：
+主端点 `/mcp` 包含全部 40 个工具；可选 `/mcp-extra` 只镜像三个 Letter 工具：
 
 | 端点 | 工具 | 说明 |
 |---|---|---|
-| `/mcp` | `src/tools/current/manifest.py` 中的 P0 核心与 current/Ying 扩展并集 | 全部 39 个工具 |
+| `/mcp` | `src/tools/current/manifest.py` 中的 P0 核心与 current/Ying 扩展并集 | 全部 40 个工具 |
+| `/mcp-extra` | `letter_write`、`letter_lock_update`、`letter_read` | 可选 Letter 专用镜像；与 `/mcp` 使用同一实现、鉴权和请求边界 |
 
-> 旧版曾使用第二连接器 `/mcp-extra`，该端点现已退役并返回 `404`；不要再单独添加。全部 39 个工具都在 `/mcp`。
+> 普通客户端只添加 `/mcp`。同时添加两个端点会让三个 Letter 工具在客户端中重复出现。
 
 在 Claude.ai / 你的客户端里添加这一个连接器即可使用全部工具：
 
@@ -865,7 +867,7 @@ docker compose -f deploy/docker-compose.yml up -d
 
 新用户最常踩、但文档里分散各处的点，集中提醒一下：
 
-- **只需加一个连接器 `/mcp`**：39 个工具全在这一个端点上，不用再单独加别的。
+- **通常只需加一个连接器 `/mcp`**：40 个工具全在这一个端点上。`/mcp-extra` 只适合明确需要独立 Letter 连接器的客户端。
 - **反代/隧道要整主机名转发**：Cloudflare Tunnel / Nginx 按域名整体转发到 `localhost:端口`，覆盖所有路径即可。
 - **OpenAI 兼容向量化两个坑**：base_url 末尾要带 `/v1`（漏了 404）、model 要带完整前缀（如 `BAAI/bge-m3`，漏了报 Model does not exist）。填完用向量化区的「测试」按钮确认。
 - **改完 key / 配置点「保存」后再「测试」**：压缩和向量化各有独立的「测试」按钮，能用就用，别凭感觉。
@@ -883,7 +885,7 @@ docker compose -f deploy/docker-compose.yml up -d
 
 ## License
 
-MIT
+Original upstream code remains under [MIT](LICENSE). See [NOTICE.md](NOTICE.md) for the terms covering additional material in this fork.
 
 ---
 
