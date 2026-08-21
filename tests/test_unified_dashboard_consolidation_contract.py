@@ -74,6 +74,17 @@ def test_about_exposes_p0luz_faq_and_usage_guidance() -> None:
     assert "supportUrl" in about
 
 
+def test_legacy_tab_switcher_only_references_existing_views() -> None:
+    html = _read(DASHBOARD)
+    start = html.index("function activateDashboardTab(tab) {")
+    end = html.index("\ndocument.querySelectorAll('.tab')", start)
+    switcher = html[start:end]
+
+    referenced_ids = re.findall(r"getElementById\('([^']+-view)'\)", switcher)
+    assert referenced_ids
+    assert all(f'id="{view_id}"' in html for view_id in referenced_ids)
+
+
 def test_all_registered_panels_receive_the_final_p0_surface_contract() -> None:
     html = _read(DASHBOARD)
     shell = _read(SHELL)

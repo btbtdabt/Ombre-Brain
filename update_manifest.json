@@ -102,8 +102,8 @@
     },
     {
       "path": "frontend/dashboard.html",
-      "sha256": "b29edd61755be1eb694dc2233c52006d417d27f8ac15f0bce10e072579d5674f",
-      "size": 554015
+      "sha256": "943d08d1592c2437c47cd11da023f82a1fb0186c5390c96366184ff68034362d",
+      "size": 553927
     },
     {
       "path": "frontend/favicon.svg",
