@@ -105,20 +105,20 @@ fixed access token remains a resource-bound compatibility credential.
 Both upstream tips were unchanged during this audit: P0luz remains at
 `6f7335d` and Yinglianchun remains at `284c9c7`. Comparing every decorated
 author tool against the canonical 40-tool manifest found no missing public tool
-name and no reason to register a second implementation. Three author behaviors
+name and no reason to register a second implementation. Two author behaviors
 were absent from the combined wrappers and are now retained at their shared
-module boundary.
+module boundary; one transport-specific behavior is explicitly superseded.
 
 | Source behavior | Disposition | Evidence |
 | --- | --- | --- |
 | P0luz `breath_search` / `breath_advanced` created-time `date_from` / `date_to` filters | Ported through the existing current breath wrappers into the author's P0 dispatch path | Public-schema snapshots, alias forwarding tests, and a two-day retrieval regression prove an inclusive same-day range without changing current event-date `date` semantics. |
 | P0luz `grow(..., test_data=True)` erasable provenance | Ported through short, digest, and pre-split item paths | The union regression creates a grow bucket, verifies erasable provenance, and removes it through the author-defined `trace(hard_delete=True)` boundary. |
-| Yinglianchun automatic grow client-source inference | Ported as hidden FastMCP `Context` handling | A client name containing `ob-auto-grow` is inferred as `source="operit"` for the existing write gate, while `Context` remains absent from the public tool schema and tool logs. The existing timestamp-content inference remains intact. |
+| Yinglianchun automatic grow client-source inference | Superseded by the stateless transport contract | The author's hidden `Context.clientInfo` path requires FastMCP's stateful session; the canonical endpoint deliberately uses stateless HTTP for clients that do not preserve `mcp-session-id`. Automatic clients can pass the existing public `source="operit"`, and legacy timestamp-shaped Operit content remains auto-detected. A live stateless staging probe confirmed that retaining the hidden parameter would be dead code, so the production transport is not weakened for it. |
 | All other unique and overlapping tool contracts | Already merged or intentionally distinct | The canonical manifest still exposes 40 unique tools. Same-name overlaps use one handler; P0 Source/Relation/Plan/I/Dream and Ying exact-read/comment/Darkroom/Reminder/Profile capabilities retain their separate product semantics. |
 
 Local verification for this parity batch:
 
-- Full pytest suite: **3297 passed / 123 skipped / 0 failed** with three known
+- Full pytest suite: **3296 passed / 123 skipped / 0 failed** with three known
   fixture warnings.
 - Whole-tree Ruff: **clean**; all changed Python files: **0 Pyright errors /
   0 warnings**.

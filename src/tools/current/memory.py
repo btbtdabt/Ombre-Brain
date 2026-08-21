@@ -7,8 +7,6 @@ import re
 import uuid
 from typing import Any
 
-from mcp.server.fastmcp import Context
-
 from entity_edges import extract_entity_edges_from_bucket
 from ombrebrain.storage.quote_store import normalize_quotes
 from profile_facts import profile_key
@@ -1034,21 +1032,6 @@ async def _grow_once(
     )
 
 
-def _grow_source_from_context(context: Context | None) -> str:
-    """Infer Yinglianchun's automatic grow source from hidden MCP client info."""
-
-    if context is None:
-        return ""
-    try:
-        client_info = context.request_context.session.client_params.clientInfo
-    except (AttributeError, RuntimeError):
-        return ""
-    name = str(getattr(client_info, "name", "") or "").strip().lower()
-    if "ob-auto-grow" in name or "operit" in name:
-        return "operit"
-    return ""
-
-
 async def grow(
     content: str = "",
     items: list | None = None,
@@ -1056,12 +1039,9 @@ async def grow(
     source: str = "",
     title: str = "",
     test_data: bool = False,
-    context: Context | None = None,
 ) -> str:
     """只有多个已筛选长期记忆点才用 grow；单条事实/承诺/偏好优先 hold，旧记忆补感受优先 comment_bucket。items 是已拆好的最终记忆正文；每项可带 title/content/tags/importance/domain/valence/arousal/why_remembered/source_ranges/quotes。quotes 只用于调用方在写入当下明确选中的关键原话。content 可作为整批共享原文证据，source_ranges 用 1-based 闭区间关联证据。test_data=True 只用于创建可安全清除的测试记忆。相同请求在 30 分钟内幂等执行一次。普通正文需要结构化时按需使用 ### moment、### original、### reflection，reflection 使用第一人称。"""
     normalized_source = str(source or "").strip()
-    if items is None and not normalized_source:
-        normalized_source = _grow_source_from_context(context)
     test_data = bool_value(test_data, False)
     fingerprint = request_fingerprint(
         content=str(content or ""),

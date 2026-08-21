@@ -33,7 +33,8 @@ EXPECTED_TOOL_ORDER = REGISTERED_TOOL_NAMES
 EXPECTED_TOOLS = set(EXPECTED_TOOL_ORDER)
 
 EXPECTED_TOOL_PROPERTIES = {
-    name: set(parameters) for name, parameters in EXPECTED_PARAMETERS.items()
+    name: set(() if name == "breath" else parameters)
+    for name, parameters in EXPECTED_PARAMETERS.items()
 }
 EXPECTED_REQUIRED_PROPERTIES = {
     name: set(parameters)

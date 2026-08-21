@@ -88,10 +88,7 @@ def test_manifest_matches_current_production_contract():
 
     for spec in current.TOOL_MANIFEST:
         assert inspect.iscoroutinefunction(spec.handler)
-        expected_handler_parameters = EXPECTED_PARAMETERS[spec.name]
-        if spec.name == "grow":
-            expected_handler_parameters += ("context",)
-        assert tuple(inspect.signature(spec.handler).parameters) == expected_handler_parameters
+        assert tuple(inspect.signature(spec.handler).parameters) == EXPECTED_PARAMETERS[spec.name]
         assert spec.description == inspect.getdoc(spec.handler)
         assert spec.description
 

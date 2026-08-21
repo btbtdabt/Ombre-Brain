@@ -318,13 +318,13 @@ feel 桶自身：
 
 ### 3.3 `grow` — 日记拆分归档
 
-公开签名：`grow(content="", items=None, auto=False, source="", title="", test_data=False)`。FastMCP 另外注入隐藏的 `Context`，它不出现在客户端 tool schema 中。
+公开签名：`grow(content="", items=None, auto=False, source="", title="", test_data=False)`。
 
 - 短内容（< 30 字符）走快速路径：`analyze(include_why=True)` + `_merge_or_create()`，跳过 `digest()` 节省一次 API。有效的候选 `why_remembered` 在首次新建时直接保存；后续合并仍只补旧空值。普通 `hold` 和 `items` 补元数据继续调用默认 `analyze()`，不会无故要求模型生成理由。
 - 正常路径：`dehydrator.digest()` 拆为 2~6 条 → 每条独立走 `_merge_or_create()`，单条失败 try/except 隔离，标 `⚠️条目名`。
 - `items=[...]` 模式表示调用方已经拆好最终正文。对象条目可显式给出 `title/content/tags/importance/domain/valence/arousal/why_remembered/source_ranges`，显式字段优先于自动打标。`why_remembered` 必须是不超过 500 字符的字符串，首次新建可直接保存。若同时传 `content`，它会作为整批共享的不可变原文证据保存一次；每个桶以 1-based 闭区间 `source_ranges` 指向自己的片段。
 - `test_data=True` 沿用 P0luz 的 erasable provenance，并作用于短内容、自动拆分和预拆 `items` 三条路径；这是 `trace(hard_delete=True)` 的测试数据边界。
-- 未显式传 `source` 时，Yinglianchun 的自动 grow 客户端识别仍生效：隐藏 MCP client name 含 `ob-auto-grow` / `operit`，或正文带 Operit 时间戳头时，写入门会收到 `source="operit"`。显式 `source` 始终优先。
+- 自动 grow 客户端应显式传 `source="operit"`；历史 Operit 时间戳正文仍会自动识别。Yinglianchun 通过隐藏 FastMCP `Context.clientInfo` 推断来源的路径依赖 stateful session，而当前主端点为兼容无 session-header 客户端采用 stateless HTTP，因此不把该失效路径接入生产。
 - `content` 自动模式会为每条产生候选 `why_remembered`：长内容由 digest 逐条生成，短内容由仅该路径开启的 `analyze(include_why=True)` 生成。两者首次新建都会保存合法非空理由；后续 `grow` 命中同一具体事件并合并时，仅在旧桶该字段为空时原子补入。旧值永不被 grow 自动覆盖，空值或非法模型输出也不会阻断正文入库或清除旧值。
 - 末尾异步触发 `_check_plan_resolution()`。
 

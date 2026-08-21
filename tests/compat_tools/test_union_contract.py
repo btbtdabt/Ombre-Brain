@@ -2,11 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
-from typing import cast
 
 import pytest
-from mcp.server.fastmcp import Context
 
 from tools import current
 
@@ -91,42 +88,6 @@ async def test_grow_retains_p0_erasable_test_data_contract(current_runtime) -> N
         delete_reason="union grow test cleanup",
     )
     assert deleted == f"已永久删除测试桶: {bucket['id']}"
-
-
-@pytest.mark.asyncio
-async def test_grow_infers_ying_auto_source_from_hidden_client_context(
-    current_runtime,
-    monkeypatch,
-) -> None:
-    from tools.current import memory
-
-    seen: dict[str, object] = {}
-
-    class Gate:
-        def should_gate(self, *, auto: bool, source: str) -> bool:
-            seen.update(auto=auto, source=source)
-            return False
-
-        async def evaluate(self, *_args, **_kwargs):
-            raise AssertionError("disabled gate must not evaluate")
-
-    monkeypatch.setattr(memory.rt, "memory_write_gate", Gate())
-    context = SimpleNamespace(
-        request_context=SimpleNamespace(
-            session=SimpleNamespace(
-                client_params=SimpleNamespace(
-                    clientInfo=SimpleNamespace(name="ob-auto-grow-relay")
-                )
-            )
-        )
-    )
-
-    await current.grow(
-        content="A context-derived automatic grow source is retained.",
-        context=cast(Context, context),
-    )
-
-    assert seen == {"auto": False, "source": "operit"}
 
 
 @pytest.mark.asyncio
