@@ -1526,8 +1526,20 @@ def register(mcp) -> None:
                 "buckets": {
                     "permanent": stats.get("permanent_count", 0),
                     "dynamic": stats.get("dynamic_count", 0),
+                    "feel": stats.get("feel_count", 0),
+                    "plan": stats.get("plan_count", 0),
+                    "letter": stats.get("letter_count", 0),
                     "archive": stats.get("archive_count", 0),
-                    "total": stats.get("permanent_count", 0) + stats.get("dynamic_count", 0),
+                    "total": sum(
+                        stats.get(key, 0)
+                        for key in (
+                            "permanent_count",
+                            "dynamic_count",
+                            "feel_count",
+                            "plan_count",
+                            "letter_count",
+                        )
+                    ),
                 },
                 "using_env_password": bool(os.environ.get("OMBRE_DASHBOARD_PASSWORD", "")),
                 "version": sh.version,

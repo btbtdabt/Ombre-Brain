@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+from pathlib import Path
 
 import pytest
 
@@ -14,6 +15,9 @@ from tools.current.manifest import (
 )
 from web import _shared as web_runtime
 from web.current_contract import CURRENT_ROUTE_KEYS
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.asyncio
@@ -50,6 +54,14 @@ async def test_server_exposes_the_exact_current_and_p0_tool_union() -> None:
     assert "quotes" in (
         next(tool for tool in tools if tool.name == "grow").description or ""
     )
+
+
+def test_dashboard_mcp_setup_matches_the_canonical_tool_count() -> None:
+    dashboard = (ROOT / "frontend" / "dashboard.html").read_text(encoding="utf-8")
+    expected_label = f"{len(REGISTERED_TOOL_NAMES)} 个工具"
+
+    assert dashboard.count(expected_label) >= 2
+    assert "15 个工具" not in dashboard
 
 
 def test_server_registers_tools_only_from_the_canonical_manifest() -> None:

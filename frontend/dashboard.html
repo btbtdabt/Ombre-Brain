@@ -3045,7 +3045,7 @@ window.OmbreDashboardPathEnv = window.OmbreDashboardCore.createPathEnv({ locatio
     <div class="config-section" id="sec-mcp" data-sgroup="advanced">
       <h3>MCP 配置 <span class="sec-en">MCP Setup</span></h3>
       <div style="font-size:12px;color:var(--text-dim);margin-bottom:16px;line-height:1.7;">
-        生成 Claude Desktop / claude.ai 的 MCP 连接配置。15 个工具全在一个端点 /mcp 上，只需连这一条。
+        生成 Claude Desktop / claude.ai 的 MCP 连接配置。40 个工具全在一个端点 /mcp 上，只需连这一条。
       </div>
       <div style="margin-bottom:16px;padding:12px 14px;border:1px solid var(--border);border-radius:11px;background:var(--surface-solid);font-size:12px;line-height:1.7;">
         不确定 OAuth、端口和持久目录怎么选？
@@ -3091,7 +3091,7 @@ window.OmbreDashboardPathEnv = window.OmbreDashboardCore.createPathEnv({ locatio
             <button onclick="copyMcpUrl('main')" title="复制 / Copy" style="padding:3px 8px;font-size:11px;white-space:nowrap;background:none;border:1px solid var(--border);border-radius:3px;cursor:pointer;color:var(--text-dim);"><i data-lucide="copy"></i></button>
           </div>
         </div>
-        <div style="margin-top:6px;font-size:11px;color:var(--text-light);">15 个工具已合并到单一连接器 /mcp，只需连这一条。</div>
+        <div style="margin-top:6px;font-size:11px;color:var(--text-light);">40 个工具已合并到单一连接器 /mcp，只需连这一条。</div>
         <div id="mcp-copy-msg" style="margin-top:4px;font-size:11px;color:var(--positive);min-height:16px;"></div>
       </div>
 
@@ -4093,7 +4093,8 @@ async function loadSettingsStatus() {
     else noticeEl.style.display = 'none';
     el.innerHTML = `
       <b>版本</b>：${esc(d.version)}<br>
-      <b>Bucket 总数</b>：${Number(d.buckets?.total ?? 0)} （永久:${Number(d.buckets?.permanent ?? 0)} / 动态:${Number(d.buckets?.dynamic ?? 0)} / 归档:${Number(d.buckets?.archive ?? 0)}）<br>
+      <b>活跃 Bucket 总数</b>：${Number(d.buckets?.total ?? 0)} （永久:${Number(d.buckets?.permanent ?? 0)} / 动态:${Number(d.buckets?.dynamic ?? 0)} / Feel:${Number(d.buckets?.feel ?? 0)} / 计划:${Number(d.buckets?.plan ?? 0)} / 信:${Number(d.buckets?.letter ?? 0)}）<br>
+      <b>归档</b>：${Number(d.buckets?.archive ?? 0)}<br>
       <b>衰减引擎</b>：${esc(d.decay_engine)}<br>
       <b>向量搜索</b>：${d.embedding_enabled ? '已启用' : '未启用'}<br>
     `;

@@ -102,8 +102,8 @@
     },
     {
       "path": "frontend/dashboard.html",
-      "sha256": "057cb31419d0ce8c6ab3e1f97d4828a334099f1089bf1eb48554e965ab77acd0",
-      "size": 554136
+      "sha256": "6b3de5711681f0ec552fe879d8ad6d626df66904f058ae1810b7cf815b04be4b",
+      "size": 554279
     },
     {
       "path": "frontend/favicon.svg",
@@ -1477,8 +1477,8 @@
     },
     {
       "path": "src/web/meta.py",
-      "sha256": "ff42b458c4d278aa095db87566ae747647837d74049af3594aefc522b71a3585",
-      "size": 65825
+      "sha256": "b336b55f32ba198b08f1071d39ace4ceee52190d8e2bf786997a31ae0fb04f92",
+      "size": 66285
     },
     {
       "path": "src/web/oauth.py",
