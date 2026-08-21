@@ -15,7 +15,7 @@ import web.current_operations as current_operations
 from web.current_compat import CurrentWebDependencies, CurrentWebServices, register_current_routes
 from web.current_contract import refresh_bucket_indexes
 from web.current_operations import _refresh_restore_indexes
-from web.current_profile import _profile_update_direct
+from web.current_profile import _profile_facts_direct, _profile_update_direct
 
 from .conftest import RecordingMCP, request_for, response_json
 
@@ -872,6 +872,60 @@ async def test_profile_deprecate_refreshes_derived_indexes():
 
     assert response.status_code == 200
     assert calls == ["profile-1"]
+
+
+@pytest.mark.asyncio
+async def test_profile_facts_hide_deleted_tombstones_but_keep_deprecated_facts():
+    class Manager:
+        async def list_all(self, *, include_archive):
+            assert include_archive is True
+            return [
+                {
+                    "id": "profile-active",
+                    "content": "### fact\nActive fact",
+                    "metadata": {"tags": ["profile_fact"], "active": True},
+                },
+                {
+                    "id": "profile-deprecated",
+                    "content": "### fact\nDeprecated fact",
+                    "metadata": {
+                        "tags": ["profile_fact"],
+                        "active": False,
+                        "deprecated": True,
+                        "type": "archived",
+                    },
+                },
+                {
+                    "id": "profile-deleted",
+                    "content": "### fact\nDeleted fact",
+                    "metadata": {
+                        "tags": ["profile_fact"],
+                        "deleted_at": "2026-07-18T02:05:49+00:00",
+                        "tombstone": True,
+                    },
+                },
+                {
+                    "id": "profile-legacy-tombstone",
+                    "content": "### fact\nLegacy deleted fact",
+                    "metadata": {
+                        "tags": ["profile_fact"],
+                        "tombstone": "true",
+                    },
+                },
+            ]
+
+        async def get(self, _bucket_id):
+            return None
+
+    payload = await _profile_facts_direct(
+        CurrentWebDependencies(config={}, bucket_mgr=Manager())
+    )
+
+    assert payload["count"] == 2
+    assert {fact["id"] for fact in payload["facts"]} == {
+        "profile-active",
+        "profile-deprecated",
+    }
 
 
 @pytest.mark.asyncio

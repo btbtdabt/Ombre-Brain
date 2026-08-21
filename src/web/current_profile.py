@@ -9,7 +9,7 @@ from starlette.responses import JSONResponse, Response
 
 from memory_metadata import domain_options
 from self_anchor import is_self_anchor_bucket
-from utils import strip_wikilinks
+from utils import parse_bool, strip_wikilinks
 from word_map import reflection_identity_terms
 
 from .current_contract import (
@@ -147,6 +147,10 @@ async def _profile_facts_direct(
         await _profile_payload(dependencies, bucket)
         for bucket in buckets
         if _profile_fact_bucket(bucket)
+        and not bucket.get("metadata", {}).get("deleted_at")
+        and not parse_bool(
+            bucket.get("metadata", {}).get("tombstone"), default=False
+        )
     ]
     facts.sort(
         key=lambda item: (
