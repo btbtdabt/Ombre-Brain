@@ -112,6 +112,51 @@ def test_empty_bucket_view_resets_page_and_selection_state():
     assert "syncBucketSelectionUi();" in empty_branch
 
 
+@pytest.mark.skipif(NODE is None, reason="Node.js is unavailable")
+def test_bucket_renderer_normalizes_numeric_fields_before_rendering():
+    source = _dashboard_section("function _paintBuckets()", "function _localBucketMatches(")
+    script = r"""
+var _curBuckets = [{
+  id:'bucket-1', name:'Memory', type:'dynamic', domain:['shared'],
+  score:'4.25', valence:'0.75', model_valence:'0.4', content_preview:'preview',
+}];
+var bucketPage = 1;
+var BUCKETS_PER_PAGE = 10;
+var bucketSort = 'score';
+var selectedBucketIds = new Set();
+var listEl = {innerHTML:''};
+var document = {getElementById(id) { return id === 'bucket-list' ? listEl : null; }};
+var window = {lucide:null};
+function renderForgottenGroup() {}
+function syncBucketSelectionUi() {}
+function _normalizeBucketPage(page) { return page; }
+function _currentBucketPageItems() { return _curBuckets; }
+function _bucketPagerHtml() { return ''; }
+function feelFace() { return 'face'; }
+function firstValidBucketTime() { return null; }
+function formatCompactBucketTime() { return 'never'; }
+function formatTimeAgo() { return 'never'; }
+function formatExactBucketTime() { return 'never'; }
+function daysSince() { return 0; }
+function esc(value) { return String(value == null ? '' : value); }
+function escAttr(value) { return esc(value); }
+""" + source + r"""
+_paintBuckets();
+process.stdout.write(listEl.innerHTML);
+"""
+    completed = subprocess.run(
+        _node_eval_args(script),
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+    assert '<span class="score">4.25</span>' in completed.stdout
+    assert 'left:75%' in completed.stdout
+    assert '→ V0.4' in completed.stdout
+
+
 def test_select_all_control_is_scoped_to_the_current_page():
     html = DASHBOARD.read_text(encoding="utf-8")
     source = _dashboard_section(

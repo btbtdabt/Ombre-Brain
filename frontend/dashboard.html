@@ -5280,8 +5280,12 @@ function _paintBuckets() {
     else                     iconHtml = '<i data-lucide="message-circle"></i>';
     var firstBadge = b.first_of_kind ? ' <i data-lucide="sparkles" title="首次出现" style="width:12px;height:12px;color:var(--accent);vertical-align:-1px;"></i>' : '';
     var importedBadge = b.imported ? ' <span title="由对话导入" style="font-size:10px;color:var(--accent);border:1px solid var(--accent);border-radius:999px;padding:1px 5px;white-space:nowrap;">被导入</span>' : '';
-    var vPos = Math.round(b.valence * 100);
-    var modelV = b.model_valence != null ? ' → V' + b.model_valence.toFixed(1) : '';
+    var valence = Number(b.valence);
+    valence = Number.isFinite(valence) ? valence : 0.5;
+    var vPos = Math.max(0, Math.min(100, Math.round(valence * 100)));
+    var modelValence = Number(b.model_valence);
+    var modelV = Number.isFinite(modelValence) ? ' → V' + modelValence.toFixed(1) : '';
+    var bucketScore = Number(b.score);
     var activityTime = firstValidBucketTime(
       b.last_active_epoch_ms, b.last_active, b.created_epoch_ms, b.created
     );
