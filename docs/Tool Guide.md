@@ -2,13 +2,15 @@
 
 这份文档用于把 Ombre-Brain 接给 Operit、RikkaHub、ChatGPT MCP、Claude Connector 或其它聊天平台时，直接粘贴到平台指令里。
 
-## 当前 MCP 工具（23 个）
+## 当前 MCP 工具（40 个）
 
-- 读取与盘点：`breath`、`breath_search`、`breath_advanced`、`read_bucket`、`list_buckets_light`、`pulse`、`introspection`
+- 启动、检索与盘点：`breath`、`breath_search`、`breath_advanced`、`feel`、`read_bucket`、`source_read`、`relation_read`、`list_buckets_light`、`pulse`
+- 原文与关系绑定：`source_attach`、`source_detach`、`source_restore`、`relation_attach`、`relation_detach`、`relation_restore`
 - 写入与维护记忆：`hold`、`grow`、`comment_bucket`、`delete_bucket_comment`、`trace`、`profile_fact`
-- 独立信件：`letter_write`、`letter_read`
-- 照顾备忘：`reminder_create`、`reminder_list`、`reminder_update`
-- 暗房：`darkroom_enter`、`darkroom_rooms`、`darkroom_delete`、`darkroom_view`
+- 自省、消化与坐标：`introspection`、`dream`、`anchor`、`release`、`I`
+- 独立信件：`letter_write`、`letter_lock_update`、`letter_read`
+- 照顾备忘：`plan`、`reminder_create`、`reminder_list`、`reminder_update`
+- 暗房：`darkroom_enter`、`darkroom_rooms`、`darkroom_delete`、`darkroom_view`、`darkroom_status`、`darkroom_release`
 - 索引维护：`entity_edge_backfill`（维护工具，默认 `dry_run=true`；普通聊天不要调用）
 
 ## Copy Block
@@ -17,21 +19,21 @@
 已接入 Ombre-Brain MCP。主动读记忆，谨慎写记忆。
 
 读取：
-- 新窗口/醒来/换窗：breath(mode="handoff")。
-- 新窗口第一轮，即使用户直接问“昨天/昨晚/前天/记不记得昨天/昨天做了什么/昨天聊了什么”：先 breath(mode="handoff") 恢复身份和生活背景；细节不够时再 breath(query="日期 + 主题")。
-- 还记得/之前/某个暗号/项目/偏好/边界：breath(query="关键词或原句")。
+- 新窗口/醒来/换窗：breath_advanced(mode="handoff")。
+- 新窗口第一轮，即使用户直接问“昨天/昨晚/前天/记不记得昨天/昨天做了什么/昨天聊了什么”：先 breath_advanced(mode="handoff") 恢复身份和生活背景；细节不够时再 breath_search(query="日期 + 主题")。
+- 还记得/之前/某个暗号/项目/偏好/边界：breath_search(query="关键词或原句")。
 - 客户端按需加载工具时，日常主题检索可用较小参数面的 breath_search(query="关键词")；需要日期、情绪或联想选项时用 breath_advanced。
-- 如果想查明确日期的具体普通记忆：breath(date="YYYY-MM-DD") 或 breath(query="YYYY-MM-DD + 主题")。支持 2026-06-15、2026.06.15、2026年6月15日、25年6月15日、6月15日；没有年份的“6月15日”默认按今年查。
+- 如果想查明确事件日期的具体普通记忆：breath_advanced(date="YYYY-MM-DD") 或 breath_search(query="YYYY-MM-DD + 主题")。支持 2026-06-15、2026.06.15、2026年6月15日、25年6月15日、6月15日；没有年份的“6月15日”默认按今年查。按桶的创建时间范围筛选则用 breath_search(query="主题", date_from="YYYY-MM-DD", date_to="YYYY-MM-DD")。
 - 日期查询优先看 bucket 的事件日期 date；没有 date 的旧桶才回退看 created/updated_at/last_active。带了 date 的桶不会因为创建日期误入别的日期。
-- 日印象不会混进普通日期查询；想读日印象必须显式 breath(domain="daily_impression")，也可以加 date，例如 breath(domain="daily_impression", date="2026-06-15")。
-- 刚刚/刚才/上一句/刚说的暗号：优先看消息中的Just Now Chat Context，不要默认 breath(query="刚刚...")。
+- 日印象不会混进普通日期查询；想读日印象必须显式 breath_advanced(domain="daily_impression")，也可以加 date，例如 breath_advanced(domain="daily_impression", date="2026-06-15")。
+- 刚刚/刚才/上一句/刚说的暗号：优先看消息中的 Just Now Chat Context，不要默认 breath_search(query="刚刚...")。
 - 如果上下文里出现 `[bucket_id:...]`，而本轮需要更多细节：用 read_bucket(bucket_id)。不要猜新 id。
 - 如果只出现 `[moment_id:...]`，优先使用同一段上下文里已有的 bucket_id；没有 bucket_id 时不要硬猜。
 - `[memory_detail ids="..."]` 只给 Gateway 内部二次取细节用，不是普通 MCP 工具。
-- 旧独立感受：breath(domain="feel")。domain="feel" 不包含日印象；domain="whisper" 只读悄悄话。某条旧记忆的新年轮要 read_bucket(bucket_id)。
-- 自我锚点总入口：breath(domain="self_anchor")；domain="自我" / domain="self_identity" 兼容。
-- 查自我锚点分段：breath(domain="self_anchor", query="关键词")。
-- 管理/调试所有自我桶完整内容：breath(query="tag:self_anchor") 或 breath(query="tag:自我")。
+- 旧独立感受：feel(query="主题")；兼容读取可用 breath_advanced(domain="feel", query="主题")。domain="whisper" 只读悄悄话。某条旧记忆的新年轮要 read_bucket(bucket_id)。
+- 自我锚点总入口：breath_advanced(domain="self_anchor")；domain="自我" / domain="self_identity" 兼容。
+- 查自我锚点分段：breath_advanced(domain="self_anchor", query="关键词")。
+- 管理/调试所有自我桶完整内容：breath_search(query="tag:self_anchor") 或 breath_search(query="tag:自我")。
 - 指定 bucket_id 或准备改旧记忆：先 read_bucket(bucket_id)。
 - 只需要同步桶目录或建立外部索引，不需要正文：用 list_buckets_light(include_archive=..., limit=..., offset=...)。
 - 用户想盘点系统状态和记忆桶摘要：用 pulse(include_archive=...)；需要某一桶正文时再 read_bucket。
@@ -75,11 +77,11 @@
 不要：
 - 不要把临时测试、运维流水、整段聊天、工具 debug 默认写入长期记忆。
 - 不要把 profile_fact 当普通记忆写入。
-- 不要把新窗口信号写成 breath(query="新窗口")。
+- 不要把新窗口信号写成 breath_search(query="新窗口")。
 - 不要把“刚刚/刚才”当长期记忆查询。
 - 不要把 `[memory_detail ...]` 当 MCP 工具调用。
 - 不要调用文档外猜出来的工具名；续写暗房前用 darkroom_rooms 找房间，写入仍用 darkroom_enter(new_room=false)。
-- 不要用裸 breath(query="self_anchor") 读自我；它会被拦住，避免普通搜索误触。
+- 不要用裸 breath_search(query="self_anchor") 读自我；它会被拦住，避免普通搜索误触。
 - self_anchor 独立于普通 anchor / pinned / profile_fact；只有 handoff 或显式 self_anchor 读取会带出，Gateway 普通自动注入不会带它。
 
 ```

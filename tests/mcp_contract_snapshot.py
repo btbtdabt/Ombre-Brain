@@ -15,15 +15,19 @@ EXPECTED_PARAMETERS = {
         "content", "daily_limit", "max_injections",
     ),
     "breath": (
-        "query", "max_tokens", "domain", "date", "valence", "arousal",
+        "query", "max_tokens", "domain", "date", "date_from", "date_to",
+        "valence", "arousal",
         "max_results", "importance_min", "tags", "catalog",
         "include_related", "related_per_memory", "edge_min_confidence",
         "include_core", "core_limit", "is_session_start", "debug", "surface",
         "direct_render_mode", "retrieval_mode", "mode", "session_id", "quotes",
     ),
-    "breath_search": ("query", "domain", "max_results", "quotes"),
+    "breath_search": (
+        "query", "domain", "max_results", "date_from", "date_to", "quotes",
+    ),
     "breath_advanced": (
-        "query", "max_tokens", "domain", "date", "valence", "arousal",
+        "query", "max_tokens", "domain", "date", "date_from", "date_to",
+        "valence", "arousal",
         "max_results", "importance_min", "tags", "catalog",
         "include_related", "related_per_memory", "edge_min_confidence",
         "include_core", "core_limit", "is_session_start", "debug", "surface",
@@ -55,7 +59,7 @@ EXPECTED_PARAMETERS = {
     "darkroom_view": ("entry_id",),
     "darkroom_status": (),
     "darkroom_release": ("entry_id", "reason"),
-    "grow": ("content", "items", "auto", "source", "title"),
+    "grow": ("content", "items", "auto", "source", "title", "test_data"),
     "source_read": (
         "bucket_id", "expected_title", "scope", "cursor", "max_tokens",
         "source_slots", "all_sources",

@@ -284,8 +284,8 @@ feel 桶自身：
 三个入口共用同一个内部实现 `tools/breath/dispatch()`，只是 MCP 层暴露的参数面不同（见 issue #17：claude.ai 按需加载工具时会跳过参数复杂的工具，单个 9 参数的 `breath` 会导致它常年加载不上，拆薄之后 `breath()` 能保证每次对话稳定自动加载）：
 
 - **`breath()`** — 0 参数。等价于 `dispatch()` 全默认，即下面的「浮现模式」。日常每次对话开头调用。
-- **`breath_search(query, domain="", max_results=20, quotes=False)`** — 4 参数。等价于 `dispatch(query=query, domain=domain, max_results=max_results, quotes=quotes)`，即下面的「检索模式」。按关键词/语义找记忆时用；只有 `quotes=True` 才附上直接命中桶中显式保存的引语。
-- **`breath_advanced(query="", max_tokens=0, domain="", valence=-1, arousal=-1, max_results=0, importance_min=-1, tags="", catalog=False)`** — 完整 9 参数，历史上单一 `breath` 工具的全部能力（`catalog` 目录模式 / `tags` 过滤 / `importance_min` 批量模式 / `valence`/`arousal` 情感检索 / `max_tokens` 预算）都保留在这里，供需要精细控制的场景用。
+- **`breath_search(query, domain="", max_results=20, date_from="", date_to="", quotes=False)`** — 小参数检索入口。按关键词/语义找记忆时用；`date_from` / `date_to` 复用 P0luz 的创建时间范围过滤，同日上下界包含全天。只有 `quotes=True` 才附上直接命中桶中显式保存的引语。
+- **`breath_advanced(query="", max_tokens=10000, domain="", date="", date_from="", date_to="", ...)`** — 完整参数入口。current 的事件日期 `date`、P0luz 的创建时间范围、`catalog` 目录模式、`tags`、`importance_min`、`valence`/`arousal`、关联图和 handoff 等能力都保留在这里，供需要精细控制的场景用。
 - **`feel(query, max_tokens=10000)`** — 独立的相关感受检索入口。query 必填；向量可用时只返回相似度达标的 feel，异常时明确降级到关键词字面匹配。旧 `breath_advanced(domain="feel", query=...)` 路径继续调用同一实现。
 
 `dispatch()` 内部四种模式（按判定顺序，仅 `breath_advanced` 能触达全部四种；`breath()`/`breath_search()` 分别固定落在模式 3 / 模式 4）：
@@ -318,11 +318,13 @@ feel 桶自身：
 
 ### 3.3 `grow` — 日记拆分归档
 
-签名：`grow(content="", items=None, test_data=False)`
+公开签名：`grow(content="", items=None, auto=False, source="", title="", test_data=False)`。FastMCP 另外注入隐藏的 `Context`，它不出现在客户端 tool schema 中。
 
 - 短内容（< 30 字符）走快速路径：`analyze(include_why=True)` + `_merge_or_create()`，跳过 `digest()` 节省一次 API。有效的候选 `why_remembered` 在首次新建时直接保存；后续合并仍只补旧空值。普通 `hold` 和 `items` 补元数据继续调用默认 `analyze()`，不会无故要求模型生成理由。
 - 正常路径：`dehydrator.digest()` 拆为 2~6 条 → 每条独立走 `_merge_or_create()`，单条失败 try/except 隔离，标 `⚠️条目名`。
 - `items=[...]` 模式表示调用方已经拆好最终正文。对象条目可显式给出 `title/content/tags/importance/domain/valence/arousal/why_remembered/source_ranges`，显式字段优先于自动打标。`why_remembered` 必须是不超过 500 字符的字符串，首次新建可直接保存。若同时传 `content`，它会作为整批共享的不可变原文证据保存一次；每个桶以 1-based 闭区间 `source_ranges` 指向自己的片段。
+- `test_data=True` 沿用 P0luz 的 erasable provenance，并作用于短内容、自动拆分和预拆 `items` 三条路径；这是 `trace(hard_delete=True)` 的测试数据边界。
+- 未显式传 `source` 时，Yinglianchun 的自动 grow 客户端识别仍生效：隐藏 MCP client name 含 `ob-auto-grow` / `operit`，或正文带 Operit 时间戳头时，写入门会收到 `source="operit"`。显式 `source` 始终优先。
 - `content` 自动模式会为每条产生候选 `why_remembered`：长内容由 digest 逐条生成，短内容由仅该路径开启的 `analyze(include_why=True)` 生成。两者首次新建都会保存合法非空理由；后续 `grow` 命中同一具体事件并合并时，仅在旧桶该字段为空时原子补入。旧值永不被 grow 自动覆盖，空值或非法模型输出也不会阻断正文入库或清除旧值。
 - 末尾异步触发 `_check_plan_resolution()`。
 

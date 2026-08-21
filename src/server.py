@@ -644,6 +644,8 @@ def _current_tool_log_args(
         return {"positional_count": len(positional), "keyword_count": len(keyword)}
     safe: dict[str, Any] = {}
     for name, value in bound.arguments.items():
+        if name == "context":
+            continue
         if name in _SENSITIVE_TOOL_ARGUMENTS:
             suffix = "count" if isinstance(value, (list, tuple, set, dict)) else "len"
             try:

@@ -19,6 +19,8 @@ async def test_breath_search_forwards_its_public_arguments(monkeypatch):
         query="project boundary",
         domain="work",
         max_results=7,
+        date_from="2026-07-01",
+        date_to="2026-07-31",
         quotes=True,
     )
 
@@ -27,6 +29,8 @@ async def test_breath_search_forwards_its_public_arguments(monkeypatch):
         "query": "project boundary",
         "domain": "work",
         "max_results": 7,
+        "date_from": "2026-07-01",
+        "date_to": "2026-07-31",
         "quotes": True,
     }
 
@@ -48,6 +52,8 @@ async def test_breath_advanced_forwards_all_supported_arguments(monkeypatch):
         max_tokens=4321,
         domain="relationship",
         date="2026-07-16",
+        date_from="",
+        date_to="",
         valence=0.4,
         arousal=0.7,
         max_results=9,
@@ -61,6 +67,8 @@ async def test_breath_advanced_forwards_all_supported_arguments(monkeypatch):
         "max_tokens": 4321,
         "domain": "relationship",
         "date": "2026-07-16",
+        "date_from": "",
+        "date_to": "",
         "valence": 0.4,
         "arousal": 0.7,
         "max_results": 9,
@@ -93,6 +101,8 @@ async def test_breath_search_mcp_schema_is_small():
         "query",
         "domain",
         "max_results",
+        "date_from",
+        "date_to",
         "quotes",
     }
     assert listed.inputSchema["required"] == ["query"]

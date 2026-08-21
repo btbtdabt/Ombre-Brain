@@ -119,9 +119,11 @@ CURRENT_TOOL_NAMES = (
     "introspection",
 )
 
-# P0 exposes these 23 names on its FastMCP surface. The current handler is
-# canonical for every overlap; non-overlapping names use focused adapters or
-# compatibility handlers in this package.
+# Retained P0-compatible surface across the integrated upstream history. The
+# latest P0 release splits a smaller main/extra view, while this fork keeps the
+# established Source, Relation, Letter, and Dream contracts in one canonical
+# main manifest. Overlaps use current handlers; distinct names use focused
+# adapters or compatibility handlers in this package.
 P0_TOOL_NAMES = (
     "breath",
     "breath_search",

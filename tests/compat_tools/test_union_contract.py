@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
+from mcp.server.fastmcp import Context
 
 from tools import current
 
@@ -69,6 +72,84 @@ async def test_grow_accepts_p0_pre_split_items_without_rewriting(
     contents = {bucket["content"] for bucket in buckets}
     assert first in contents
     assert second in contents
+
+
+@pytest.mark.asyncio
+async def test_grow_retains_p0_erasable_test_data_contract(current_runtime) -> None:
+    content = "A synthetic grow item that must remain safely erasable."
+
+    result = await current.grow(items=[content], test_data=True)
+
+    assert "1条(预拆分·逐字)|新1合0" in result
+    bucket = (await current_runtime["bucket_mgr"].list_all())[0]
+    assert bucket["content"] == content
+    assert bucket["metadata"]["provenance"]["erasable"] is True
+
+    deleted = await current.trace(
+        bucket["id"],
+        hard_delete=True,
+        delete_reason="union grow test cleanup",
+    )
+    assert deleted == f"已永久删除测试桶: {bucket['id']}"
+
+
+@pytest.mark.asyncio
+async def test_grow_infers_ying_auto_source_from_hidden_client_context(
+    current_runtime,
+    monkeypatch,
+) -> None:
+    from tools.current import memory
+
+    seen: dict[str, object] = {}
+
+    class Gate:
+        def should_gate(self, *, auto: bool, source: str) -> bool:
+            seen.update(auto=auto, source=source)
+            return False
+
+        async def evaluate(self, *_args, **_kwargs):
+            raise AssertionError("disabled gate must not evaluate")
+
+    monkeypatch.setattr(memory.rt, "memory_write_gate", Gate())
+    context = SimpleNamespace(
+        request_context=SimpleNamespace(
+            session=SimpleNamespace(
+                client_params=SimpleNamespace(
+                    clientInfo=SimpleNamespace(name="ob-auto-grow-relay")
+                )
+            )
+        )
+    )
+
+    await current.grow(
+        content="A context-derived automatic grow source is retained.",
+        context=cast(Context, context),
+    )
+
+    assert seen == {"auto": False, "source": "operit"}
+
+
+@pytest.mark.asyncio
+async def test_breath_search_retains_p0_created_date_window(current_runtime) -> None:
+    query = "calendar-window-marker"
+    await current_runtime["bucket_mgr"].create(
+        content=f"{query} on the requested day",
+        created="2026-07-19T12:00:00+00:00",
+    )
+    await current_runtime["bucket_mgr"].create(
+        content=f"{query} outside the requested day",
+        created="2026-07-18T12:00:00+00:00",
+    )
+
+    result = await current.breath_search(
+        query=query,
+        max_results=5,
+        date_from="2026-07-19",
+        date_to="2026-07-19",
+    )
+
+    assert "on the requested day" in result
+    assert "outside the requested day" not in result
 
 
 @pytest.mark.asyncio

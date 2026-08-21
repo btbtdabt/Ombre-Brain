@@ -7,6 +7,8 @@ import re
 import uuid
 from typing import Any
 
+from mcp.server.fastmcp import Context
+
 from entity_edges import extract_entity_edges_from_bucket
 from ombrebrain.storage.quote_store import normalize_quotes
 from profile_facts import profile_key
@@ -235,6 +237,8 @@ async def breath(
     max_tokens: int = 10000,
     domain: str = "",
     date: str = "",
+    date_from: str = "",
+    date_to: str = "",
     valence: float = -1,
     arousal: float = -1,
     max_results: int = 20,
@@ -255,7 +259,7 @@ async def breath(
     session_id: str = "",
     quotes: bool = False,
 ) -> str:
-    """只读检索记忆。查主题用 query；新窗口轻交接用 mode="handoff"；date 或 query 里的日期可查当天普通记忆；domain="feel"/"whisper" 读私密通道，domain="daily_impression" 才读日印象。日期支持 2026-06-15、2026.06.15、2026年6月15日、25年6月15日、6月15日。"""
+    """只读检索记忆。查主题用 query；新窗口轻交接用 mode="handoff"；date 或 query 里的日期可查当天普通记忆；date_from/date_to 按创建时间限定范围；domain="feel"/"whisper" 读私密通道，domain="daily_impression" 才读日印象。日期支持 2026-06-15、2026.06.15、2026年6月15日、25年6月15日、6月15日。"""
     await ensure_decay_started()
     if query_error := check_query_size(str(query or "")):
         return query_error
@@ -266,11 +270,15 @@ async def breath(
     importance_min = int_between(importance_min, -1, -1, 10)
     tags = str(tags or "")
     catalog = bool_value(catalog, False)
+    date_from = str(date_from or "").strip()
+    date_to = str(date_to or "").strip()
+    if str(date or "").strip() and (date_from or date_to):
+        return "date 与 date_from/date_to 不能同时使用。"
 
     # P0's catalog, importance, and tag branches are specialized read modes.
     # Keep those implementations intact while the richer current recall path
     # remains canonical for ordinary, dated, graph, and handoff retrieval.
-    if catalog or importance_min >= 1 or split_csv(tags):
+    if catalog or importance_min >= 1 or split_csv(tags) or date_from or date_to:
         return await p0_breath_dispatch(
             query=query,
             max_tokens=max_tokens,
@@ -281,6 +289,8 @@ async def breath(
             importance_min=importance_min,
             tags=tags,
             catalog=catalog,
+            date_from=date_from,
+            date_to=date_to,
             quotes=quotes,
         )
 
@@ -437,13 +447,17 @@ async def breath_search(
     query: str,
     domain: str = "",
     max_results: int = 20,
+    date_from: str = "",
+    date_to: str = "",
     quotes: bool = False,
 ) -> str:
-    """按关键词或语义检索记忆，逐字返回当前正文。domain 可限定主题域，max_results 控制条数。quotes=True 时，直接命中的桶若保存过关键原话，会把引语附在正文后；默认不返回引语。"""
+    """按关键词或语义检索记忆，逐字返回当前正文。domain 可限定主题域，date_from/date_to 按创建时间限定范围，max_results 控制条数。quotes=True 时，直接命中的桶若保存过关键原话，会把引语附在正文后；默认不返回引语。"""
     return await breath(
         query=query,
         domain=domain,
         max_results=max_results,
+        date_from=date_from,
+        date_to=date_to,
         quotes=quotes,
     )
 
@@ -464,6 +478,8 @@ async def breath_advanced(
     max_tokens: int = 10000,
     domain: str = "",
     date: str = "",
+    date_from: str = "",
+    date_to: str = "",
     valence: float = -1,
     arousal: float = -1,
     max_results: int = 20,
@@ -489,6 +505,8 @@ async def breath_advanced(
         max_tokens=max_tokens,
         domain=domain,
         date=date,
+        date_from=date_from,
+        date_to=date_to,
         valence=valence,
         arousal=arousal,
         max_results=max_results,
@@ -882,7 +900,13 @@ def _format_write_gate_result(decision: Any, gate: Any) -> str:
     )
 
 
-async def _grow_create_item(item: dict, *, batch_id: str, title: str = "") -> tuple[str, str]:
+async def _grow_create_item(
+    item: dict,
+    *,
+    batch_id: str,
+    title: str = "",
+    test_data: bool = False,
+) -> tuple[str, str]:
     content = str(item.get("content") or "").strip()
     analysis = item if item.get("domain") else await analyze_content(content)
     domains = split_csv(analysis.get("domain") or ["general"])
@@ -896,6 +920,7 @@ async def _grow_create_item(item: dict, *, batch_id: str, title: str = "") -> tu
         valence=float_between(analysis.get("valence"), 0.5, 0.0, 1.0),
         arousal=float_between(analysis.get("arousal"), 0.3, 0.0, 1.0),
         name=name,
+        test_data=test_data,
         source_tool="grow",
         grow_batch_id=batch_id,
     )
@@ -908,6 +933,7 @@ async def _grow_once(
     auto: bool = False,
     source: str = "",
     title: str = "",
+    test_data: bool = False,
 ) -> str:
     """只有多个已筛选长期记忆点才用 grow；单条事实/承诺/偏好优先 hold，旧记忆补感受优先 comment_bucket。items 是已拆好的最终记忆正文；此时 content 可作为共享原文证据，item.source_ranges 用 1-based 行号标记该条事件的证据范围。保留原文称呼、昵称、互称、自称和原话。title 可选，短内容时传了就用给定标题。普通记忆 content 的最小写入就是正文；需要结构化时按需使用 ### moment、### original、### reflection，reflection 使用第一人称。到时提醒用 reminder_create。feel 年轮只写第一人称正文。"""
     await ensure_decay_started()
@@ -917,7 +943,11 @@ async def _grow_once(
             return "items 预拆分模式不能同时传 auto、source 或 title。"
         if error := check_grow_items_payload(items):
             return error
-        return await p0_grow_items(items, source_content=content)
+        return await p0_grow_items(
+            items,
+            source_content=content,
+            test_data=bool_value(test_data),
+        )
     if not content:
         return "内容为空，无法整理。"
     if error := check_grow_input_size(content):
@@ -955,6 +985,7 @@ async def _grow_once(
             {"content": content, **analysis},
             batch_id=batch_id,
             title=title,
+            test_data=bool_value(test_data),
         )
         asyncio.create_task(check_duplicate_for(bucket_id, content))
         asyncio.create_task(check_plan_resolution(content, source_bucket_id=bucket_id))
@@ -985,7 +1016,11 @@ async def _grow_once(
             results.append(f"⚠️{item.get('name', '未命名')}: {contract_error}")
             continue
         try:
-            bucket_id, display_name = await _grow_create_item(item, batch_id=batch_id)
+            bucket_id, display_name = await _grow_create_item(
+                item,
+                batch_id=batch_id,
+                test_data=bool_value(test_data),
+            )
         except Exception:
             results.append(f"⚠️{item.get('name', '未命名')}")
         else:
@@ -999,21 +1034,42 @@ async def _grow_once(
     )
 
 
+def _grow_source_from_context(context: Context | None) -> str:
+    """Infer Yinglianchun's automatic grow source from hidden MCP client info."""
+
+    if context is None:
+        return ""
+    try:
+        client_info = context.request_context.session.client_params.clientInfo
+    except (AttributeError, RuntimeError):
+        return ""
+    name = str(getattr(client_info, "name", "") or "").strip().lower()
+    if "ob-auto-grow" in name or "operit" in name:
+        return "operit"
+    return ""
+
+
 async def grow(
     content: str = "",
     items: list | None = None,
     auto: bool = False,
     source: str = "",
     title: str = "",
+    test_data: bool = False,
+    context: Context | None = None,
 ) -> str:
-    """只有多个已筛选长期记忆点才用 grow；单条事实/承诺/偏好优先 hold，旧记忆补感受优先 comment_bucket。items 是已拆好的最终记忆正文；每项可带 title/content/tags/importance/domain/valence/arousal/why_remembered/source_ranges/quotes。quotes 只用于调用方在写入当下明确选中的关键原话。content 可作为整批共享原文证据，source_ranges 用 1-based 闭区间关联证据。相同请求在 30 分钟内幂等执行一次。普通正文需要结构化时按需使用 ### moment、### original、### reflection，reflection 使用第一人称。"""
+    """只有多个已筛选长期记忆点才用 grow；单条事实/承诺/偏好优先 hold，旧记忆补感受优先 comment_bucket。items 是已拆好的最终记忆正文；每项可带 title/content/tags/importance/domain/valence/arousal/why_remembered/source_ranges/quotes。quotes 只用于调用方在写入当下明确选中的关键原话。content 可作为整批共享原文证据，source_ranges 用 1-based 闭区间关联证据。test_data=True 只用于创建可安全清除的测试记忆。相同请求在 30 分钟内幂等执行一次。普通正文需要结构化时按需使用 ### moment、### original、### reflection，reflection 使用第一人称。"""
+    normalized_source = str(source or "").strip()
+    if items is None and not normalized_source:
+        normalized_source = _grow_source_from_context(context)
+    test_data = bool_value(test_data, False)
     fingerprint = request_fingerprint(
         content=str(content or ""),
         items=items,
-        test_data=False,
+        test_data=test_data,
         extra={
             "auto": bool_value(auto),
-            "source": str(source or "").strip(),
+            "source": normalized_source,
             "title": str(title or "").strip(),
         },
     )
@@ -1023,8 +1079,9 @@ async def grow(
             content=content,
             items=items,
             auto=auto,
-            source=source,
+            source=normalized_source,
             title=title,
+            test_data=test_data,
         ),
     )
 

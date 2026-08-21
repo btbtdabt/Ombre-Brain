@@ -8,7 +8,7 @@ verification evidence.
 
 ## Recorded Baselines
 
-- P0luz primary baseline: `v2.17.9` / `594d636`
+- P0luz primary baseline: `v3.2.0` / `6f7335d`
 - Yinglianchun secondary baseline: `284c9c7`
 - Historical deployed root runtime: `8e68a7d`
 - P0luz-base production cutover: `c806f78`
@@ -99,6 +99,31 @@ configured client ID/secret still pre-registers the client, and the legacy
 fixed access token remains a resource-bound compatibility credential.
 
 ## Integration Batch Ledger
+
+### 2026-08-20 cross-upstream tool contract parity audit
+
+Both upstream tips were unchanged during this audit: P0luz remains at
+`6f7335d` and Yinglianchun remains at `284c9c7`. Comparing every decorated
+author tool against the canonical 40-tool manifest found no missing public tool
+name and no reason to register a second implementation. Three author behaviors
+were absent from the combined wrappers and are now retained at their shared
+module boundary.
+
+| Source behavior | Disposition | Evidence |
+| --- | --- | --- |
+| P0luz `breath_search` / `breath_advanced` created-time `date_from` / `date_to` filters | Ported through the existing current breath wrappers into the author's P0 dispatch path | Public-schema snapshots, alias forwarding tests, and a two-day retrieval regression prove an inclusive same-day range without changing current event-date `date` semantics. |
+| P0luz `grow(..., test_data=True)` erasable provenance | Ported through short, digest, and pre-split item paths | The union regression creates a grow bucket, verifies erasable provenance, and removes it through the author-defined `trace(hard_delete=True)` boundary. |
+| Yinglianchun automatic grow client-source inference | Ported as hidden FastMCP `Context` handling | A client name containing `ob-auto-grow` is inferred as `source="operit"` for the existing write gate, while `Context` remains absent from the public tool schema and tool logs. The existing timestamp-content inference remains intact. |
+| All other unique and overlapping tool contracts | Already merged or intentionally distinct | The canonical manifest still exposes 40 unique tools. Same-name overlaps use one handler; P0 Source/Relation/Plan/I/Dream and Ying exact-read/comment/Darkroom/Reminder/Profile capabilities retain their separate product semantics. |
+
+Local verification for this parity batch:
+
+- Full pytest suite: **3297 passed / 123 skipped / 0 failed** with three known
+  fixture warnings.
+- Whole-tree Ruff: **clean**; all changed Python files: **0 Pyright errors /
+  0 warnings**.
+- Whole-tree Pyright debt audit: **349 errors / 21 warnings**, unchanged from
+  the recorded dormant-v3/historical-test baseline.
 
 ### 2026-08-20 P0luz 3.2.0 quotes, bidirectional relations, automatic relations, and connector views
 

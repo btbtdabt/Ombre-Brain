@@ -57,7 +57,7 @@ breath()
 ### breath 三入口
 
 - `breath()`：无参启动入口。让权重较高的未解决事项和核心准则自然浮现。无参读取不应被当作对记忆执行 `touch`。
-- `breath_search(query, domain="", max_results=20, quotes=False)`：日常关键词、BM25 与语义检索。可用逗号分隔 domain。只有显式 `quotes=True` 才会附上直接命中桶中已保存的关键原话。已知完整 ID 时优先用 `read_bucket`，因为它明确表示精确只读且不刷新活跃度。
+- `breath_search(query, domain="", max_results=20, date_from="", date_to="", quotes=False)`：日常关键词、BM25 与语义检索。可用逗号分隔 domain；`date_from` / `date_to` 按桶的创建时间限定范围。只有显式 `quotes=True` 才会附上直接命中桶中已保存的关键原话。已知完整 ID 时优先用 `read_bucket`，因为它明确表示精确只读且不刷新活跃度。
 - `breath_advanced(...)`：日期、handoff、情绪、标签、重要度、目录、关联图和其它精细控制入口。
 - `feel(query, max_tokens=10000)`：按当前主题检索旧感受。query 必填，只逐字返回相关 feel；语义索引不可用时明确降级为关键词匹配。
 
@@ -66,6 +66,7 @@ breath()
 ```text
 breath_advanced(date="2026-06-15")
 breath_advanced(query="体检结果", date="2026-06-15")
+breath_search(query="部署", date_from="2026-06-01", date_to="2026-06-30")
 breath_advanced(domain="feel")
 breath_advanced(domain="whisper")
 breath_advanced(domain="daily_impression", date="2026-06-15")
@@ -79,6 +80,7 @@ breath_advanced(mode="handoff")
 规则：
 
 - 日期查询优先匹配事件日期 `date`；旧桶没有事件日期时才回退到创建、更新或活跃时间。
+- `date_from` / `date_to` 按桶的创建时间过滤，可单独使用；它们不与事件日期 `date` 同时使用。
 - 日印象必须显式使用 `domain="daily_impression"`。
 - `domain="feel"` 读旧独立 feel；`domain="whisper"` 只读无源悄悄话。
 - `domain="self_anchor"` 读取自我总入口；查分段时同时传 query。
@@ -127,6 +129,7 @@ breath_advanced(mode="handoff")
 - 单条事实、承诺或偏好优先 `hold`。
 - 多条内容用一次 `grow`。
 - `grow(items=[...])` 接收已经拆好的项目；每项可以是正文字符串，也可以是含 `content` 的对象。
+- `test_data=True` 只用于建立之后可由 `trace(hard_delete=True)` 安全清除的测试记忆。
 - 需要保留共享原文证据时，用 `grow(content="共享原文", items=[...])`。对象项目可用 1-based 闭区间 `source_ranges=[[起始行, 结束行], ...]` 声明属于自己的原文行；之后可用 `source_read` 核对。
 - 不需要共享原文证据时，items 模式只传 `items`。
 - 正文保留原文中的称呼、昵称、互称、自称和必要短原话。
