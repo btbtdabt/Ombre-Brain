@@ -48,7 +48,7 @@ breath()
 8. 修正、resolve、调整元数据或归档旧记忆，用 `trace`；只传需要改变的字段。
 9. 有明确时间或轮次的照顾提醒用 reminder；无明确时间但需要闭环的承诺用 `plan`。
 10. 已有桶要补原文证据时用 `source_attach`；按稳定 slot 暂停或恢复证据用 `source_detach` / `source_restore`。
-11. 两条普通记忆之间确有一跳关系时用 `relation_attach`；查看、暂停或恢复关系用对应 Relation 工具。
+11. 新普通记忆会在 embedding 可用时异步尝试建立少量自动 Relation。先用 `relation_read` 查看；只有确有一跳关系且自动关系未覆盖时才手动 `relation_attach`，暂停或恢复用对应 Relation 工具。
 
 “刚刚”“刚才”“上一句”优先读取当前聊天上下文。不确定是否已经记过时，先检索再写，避免重复。
 
@@ -102,6 +102,7 @@ breath_advanced(mode="handoff")
 - `relation_read(bucket_id, expected_title="", include_titles=False, include_detached=False)`：按 bucket ID 读取普通记忆桶的一跳 Relation ledger。默认只返回 active 关系的稳定 slot、类型、label 与目标 ID；可按需展开目标当前标题或 detached 历史。
 - `relation_attach(bucket_id, target_bucket_id, relation_type, expected_title="", label="", reverse_label="")`：建立一条天然双向关系。固定六型 `caused_by`、`causes`、`continuation_of`、`continues`、`related_to`、`same_event` 会在目标端自动写入反向语义；`custom` 使用 label，反向 label 可单独指定。方向始终按 `bucket_id -> target_bucket_id` 理解。
 - `relation_detach(...)` / `relation_restore(...)`：按本桶稳定 relation slot 暂停或恢复关系；带 `relation_id` 的新关系同步更新两端镜像，旧无 ID 单向关系仍原位兼容。不改变正文、检索排序、embedding、活跃度或生命周期。
+- 新普通记忆在 embedding 可用时会由后台异步推断少量关系；失败不影响记忆写入。手动绑定前先 `relation_read`，不要重复建立已有关系。
 - `list_buckets_light(include_archive=False, limit=500, offset=0)`：只列轻量元数据，不返回正文。用于同步、分页盘点和外部索引。
 - `pulse(include_archive=False)`：查看系统状态、索引健康、衰减状态和记忆摘要。需要正文时再精确读取。
 
@@ -134,6 +135,7 @@ breath_advanced(mode="handoff")
 - 不需要共享原文证据时，items 模式只传 `items`。
 - 正文保留原文中的称呼、昵称、互称、自称和必要短原话。
 - 结构化 item 可携带自己的 `quotes`；只放调用当下明确选中的关键原话。LLM 自动拆分的 `grow(content=...)` digest 路径不会自动制造 quotes。
+- 完全相同的 `grow` 请求在同一服务运行时的 30 分钟窗口内幂等：处理中重试会复用原操作，完成后重试会复用原结果。不要因客户端超时而改写 payload 制造重复记忆。
 
 ### content 写作契约
 
@@ -176,14 +178,14 @@ breath_advanced(mode="handoff")
 
 - `resolved=1/0`：沉底或重新激活。
 - `resolved=1, digested=1`：进一步降低浮现权重。
-- `pinned=1/0`：钉选或取消钉选。
-- `protected=1/0`：防衰减但不作为核心准则强制浮现；与 pinned/anchor 互斥。
+- `pinned=1`：钉选并锁定 importance=10；`pinned=0` 必须在同一次调用显式传 `importance=1..10`，原子恢复普通动态评分。
+- `protected=1`：防衰减但不作为核心准则强制浮现；与 pinned/anchor 互斥。`protected=0` 必须在同一次调用显式传 `importance=1..10`。
 - `dont_surface=1`：不参加无参浮现，但仍可被检索。
 - `name`、`content`、`domain`、`tags` 是替换操作；正文或标题变更会重建 embedding。
 - `old_str` + `new_str`：对完整正文做原子局部替换并重建 embedding。先读取当前完整原文，`old_str` 必须是恰好只出现一次的连续片段；不能与 `content` 同传，`new_str=""` 可删除该片段。
 - `meaning_append/media_append` 是追加；`meaning_replace/media_replace` 是整体替换。
 - `delete=True` 是归档；Markdown 保留在 archive。
-- 归档记忆需在判断值得恢复后单独调用 `trace(bucket_id="...", restore=True)`。
+- 归档记忆需在判断值得恢复后单独调用 `trace(bucket_id="...", restore=True)`。唯一例外是恢复时同时解除归档桶的 protected，可用 `restore=True, protected=0, importance=1..10` 原子完成；这也是处理 archived protected/anchor 冲突的路径。
 - `hard_delete=True` 只清理创建时已标记 `test_data=True` 的测试桶，并提供 `delete_reason`。
 - `breath` 返回待处理的人工删除请求时，逐条判断后用同一请求的 `bucket_id`、`deletion_request_id`、`deletion_decision="approve"|"reject"` 与 `deletion_ai_reason` 作出明确决定；没有明确决定就保持 pending。
 - `anchor=1/0` 是兼容 schema；日常使用专门的 `anchor` / `release`。
@@ -218,6 +220,7 @@ breath_advanced(mode="handoff")
 | 结构 | 用途 |
 |---|---|
 | pinned | 永久核心准则；会随普通启动入口展示，importance=10 |
+| protected | 安静的防衰减结构；不因保护而强制浮现，与 pinned/anchor 互斥 |
 | anchor | 已有记忆的稀缺坐标系；不主动出现在默认 breath，但检索命中时可达 |
 | self_anchor | current 的人工维护身份/关系交接入口；通过 `breath_advanced(domain="self_anchor")` 读取 |
 | `I` | P0 的渐进 self-concept：候选经过多次 Dream 见证后才可沉淀为正式条目 |
@@ -225,10 +228,12 @@ breath_advanced(mode="handoff")
 
 self_anchor 只有 handoff 或显式读取时才会带出；Gateway 普通自动注入不携带它。
 
+pinned 与 protected 分别有独立配额（默认各 20，可配置）。取消 pinned 或 protected 时都要在同一次 `trace` 中传新的 `importance=1..10`。
+
 `anchor(bucket_id)` 与 `release(bucket_id)`：
 
 - 先写入并取得 bucket_id，再决定是否 anchor。
-- anchor 与 pinned/protected 互斥。可取消的 pinned 先 `trace(pinned=0)`。
+- anchor 与 pinned/protected 互斥。可取消的 pinned 先 `trace(pinned=0, importance=1..10)`；可取消的 protected 先 `trace(protected=0, importance=1..10)`。
 - anchor 满额时先 release 旧 anchor。
 - release 只解除 anchor，保留 pinned 和 importance。
 
@@ -247,7 +252,7 @@ self_anchor 只有 handoff 或显式读取时才会带出；Gateway 普通自动
 - `letter_read(query="", limit=10, author="", date_from="", date_to="")`：按关键词、署名和日期范围读取。
 - `author="user"` 表示用户侧，`author="ai"` 或当前 AI 名称表示 assistant 侧，也可使用自定义署名。
 - 当前 MCP/stdio 入口只能替 assistant 侧创建带锁信；代存用户信仍可使用无锁模式。
-- 信件不压缩、不合并、不衰减，不混入普通 breath；未到解锁时间或永久锁定时，正文不会通过读取、搜索、Dashboard 或普通记忆表面泄漏。
+- 信件锁控制读取可见性，不等同于内容加密。信件不压缩、不合并、不衰减，不混入普通 breath；未到解锁时间或永久锁定时，正文不会通过读取、搜索、Dashboard 或普通记忆表面泄漏。
 
 ## Darkroom
 
