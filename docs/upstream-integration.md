@@ -104,8 +104,8 @@ fixed access token remains a resource-bound compatibility credential.
 
 This integration batch reviews `594d636..6f7335d` from P0luz. Yinglianchun
 `main` remains at the recorded `284c9c7` baseline, so there are no secondary
-upstream commits to port in this range. The recorded P0luz baseline remains
-`594d636` until the exact combined commit passes isolated staging.
+upstream commits to port in this range. The exact combined runtime passed
+isolated staging, advancing the recorded P0luz baseline to `6f7335d`.
 
 | Source commit(s) | Disposition | Evidence |
 | --- | --- | --- |
@@ -125,10 +125,44 @@ upstream commits to port in this range. The recorded P0luz baseline remains
 | P0luz `4249ef8`, `09d075f` | Merged and adapted to the two-view connector contract | Docker/web tests exercise `/mcp-extra` as the Letter-only view while the independent canonical snapshot continues to assert all 40 tools on `/mcp`. Both views use the same handlers and schemas. |
 | P0luz `6f7335d` | Selectively merged into combined documentation and tests | The active `/mcp-extra` behavior is retained. Upstream wording that describes mutually exclusive 13-tool/3-tool connectors is superseded by the tested 40-tool main endpoint plus optional three-tool Letter mirror. |
 
-Pre-staging local verification for this batch is recorded below once the full
-suite, lint, changed-file type checks, update manifest, and container build
-complete. The P0luz baseline advances only after isolated staging verifies the
-exact integration commit and copied production data remains intact.
+Local verification for integration commit `164970c`:
+
+- Full pytest suite: **3294 passed / 123 skipped / 0 failed** with three known
+  test-fixture warnings.
+- Whole-tree Ruff, staged diff checks, and the generated update manifest:
+  **clean**. Every changed Python file has **0 Pyright errors / 0 warnings**.
+- The whole-tree Pyright debt audit remains at the recorded **349 errors / 21
+  warnings** in the intentionally dormant v3/distributed stack and historical
+  compatibility tests; this batch does not increase or suppress that debt.
+- The final local image `ombre-brain:3.2.0-integration` built successfully and
+  returned HTTP 200 from `/health`; unauthenticated `/mcp` and `/mcp-extra`
+  correctly returned 401 while startup registered **40** and **3** tools.
+
+Isolated VPS staging for integration commit `164970c`:
+
+- Image `ombre-brain:staging-164970c` was built from the exact fork checkout.
+  Brain and Gateway used fresh, dedicated buckets/state/data directories;
+  production containers, mounts, and data remained untouched.
+- Brain and Gateway health returned HTTP 200 and reported version `3.2.0`,
+  Claude Opus 5 as the main model, Gemini 3.7 Flash for auxiliary routes,
+  Persona enabled, and the specialized reranker configured.
+- Authenticated Streamable HTTP MCP initialization exposed **40 unique tools**
+  on `/mcp` and the three canonical Letter mirrors on `/mcp-extra`; a read-only
+  `pulse` call completed successfully.
+- Live staging calls succeeded for OpenAI-compatible `claude-opus-5`, native
+  Anthropic `claude-opus-5-native`, native Gemini `gemini-3.7-flash`, the
+  3072-dimensional embedding provider, and the dedicated reranker.
+- A native Opus 5 tool-use exchange completed both the tool-call and tool-result
+  rounds. Gateway logs show one injection snapshot on the current-user round,
+  no repeated dynamic injection on the tool-result round, and Persona
+  post-reply processing only after the final assistant text.
+- Brain and Gateway staging logs contained no error-level entry or traceback.
+  The deliberately undersized initial native-output probe produced the expected
+  empty-output warning; the full final/tool-loop probes completed normally.
+
+This staging evidence advances the recorded P0luz baseline to `v3.2.0` /
+`6f7335d`. Production cutover and post-cutover alignment use the follow-up
+commit that records this evidence.
 
 ### 2026-08-15 P0luz 2.17.9 source/relation bindings and breath headroom
 
