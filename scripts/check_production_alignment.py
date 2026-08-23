@@ -64,11 +64,20 @@ def load_env_file(path: Path) -> dict[str, str]:
     return values
 
 
-def read_json(url: str, *, token: str = "", method: str = "GET", body: dict[str, Any] | None = None) -> tuple[int, Any]:
+def read_json(
+    url: str,
+    *,
+    token: str = "",
+    method: str = "GET",
+    body: dict[str, Any] | None = None,
+    extra_headers: dict[str, str] | None = None,
+) -> tuple[int, Any]:
     headers = {
         "Accept": "application/json",
         "User-Agent": "Mozilla/5.0 OmbreProductionAlignment/1.0",
     }
+    if extra_headers:
+        headers.update(extra_headers)
     data = None
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -91,6 +100,14 @@ def read_json(url: str, *, token: str = "", method: str = "GET", body: dict[str,
         except json.JSONDecodeError:
             parsed = {"raw": raw[:500]}
         return exc.code, parsed
+
+
+def build_probe_headers() -> dict[str, str]:
+    return {
+        "X-Ombre-Diagnostic-Probe": "production-alignment",
+        "X-Ombre-Session-Id": f"production-alignment-{time.time_ns()}",
+        "X-Ombre-Client": "production-alignment",
+    }
 
 
 class Check:
@@ -267,7 +284,12 @@ def local_env_checks(check: Check, env: dict[str, str]) -> None:
     )
 
 
-def production_gateway_checks(check: Check, env: dict[str, str], gateway_base: str) -> None:
+def production_gateway_checks(
+    check: Check,
+    env: dict[str, str],
+    gateway_base: str,
+    probe_headers: dict[str, str],
+) -> None:
     default_token = env.get("OMBRE_GATEWAY_TOKEN", "")
     gemini_token = env.get("OMBRE_GATEWAY_GEMINI_TOKEN", "")
     if not default_token:
@@ -324,6 +346,7 @@ def production_gateway_checks(check: Check, env: dict[str, str], gateway_base: s
         token=default_token,
         method="POST",
         body=chat_body,
+        extra_headers=probe_headers,
     )
     check.assert_true(status == 200, "production gateway Claude final route works with default token")
 
@@ -338,6 +361,7 @@ def production_gateway_checks(check: Check, env: dict[str, str], gateway_base: s
         token=default_token,
         method="POST",
         body=native_body,
+        extra_headers=probe_headers,
     )
     check.assert_true(status == 200, "production gateway native Claude Opus 5 route works")
 
@@ -351,13 +375,19 @@ def production_gateway_checks(check: Check, env: dict[str, str], gateway_base: s
             token=gemini_token,
             method="POST",
             body=gemini_body,
+            extra_headers=probe_headers,
         )
         check.assert_true(status == 200, "production gateway native Gemini route works with Gemini token")
     else:
         check.warn("skipped Gemini-token route check because OMBRE_GATEWAY_GEMINI_TOKEN is missing locally")
 
 
-def relay_checks(check: Check, relay_env: dict[str, str], relay_base: str) -> None:
+def relay_checks(
+    check: Check,
+    relay_env: dict[str, str],
+    relay_base: str,
+    probe_headers: dict[str, str],
+) -> None:
     relay_secret = relay_env.get("RELAY_SECRET", "")
     if not relay_secret:
         check.warn("skipped relay checks because RELAY_SECRET is missing locally")
@@ -379,6 +409,7 @@ def relay_checks(check: Check, relay_env: dict[str, str], relay_base: str) -> No
         token=relay_secret,
         method="POST",
         body=body,
+        extra_headers=probe_headers,
     )
     check.assert_true(status == 200, "relay final route returns a completion")
 
@@ -426,8 +457,19 @@ def main() -> int:
     config_gateway_checks(check, root / args.config)
     local_env_checks(check, env)
     if not args.skip_network:
-        production_gateway_checks(check, env, args.gateway_base.rstrip("/"))
-        relay_checks(check, relay_env, args.relay_base.rstrip("/"))
+        probe_headers = build_probe_headers()
+        production_gateway_checks(
+            check,
+            env,
+            args.gateway_base.rstrip("/"),
+            probe_headers,
+        )
+        relay_checks(
+            check,
+            relay_env,
+            args.relay_base.rstrip("/"),
+            probe_headers,
+        )
 
     if check.warnings:
         print(f"\nWarnings: {len(check.warnings)}")

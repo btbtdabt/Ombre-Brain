@@ -3,6 +3,7 @@ import json
 from copy import deepcopy
 from types import MethodType
 
+import httpx
 from starlette.responses import JSONResponse
 from starlette.responses import StreamingResponse
 from starlette.testclient import TestClient
@@ -99,6 +100,7 @@ def _gateway_stream_service(gateway_module):
     service.calls = []
     service.prepare_kwargs = []
     service.upstream_trace_ids = {}
+    service.upstream_turns = {}
     service.debug_trace = TraceRecorder()
 
     async def warm_recall_runtime(self):
@@ -124,10 +126,18 @@ def _gateway_stream_service(gateway_module):
 
     async def stream_openai(self, *args, **kwargs):
         self.upstream_trace_ids["openai"] = kwargs.get("trace_id")
+        self.upstream_turns["openai"] = {
+            "recalled_ids": args[2],
+            "user_message": args[3],
+        }
         return await stream_response(self, "openai")
 
     async def stream_anthropic(self, *args, **kwargs):
         self.upstream_trace_ids["anthropic"] = kwargs.get("trace_id")
+        self.upstream_turns["anthropic"] = {
+            "recalled_ids": args[2],
+            "user_message": args[3],
+        }
         return await stream_response(self, "anthropic")
 
     async def stream_gemini(self, *args, **kwargs):
@@ -236,6 +246,230 @@ def test_gateway_rejects_invalid_auth_before_starting_stream(gateway_module):
     assert b"ombre-gateway-chat-start" not in response.content
     assert service.calls == []
     assert service.debug_trace.records == []
+
+
+def test_gateway_diagnostic_probe_suppresses_turn_and_persona_inputs_for_streams(
+    gateway_module,
+):
+    service = _gateway_stream_service(gateway_module)
+    app = gateway_module.create_gateway_app(config={}, service=service)
+    headers = {
+        "Authorization": "Bearer gateway-token",
+        "X-Ombre-Diagnostic-Probe": "production-alignment",
+        "X-Ombre-Session-Id": "production-alignment-test",
+    }
+
+    with TestClient(app) as client:
+        openai = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "claude-opus-4-8",
+                "messages": [{"role": "user", "content": "alignment probe"}],
+                "stream": True,
+            },
+            headers=headers,
+        )
+        anthropic = client.post(
+            "/v1/messages",
+            json={
+                "model": "claude-opus-4-8-native",
+                "messages": [{"role": "user", "content": "alignment probe"}],
+                "max_tokens": 64,
+                "stream": True,
+            },
+            headers=headers,
+        )
+
+    assert openai.status_code == 200
+    assert anthropic.status_code == 200
+    assert service.upstream_turns == {
+        "openai": {"recalled_ids": None, "user_message": ""},
+        "anthropic": {"recalled_ids": None, "user_message": ""},
+    }
+
+
+def _gateway_non_stream_service(gateway_module):
+    service = gateway_module.GatewayService.__new__(gateway_module.GatewayService)
+    service.gateway_token = "gateway-token"
+    service.gateway_token_routes = []
+    service.gateway_cfg = {}
+    service.default_session_id = "compat-session"
+    service.upstream_default_model = "claude-opus-4-8"
+    service.pending_tool_reasoning = {}
+    service.debug_trace = TraceRecorder()
+    service.recorded_turns = []
+    service.persona_inputs = []
+
+    async def warm_recall_runtime(self):
+        return None
+
+    async def close(self):
+        return None
+
+    async def prepare_payload(self, payload, session_id, **kwargs):
+        return payload, ["memory-1"], {}
+
+    def resolve_upstream(self, model):
+        protocol = "anthropic" if str(model).endswith("-native") else "openai"
+        return {
+            "public_model": model,
+            "upstream_model": model,
+            "upstream": {"protocol": protocol},
+        }
+
+    def uses_anthropic(self, upstream):
+        return upstream.get("protocol") == "anthropic"
+
+    async def forward_openai(self, payload, **kwargs):
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"role": "assistant", "content": "ok"}}
+                ]
+            },
+        )
+
+    async def forward_anthropic(self, payload, route, **kwargs):
+        return httpx.Response(
+            200,
+            json={
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn",
+            },
+        )
+
+    async def retry_memory_detail(self, **kwargs):
+        return kwargs["upstream_response"], None
+
+    async def record_success(self, session_id, recalled_ids, injection_debug, **kwargs):
+        self.recorded_turns.append(
+            {
+                "session_id": session_id,
+                "recalled_ids": recalled_ids,
+                "user_message": kwargs.get("user_message"),
+            }
+        )
+
+    async def update_persona(self, session_id, user_message, assistant_message, recalled_ids):
+        self.persona_inputs.append(
+            {
+                "session_id": session_id,
+                "user_message": user_message,
+                "recalled_ids": recalled_ids,
+            }
+        )
+
+    service.warm_recall_runtime = MethodType(warm_recall_runtime, service)
+    service.close = MethodType(close, service)
+    service.prepare_payload = MethodType(prepare_payload, service)
+    service._resolve_upstream_for_model = MethodType(resolve_upstream, service)
+    service._upstream_uses_anthropic_protocol = MethodType(uses_anthropic, service)
+    service._forward_upstream = MethodType(forward_openai, service)
+    service._forward_anthropic_upstream = MethodType(forward_anthropic, service)
+    service._maybe_retry_with_memory_detail = MethodType(retry_memory_detail, service)
+    service._record_successful_round = MethodType(record_success, service)
+    service._update_persona_after_assistant_message = MethodType(update_persona, service)
+    return service
+
+
+def test_gateway_diagnostic_probe_suppresses_non_stream_persistence_for_both_protocols(
+    gateway_module,
+):
+    service = _gateway_non_stream_service(gateway_module)
+    app = gateway_module.create_gateway_app(config={}, service=service)
+    headers = {
+        "Authorization": "Bearer gateway-token",
+        "X-Ombre-Diagnostic-Probe": "production-alignment",
+        "X-Ombre-Session-Id": "production-alignment-test",
+    }
+
+    with TestClient(app) as client:
+        openai = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "claude-opus-4-8",
+                "messages": [{"role": "user", "content": "alignment probe"}],
+                "stream": False,
+            },
+            headers=headers,
+        )
+        anthropic = client.post(
+            "/v1/messages",
+            json={
+                "model": "claude-opus-4-8-native",
+                "messages": [{"role": "user", "content": "alignment probe"}],
+                "max_tokens": 64,
+                "stream": False,
+            },
+            headers=headers,
+        )
+
+    assert openai.status_code == 200
+    assert anthropic.status_code == 200
+    expected = [
+        {
+            "session_id": "production-alignment-test",
+            "recalled_ids": None,
+            "user_message": "",
+        },
+        {
+            "session_id": "production-alignment-test",
+            "recalled_ids": None,
+            "user_message": "",
+        },
+    ]
+    assert service.recorded_turns == expected
+    assert service.persona_inputs == [
+        {
+            "session_id": "production-alignment-test",
+            "recalled_ids": [],
+            "user_message": "",
+        },
+        {
+            "session_id": "production-alignment-test",
+            "recalled_ids": [],
+            "user_message": "",
+        },
+    ]
+
+
+def test_gateway_diagnostic_marker_requires_an_isolated_probe_session(gateway_module):
+    service = _gateway_non_stream_service(gateway_module)
+    app = gateway_module.create_gateway_app(config={}, service=service)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "claude-opus-4-8",
+                "messages": [{"role": "user", "content": "ordinary turn"}],
+                "stream": False,
+            },
+            headers={
+                "Authorization": "Bearer gateway-token",
+                "X-Ombre-Diagnostic-Probe": "production-alignment",
+                "X-Ombre-Session-Id": "main",
+            },
+        )
+
+    assert response.status_code == 200
+    assert service.recorded_turns == [
+        {
+            "session_id": "main",
+            "recalled_ids": ["memory-1"],
+            "user_message": "ordinary turn",
+        }
+    ]
+    assert service.persona_inputs == [
+        {
+            "session_id": "main",
+            "recalled_ids": ["memory-1"],
+            "user_message": "ordinary turn",
+        }
+    ]
 
 
 def _turn_snapshot_service(gateway_module):

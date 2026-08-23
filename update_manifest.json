@@ -232,8 +232,8 @@
     },
     {
       "path": "src/gateway.py",
-      "sha256": "5894e59d380feffdf021f72d923c4c750c0088797be268f118b376f0b6123077",
-      "size": 977468
+      "sha256": "dce7166b1289ada09e36a19c4af08813b32423d8fd0bc7f1eb95b6974f71f6db",
+      "size": 979655
     },
     {
       "path": "src/gateway_state.py",
@@ -1437,8 +1437,8 @@
     },
     {
       "path": "src/web/current_profile.py",
-      "sha256": "4313de3175b5f1b68ffb3c2c9e9451b5ec3c435cb621225cfd55de027de72341",
-      "size": 35296
+      "sha256": "d5006f6659665d81e13dd073f0491e27bb0fffee37cdd3f748631cd8626d2bb6",
+      "size": 35478
     },
     {
       "path": "src/web/current_services.py",

@@ -154,4 +154,13 @@ The check verifies:
 - relay final route works through Anthropic Messages format;
 - relay native Claude final tool loop reaches Ombre MCP tools without 404.
 
+Model probes use a unique `production-alignment-*` `X-Ombre-Session-Id`
+together with `X-Ombre-Diagnostic-Probe: production-alignment`. The Gateway
+still resolves the configured route,
+builds context, and reaches the upstream model, but it does not advance the
+conversation round, mirror the probe into raw chat history, touch recalled
+buckets, or run Persona post-reply processing. The relay's authenticated
+`/v1/chat/completions` route forwards these two headers only for that explicit
+diagnostic request. Normal `/generate` and proactive traffic remain stateful.
+
 If the check fails, do not trust the deployment until the failed line is fixed.

@@ -2033,6 +2033,7 @@ class GatewayService:
             return auth_result
 
         session_id = (request.headers.get("X-Ombre-Session-Id") or self.default_session_id).strip()
+        diagnostic_probe = self._is_production_alignment_probe(request, session_id)
         client_label = self._client_label_from_request(request, "/v1/chat/completions")
         trace_id = secrets.token_hex(6)
 
@@ -2088,6 +2089,7 @@ class GatewayService:
                         client=client_label,
                         debug_detail=debug_detail,
                         trace_id=trace_id,
+                        diagnostic_probe=diagnostic_probe,
                     ),
                     prefix="ombre-gateway-chat",
                     interval_seconds=CHAT_STREAM_KEEPALIVE_SECONDS,
@@ -2099,6 +2101,12 @@ class GatewayService:
                 include_debug=True,
                 manage_turn_snapshot=True,
                 debug_detail=debug_detail,
+            )
+            recalled_ids, persona_user_message = self._turn_persistence_inputs(
+                diagnostic_probe=diagnostic_probe,
+                recalled_ids=recalled_ids,
+                user_message=persona_user_message,
+                injection_debug=injection_debug,
             )
             self._trace_gateway_prepared_payload(
                 route="/v1/chat/completions",
@@ -2228,6 +2236,7 @@ class GatewayService:
         client: str,
         debug_detail: str,
         trace_id: str,
+        diagnostic_probe: bool,
     ) -> Response:
         forward_payload, recalled_ids, injection_debug = await self.prepare_payload(
             payload,
@@ -2236,6 +2245,12 @@ class GatewayService:
             include_debug=True,
             manage_turn_snapshot=True,
             debug_detail=debug_detail,
+        )
+        recalled_ids, user_message = self._turn_persistence_inputs(
+            diagnostic_probe=diagnostic_probe,
+            recalled_ids=recalled_ids,
+            user_message=user_message,
+            injection_debug=injection_debug,
         )
         self._trace_gateway_prepared_payload(
             route="/v1/chat/completions",
@@ -2368,6 +2383,7 @@ class GatewayService:
             return auth_result
 
         session_id = (request.headers.get("X-Ombre-Session-Id") or self.default_session_id).strip()
+        diagnostic_probe = self._is_production_alignment_probe(request, session_id)
         client_label = self._client_label_from_request(request, "/v1/messages")
         trace_id = secrets.token_hex(6)
 
@@ -2422,6 +2438,7 @@ class GatewayService:
                         client=client_label,
                         debug_detail=debug_detail,
                         trace_id=trace_id,
+                        diagnostic_probe=diagnostic_probe,
                     ),
                     prefix="ombre-gateway-anthropic",
                     interval_seconds=ANTHROPIC_STREAM_KEEPALIVE_SECONDS,
@@ -2433,6 +2450,12 @@ class GatewayService:
                 include_debug=True,
                 manage_turn_snapshot=True,
                 debug_detail=debug_detail,
+            )
+            recalled_ids, persona_user_message = self._turn_persistence_inputs(
+                diagnostic_probe=diagnostic_probe,
+                recalled_ids=recalled_ids,
+                user_message=persona_user_message,
+                injection_debug=injection_debug,
             )
             self._trace_gateway_prepared_payload(
                 route="/v1/messages",
@@ -2552,6 +2575,7 @@ class GatewayService:
         client: str,
         debug_detail: str,
         trace_id: str,
+        diagnostic_probe: bool,
     ) -> Response:
         forward_payload, recalled_ids, injection_debug = await self.prepare_payload(
             payload,
@@ -2560,6 +2584,12 @@ class GatewayService:
             include_debug=True,
             manage_turn_snapshot=True,
             debug_detail=debug_detail,
+        )
+        recalled_ids, user_message = self._turn_persistence_inputs(
+            diagnostic_probe=diagnostic_probe,
+            recalled_ids=recalled_ids,
+            user_message=user_message,
+            injection_debug=injection_debug,
         )
         self._trace_gateway_prepared_payload(
             route="/v1/messages",
@@ -8914,6 +8944,25 @@ class GatewayService:
 
     def _truthy_header(self, value: str | None) -> bool:
         return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _is_production_alignment_probe(request: Request, session_id: str) -> bool:
+        marker = str(request.headers.get("X-Ombre-Diagnostic-Probe") or "").strip().lower()
+        return marker == "production-alignment" and session_id.startswith("production-alignment-")
+
+    @staticmethod
+    def _turn_persistence_inputs(
+        *,
+        diagnostic_probe: bool,
+        recalled_ids: list[str] | None,
+        user_message: str,
+        injection_debug: dict[str, Any] | None,
+    ) -> tuple[list[str] | None, str]:
+        if not diagnostic_probe:
+            return recalled_ids, user_message
+        if isinstance(injection_debug, dict):
+            injection_debug["diagnostic_probe"] = "production-alignment"
+        return None, ""
 
     def _strip_favorite_memory_marker_from_payload(self, payload: dict) -> tuple[dict, bool]:
         cleaned = deepcopy(payload)
