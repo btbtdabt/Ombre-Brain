@@ -361,7 +361,9 @@ def test_portrait_cleanup_preserves_real_segment_in_mixed_handoff() -> None:
 
 def test_legacy_bucket_cleanup_uses_hard_delete_and_removes_projections(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.delenv("OMBRE_EMBED_API_KEY", raising=False)
     buckets_dir = tmp_path / "buckets"
     state_dir = tmp_path / "state"
     archive_dir = buckets_dir / "archive"
@@ -391,7 +393,7 @@ def test_legacy_bucket_cleanup_uses_hard_delete_and_removes_projections(
             {
                 "buckets_dir": str(buckets_dir),
                 "state_dir": str(state_dir),
-                "embedding": {"enabled": False},
+                "embedding": {"enabled": True, "api_key": ""},
                 "identity_semantics": {"enabled": False},
                 "word_map": {"enabled": False},
             }

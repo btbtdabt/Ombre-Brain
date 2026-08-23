@@ -776,7 +776,12 @@ async def apply_bucket_cleanup(
     config["buckets_dir"] = str(buckets_dir)
     config["state_dir"] = str(state_dir)
     config["reminder_db_path"] = str(state_dir / "reminders.sqlite")
-    config.setdefault("embedding", {})["db_path"] = str(buckets_dir / "embeddings.db")
+    embedding_config = config.get("embedding")
+    if not isinstance(embedding_config, dict):
+        embedding_config = {}
+        config["embedding"] = embedding_config
+    embedding_config["db_path"] = str(buckets_dir / "embeddings.db")
+    embedding_config["enabled"] = False
 
     embedding = EmbeddingEngine(config)
     manager = BucketManager(config, embedding_engine=embedding)
