@@ -31,6 +31,13 @@ class TraceCatalogProjection:
         if not trace_id:
             self.unknown_event_count += 1
             return
+        if event_type == "TraceHardDeleted":
+            # Hard deletion is the one lifecycle event that removes a trace
+            # from every rebuildable projection.  The append-only ledger keeps
+            # the audit event, while search/dashboard projections must not keep
+            # exposing the erased test record.
+            self.traces.pop(trace_id, None)
+            return
         if event_type == "TraceCreated":
             self.traces[trace_id] = _base_trace(event)
             return

@@ -103,6 +103,42 @@ def test_trace_catalog_projection_rebuilds_trace_lifecycle_from_ledger(tmp_path)
     assert b4["tombstone"] is True
 
 
+def test_trace_catalog_projection_removes_hard_deleted_test_trace(tmp_path):
+    from ombrebrain.eventsourcing.ledger_mirror import LedgerMirror
+    from ombrebrain.projection.projection_mirror import TraceCatalogProjection
+
+    ledger = LedgerMirror(tmp_path / "events.jsonl")
+    ledger.append_event(
+        event_type="TraceCreated",
+        trace_id="test-1",
+        trace_kind="dynamic",
+        payload={
+            "name": "temporary test trace",
+            "provenance": {"kind": "test", "erasable": True},
+        },
+        body="synthetic",
+    )
+    ledger.append_event(
+        event_type="TraceHardDeleted",
+        trace_id="test-1",
+        trace_kind="dynamic",
+        payload={
+            "provenance": {"kind": "test", "erasable": True},
+            "content_erased": True,
+        },
+        body="",
+    )
+
+    projection = TraceCatalogProjection()
+    projection.rebuild(ledger.iter_events())
+    report = projection.to_report(source_latest_seq=ledger.latest_seq())
+
+    assert "test-1" not in projection.traces
+    assert report["trace_count"] == 0
+    assert report["unknown_event_count"] == 0
+    assert report["applied_seq"] == 2
+
+
 def test_bucket_manager_ledger_report_includes_trace_catalog_projection(
     test_config,
     fake_embedding_engine,
