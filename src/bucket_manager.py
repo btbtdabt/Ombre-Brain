@@ -57,6 +57,7 @@ from typing import (
 )
 from ombrebrain.domain.plan_history import append_plan_change_log
 from ombrebrain.eventsourcing.footprint import FootprintSnapshot
+from known_test_data import legacy_test_bucket_identity_error
 
 # 统一错误体系：越界 clamp 时上报 OB-W001/OB-W002（rule.md §11）
 try:
@@ -3315,11 +3316,29 @@ class BucketManager:
             await self._discard_derived_index_if_terminal(bucket_id)
         return result
 
+    async def hard_delete_verified_legacy_test_bucket(
+        self,
+        bucket_id: str,
+        *,
+        reason: str,
+    ) -> dict:
+        """Erase allowlisted legacy test data without weakening stored provenance."""
+        async with self._bucket_turn(bucket_id):
+            result = await self._hard_delete_test_bucket_locked(
+                bucket_id,
+                reason=reason,
+                verify_legacy_identity=True,
+            )
+        if result.get("ok"):
+            await self._discard_derived_index_if_terminal(bucket_id)
+        return result
+
     async def _hard_delete_test_bucket_locked(
         self,
         bucket_id: str,
         *,
         reason: str = "",
+        verify_legacy_identity: bool = False,
     ) -> dict:
         file_path = self._find_bucket_file(bucket_id)
         if not file_path:
@@ -3329,10 +3348,21 @@ class BucketManager:
         except Exception as exc:
             return {"ok": False, "error": f"read_failed: {exc}"}
         provenance = post.get("provenance")
-        if not (isinstance(provenance, dict)
-                and provenance.get("kind") == "test"
-                and provenance.get("erasable") is True):
-            return {"ok": False, "error": "not_erasable_test_data"}
+        erasable_test = (
+            isinstance(provenance, dict)
+            and provenance.get("kind") == "test"
+            and provenance.get("erasable") is True
+        )
+        if not erasable_test:
+            if not verify_legacy_identity:
+                return {"ok": False, "error": "not_erasable_test_data"}
+            error = legacy_test_bucket_identity_error(
+                bucket_id,
+                dict(post.metadata),
+                post.content,
+            )
+            if error:
+                return {"ok": False, "error": error}
         normalized_reason = str(reason or "").strip()
         if not normalized_reason:
             return {"ok": False, "error": "missing_delete_reason"}

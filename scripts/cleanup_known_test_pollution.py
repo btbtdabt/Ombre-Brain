@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Remove exact, historical Codex smoke/probe data from an Ombre deployment.
 
-The command is dry-run by default.  It deliberately uses a closed manifest of
-session IDs, messages, bucket IDs, and reminder IDs instead of fuzzy matching.
-Mixed real sessions keep their ``request_rounds`` rows as ordinal fences.
+The command is dry-run by default. Apply mode is restricted to an offline,
+disposable working copy that can be discarded on any phase failure. It uses a
+closed manifest of session IDs, messages, bucket IDs, and reminder IDs instead
+of fuzzy matching. Mixed real sessions keep their ``request_rounds`` rows as
+ordinal fences.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ import json
 import os
 import re
 import sqlite3
+import stat
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -28,6 +31,11 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+
+from known_test_data import (  # noqa: E402
+    VERIFIED_LEGACY_TEST_BUCKETS,
+    legacy_test_bucket_identity_error,
+)
 
 
 HISTORICAL_PROBE_CUTOFF = "2026-08-22T00:00:00+00:00"
@@ -62,10 +70,8 @@ SYNTHETIC_SESSION_IDS = frozenset(
 )
 
 LEGACY_TEST_BUCKETS = {
-    "9eded7951adf": "CODEX_SMOKE_20260718020107_4fg3hi_GROW",
-    "50659384861b": "CODEX_SMOKE_20260718020107_4fg3hi_PLAN",
-    "9d9a75361142": "CODEX_SMOKE_20260718020107_4fg3hi_LETTER",
-    "7a52ee7090ab": "CODEX_SMOKE_20260718020107_4fg3hi_PROFILE",
+    bucket_id: identity.marker
+    for bucket_id, identity in VERIFIED_LEGACY_TEST_BUCKETS.items()
 }
 
 KNOWN_TEST_REMINDERS = {
@@ -171,6 +177,175 @@ def _quick_check(path: Path) -> str:
         return str(connection.execute("PRAGMA quick_check").fetchone()[0])
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _is_linklike(path: Path) -> bool:
+    is_junction = getattr(path, "is_junction", None)
+    return path.is_symlink() or bool(is_junction and is_junction())
+
+
+def _regular_tree_files(root: Path, *, label: str) -> dict[str, Path]:
+    if _is_linklike(root):
+        raise RuntimeError(f"{label} root must not be a link: {root}")
+    if not root.is_dir():
+        raise RuntimeError(f"{label} root is not a directory: {root}")
+    files: dict[str, Path] = {}
+    for path in root.rglob("*"):
+        relative = path.relative_to(root).as_posix()
+        if _is_linklike(path):
+            raise RuntimeError(f"{label} contains a link: {relative}")
+        if path.is_dir():
+            continue
+        try:
+            is_regular = stat.S_ISREG(path.stat(follow_symlinks=False).st_mode)
+        except OSError as exc:
+            raise RuntimeError(f"cannot inspect {label} path: {relative}") from exc
+        if not is_regular:
+            raise RuntimeError(f"{label} contains a non-regular file: {relative}")
+        files[relative] = path
+    return files
+
+
+def _paths_overlap(left: Path, right: Path) -> bool:
+    for child, parent in ((left, right), (right, left)):
+        try:
+            child.relative_to(parent)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _deployment_files(
+    buckets_dir: Path,
+    state_dir: Path,
+    config_path: Path,
+) -> dict[str, Path]:
+    if _is_linklike(config_path):
+        raise RuntimeError(f"deployment config must not be a link: {config_path}")
+    try:
+        config_regular = stat.S_ISREG(
+            config_path.stat(follow_symlinks=False).st_mode
+        )
+    except OSError as exc:
+        raise RuntimeError(f"cannot inspect deployment config: {config_path}") from exc
+    if not config_regular:
+        raise RuntimeError(f"deployment config is not a regular file: {config_path}")
+    files: dict[str, Path] = {"config.yaml": config_path}
+    for prefix, root in (("buckets", buckets_dir), ("state", state_dir)):
+        for relative, path in _regular_tree_files(
+            root,
+            label=f"deployment {prefix}",
+        ).items():
+            files[f"{prefix}/{relative}"] = path
+    return files
+
+
+def validate_backup_manifest(
+    manifest_path: Path,
+    buckets_dir: Path,
+    state_dir: Path,
+    config_path: Path,
+) -> dict[str, Any]:
+    """Verify a complete, byte-identical rollback copy before any mutation."""
+    manifest_path = manifest_path.absolute()
+    if _is_linklike(manifest_path) or _is_linklike(manifest_path.parent):
+        raise RuntimeError("backup manifest and root must not be links")
+    manifest_path = manifest_path.resolve()
+    backup_root = manifest_path.parent.resolve()
+    if not manifest_path.is_file():
+        raise RuntimeError(f"backup manifest not found: {manifest_path}")
+    for label, target in (
+        ("buckets", buckets_dir),
+        ("state", state_dir),
+        ("config", config_path),
+    ):
+        if _paths_overlap(target.resolve(), backup_root):
+            raise RuntimeError(
+                f"cleanup target {label} must be separate from backup root"
+            )
+
+    expected: dict[str, str] = {}
+    pattern = re.compile(r"^([0-9a-fA-F]{64}) [ *](.+)$")
+    for line_number, raw_line in enumerate(
+        manifest_path.read_text(encoding="utf-8").splitlines(),
+        start=1,
+    ):
+        if not raw_line.strip():
+            continue
+        match = pattern.fullmatch(raw_line)
+        if not match:
+            raise RuntimeError(f"invalid backup manifest line {line_number}")
+        relative = match.group(2).replace("\\", "/")
+        while relative.startswith("./"):
+            relative = relative[2:]
+        if not relative or relative == manifest_path.name or relative in expected:
+            raise RuntimeError(f"invalid or duplicate backup path: {relative!r}")
+        candidate = (backup_root / relative).resolve()
+        try:
+            candidate.relative_to(backup_root)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"backup path escapes manifest root: {relative!r}"
+            ) from exc
+        if not candidate.is_file():
+            raise RuntimeError(f"backup file missing: {relative}")
+        expected[relative] = match.group(1).lower()
+
+    backup_files = _regular_tree_files(backup_root, label="backup")
+    backup_files.pop(manifest_path.name, None)
+    if set(backup_files) != set(expected):
+        missing = sorted(set(backup_files) - set(expected))
+        stale = sorted(set(expected) - set(backup_files))
+        raise RuntimeError(
+            "backup manifest coverage mismatch: "
+            f"unlisted={missing[:5]} stale={stale[:5]}"
+        )
+    for relative, path in backup_files.items():
+        if _sha256_file(path) != expected[relative]:
+            raise RuntimeError(f"backup checksum mismatch: {relative}")
+
+    sqlite_quick_check: dict[str, str] = {}
+    for relative, path in backup_files.items():
+        if path.suffix.lower() not in {".db", ".sqlite", ".sqlite3"}:
+            continue
+        try:
+            result = _quick_check(path)
+        except sqlite3.DatabaseError as exc:
+            raise RuntimeError(
+                f"backup SQLite quick_check failed: {relative}: {exc}"
+            ) from exc
+        if result.lower() != "ok":
+            raise RuntimeError(
+                f"backup SQLite quick_check failed: {relative}: {result}"
+            )
+        sqlite_quick_check[relative] = result
+
+    current_files = _deployment_files(buckets_dir, state_dir, config_path)
+    if set(current_files) != set(expected):
+        added = sorted(set(current_files) - set(expected))
+        missing = sorted(set(expected) - set(current_files))
+        raise RuntimeError(
+            "backup does not match current deployment files: "
+            f"added={added[:5]} missing={missing[:5]}"
+        )
+    for relative, path in current_files.items():
+        if _sha256_file(path) != expected[relative]:
+            raise RuntimeError(f"current file differs from backup: {relative}")
+    return {
+        "verified": True,
+        "file_count": len(expected),
+        "manifest": str(manifest_path),
+        "sqlite_quick_check": sqlite_quick_check,
+    }
+
+
 def _parse_time(value: str) -> datetime | None:
     try:
         parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
@@ -257,24 +432,48 @@ def _turn_keys(turns: Iterable[TestTurn]) -> set[tuple[str, int]]:
 
 
 def discover_raw_events(raw_db: Path, turns: list[TestTurn]) -> list[int]:
-    profile_keys = {
-        (turn.profile_id, turn.session_id, turn.round_id)
-        for turn in turns
-    }
+    expected_events: dict[str, tuple[str, str, str, str, int]] = {}
+    for turn in turns:
+        base = f"{turn.profile_id}:{turn.session_id}:{turn.round_id}"
+        if turn.user_text:
+            expected_events[f"{base}:user"] = (
+                "user",
+                turn.user_text,
+                turn.profile_id,
+                turn.session_id,
+                turn.round_id,
+            )
+        if turn.assistant_text:
+            expected_events[f"{base}:assistant"] = (
+                "assistant",
+                turn.assistant_text,
+                turn.profile_id,
+                turn.session_id,
+                turn.round_id,
+            )
     target_ids: list[int] = []
     with _connect(raw_db, read_only=True) as connection:
         rows = connection.execute(
             """
-            SELECT id, source, source_event_id, session_id, metadata_json
+            SELECT id, source, source_event_id, role, text, session_id, metadata_json
             FROM raw_events
             ORDER BY id
             """
         ).fetchall()
     for row in rows:
-        session_id = str(row["session_id"] or "")
-        if session_id in SYNTHETIC_SESSION_IDS:
-            target_ids.append(int(row["id"]))
+        if str(row["source"] or "") != "gateway":
             continue
+        source_event_id = str(row["source_event_id"] or "")
+        expected = expected_events.get(source_event_id)
+        if expected is None:
+            continue
+        (
+            expected_role,
+            expected_text,
+            expected_profile,
+            expected_session,
+            expected_round,
+        ) = expected
         try:
             metadata = json.loads(row["metadata_json"] or "{}")
         except (TypeError, json.JSONDecodeError):
@@ -285,8 +484,19 @@ def discover_raw_events(raw_db: Path, turns: list[TestTurn]) -> list[int]:
         except (TypeError, ValueError):
             round_id = -1
         profile_id = str(metadata.get("profile_id") or "")
-        if (profile_id, session_id, round_id) in profile_keys:
-            target_ids.append(int(row["id"]))
+        actual = (
+            str(row["role"] or ""),
+            str(row["text"] or ""),
+            profile_id,
+            str(row["session_id"] or ""),
+            round_id,
+        )
+        if actual != expected:
+            raise RuntimeError(
+                "raw gateway event identity collision for "
+                f"source_event_id={source_event_id!r}"
+            )
+        target_ids.append(int(row["id"]))
     return target_ids
 
 
@@ -530,14 +740,18 @@ def discover_legacy_test_buckets(buckets_dir: Path) -> list[str]:
         bucket_id = str(post.get("id") or "")
         if bucket_id in LEGACY_TEST_BUCKETS:
             files_by_id[bucket_id] = path
-    for bucket_id, marker in LEGACY_TEST_BUCKETS.items():
+    for bucket_id in LEGACY_TEST_BUCKETS:
         path = files_by_id.get(bucket_id)
         if not path:
             continue
         post = frontmatter.load(path)
-        text = f"{dict(post.metadata)}\n{post.content}"
-        if marker not in text and "CODEX_SMOKE_20260718020107_4fg3hi" not in text:
-            raise RuntimeError(f"bucket {bucket_id} no longer matches its test marker")
+        error = legacy_test_bucket_identity_error(
+            bucket_id,
+            dict(post.metadata),
+            post.content,
+        )
+        if error:
+            raise RuntimeError(f"bucket {bucket_id} identity mismatch: {error}")
         found.append(bucket_id)
     return found
 
@@ -642,17 +856,32 @@ def apply_gateway_cleanup(gateway_db: Path, turns: list[TestTurn]) -> dict[str, 
     return counts
 
 
-def apply_raw_cleanup(raw_db: Path, ids: list[int]) -> dict[str, int]:
+def apply_raw_cleanup(raw_db: Path, ids: list[int]) -> dict[str, int | None]:
     with _connect(raw_db) as connection:
         connection.execute("BEGIN IMMEDIATE")
         deleted = _delete_ids(connection, "raw_events", ids)
-        connection.execute("INSERT INTO raw_events_fts(raw_events_fts) VALUES('rebuild')")
-        base_count = int(connection.execute("SELECT COUNT(*) FROM raw_events").fetchone()[0])
-        fts_count = int(connection.execute("SELECT COUNT(*) FROM raw_events_fts").fetchone()[0])
-        if base_count != fts_count:
-            raise RuntimeError(
-                f"raw FTS rebuild mismatch: raw_events={base_count}, raw_events_fts={fts_count}"
+        fts_exists = connection.execute(
+            """
+            SELECT 1 FROM sqlite_master
+            WHERE type = 'table' AND name = 'raw_events_fts'
+            """
+        ).fetchone()
+        fts_count: int | None = None
+        if fts_exists:
+            connection.execute(
+                "INSERT INTO raw_events_fts(raw_events_fts) VALUES('rebuild')"
             )
+            base_count = int(
+                connection.execute("SELECT COUNT(*) FROM raw_events").fetchone()[0]
+            )
+            fts_count = int(
+                connection.execute("SELECT COUNT(*) FROM raw_events_fts").fetchone()[0]
+            )
+            if base_count != fts_count:
+                raise RuntimeError(
+                    "raw FTS rebuild mismatch: "
+                    f"raw_events={base_count}, raw_events_fts={fts_count}"
+                )
     return {"raw_events": deleted, "raw_events_fts": fts_count}
 
 
@@ -728,19 +957,6 @@ def apply_reminder_cleanup(path: Path, reminder_ids: list[str]) -> int:
         return _delete_ids(connection, "reminders", reminder_ids)
 
 
-def _atomic_write_text(path: Path, text: str) -> None:
-    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
-
-
 def _legacy_bucket_paths(buckets_dir: Path) -> dict[str, Path]:
     result: dict[str, Path] = {}
     for path in buckets_dir.rglob("*.md"):
@@ -752,6 +968,31 @@ def _legacy_bucket_paths(buckets_dir: Path) -> dict[str, Path]:
         if bucket_id in LEGACY_TEST_BUCKETS:
             result[bucket_id] = path
     return result
+
+
+def _ledger_integrity_failures(report: dict[str, Any]) -> list[str]:
+    failures: list[str] = []
+    if report.get("ok") is not True:
+        failures.append("ledger")
+    for key in ("formal_invariants", "replay"):
+        component = report.get(key)
+        if not isinstance(component, dict) or component.get("ok") is not True:
+            failures.append(key)
+    for key in (
+        "trace_catalog_projection",
+        "sqlite_projection",
+        "vector_projection",
+    ):
+        component = report.get(key)
+        if not isinstance(component, dict):
+            failures.append(key)
+            continue
+        if component.get("ok") is False or component.get("error_type"):
+            failures.append(key)
+            continue
+        if int(component.get("lag", 0) or 0) != 0:
+            failures.append(f"{key}:lag")
+    return failures
 
 
 async def apply_bucket_cleanup(
@@ -805,14 +1046,7 @@ async def apply_bucket_cleanup(
             path = paths.get(bucket_id)
             if not path:
                 continue
-            post = frontmatter.load(path)
-            post["provenance"] = {
-                "kind": "test",
-                "created_by": str(post.get("source_tool") or "legacy_smoke"),
-                "erasable": True,
-            }
-            _atomic_write_text(path, frontmatter.dumps(post))
-            result = await manager.hard_delete_test_bucket(
+            result = await manager.hard_delete_verified_legacy_test_bucket(
                 bucket_id,
                 reason="Remove verified historical Codex smoke-test data",
             )
@@ -837,11 +1071,18 @@ async def apply_bucket_cleanup(
             ]
         )
         report = manager.ledger_integrity_report(rebuild_projections=True)
+        integrity_failures = _ledger_integrity_failures(report)
+        if integrity_failures:
+            raise RuntimeError(
+                "bucket ledger/projection integrity failed: "
+                + ", ".join(integrity_failures)
+            )
     finally:
         await embedding.aclose()
     return {
         "deleted": deleted,
-        "ledger_ok": bool(report.get("ok", True)),
+        "ledger_ok": True,
+        "integrity_failures": [],
         "projection": report.get("sqlite_projection", {}),
         "identity_semantics": identity_report,
         "word_map": word_map_report,
@@ -871,8 +1112,30 @@ async def run(args: argparse.Namespace) -> int:
     buckets_dir = Path(args.buckets_dir).resolve()
     state_dir = Path(args.state_dir).resolve()
     config_path = Path(args.config).resolve()
+    backup_report: dict[str, Any] | None = None
+    if args.apply:
+        if args.confirm != "CLEAN KNOWN TEST POLLUTION":
+            raise RuntimeError("--confirm must equal CLEAN KNOWN TEST POLLUTION")
+        if args.offline_confirm != "RUNTIME STOPPED":
+            raise RuntimeError("--offline-confirm must equal RUNTIME STOPPED")
+        if args.working_copy_confirm != "DISPOSABLE COPY":
+            raise RuntimeError(
+                "--working-copy-confirm must equal DISPOSABLE COPY"
+            )
+        if not args.backup_manifest:
+            raise RuntimeError("--backup-manifest is required with --apply")
+        backup_report = validate_backup_manifest(
+            Path(args.backup_manifest),
+            buckets_dir,
+            state_dir,
+            config_path,
+        )
+
     plan = build_plan(buckets_dir, state_dir)
-    report: dict[str, Any] = {"mode": "apply" if args.apply else "dry-run", "plan": plan.report()}
+    report: dict[str, Any] = {
+        "mode": "apply" if args.apply else "dry-run",
+        "plan": plan.report(),
+    }
 
     if args.expect_main_turns is not None:
         actual = sum(1 for turn in plan.turns if turn.session_id == "main")
@@ -884,8 +1147,17 @@ async def run(args: argparse.Namespace) -> int:
     if not args.apply:
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0
-    if args.confirm != "CLEAN KNOWN TEST POLLUTION":
-        raise RuntimeError("--confirm must equal CLEAN KNOWN TEST POLLUTION")
+    # Recheck every byte after planning. Combined with the explicit offline
+    # contract, this prevents applying a plan captured from a moving runtime.
+    post_plan_backup = validate_backup_manifest(
+        Path(args.backup_manifest),
+        buckets_dir,
+        state_dir,
+        config_path,
+    )
+    if post_plan_backup != backup_report:
+        raise RuntimeError("backup verification changed during cleanup planning")
+    report["backup"] = post_plan_backup
 
     report["gateway"] = apply_gateway_cleanup(
         buckets_dir / "gateway_state.db",
@@ -914,6 +1186,10 @@ async def run(args: argparse.Namespace) -> int:
         config_path,
         plan.legacy_bucket_ids,
     )
+    if report["buckets"].get("ledger_ok") is not True or report[
+        "buckets"
+    ].get("integrity_failures"):
+        raise RuntimeError("bucket cleanup did not pass integrity verification")
     report["verification"] = verify_clean(buckets_dir, state_dir)
     remaining = report["verification"]
     if any(
@@ -941,6 +1217,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", required=True)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--confirm", default="")
+    parser.add_argument("--offline-confirm", default="")
+    parser.add_argument("--working-copy-confirm", default="")
+    parser.add_argument("--backup-manifest")
     parser.add_argument("--expect-main-turns", type=int)
     return parser.parse_args(argv)
 

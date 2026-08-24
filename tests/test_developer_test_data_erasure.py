@@ -1,6 +1,7 @@
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import frontmatter
 import pytest
 
 import tools._runtime as rt
@@ -42,6 +43,57 @@ async def test_only_creation_marked_test_bucket_can_be_hard_deleted(bucket_mgr):
     assert erased == {"ok": True, "deleted": test_id}
     assert not erased_path.exists()
     assert await bucket_mgr.get(test_id) is None
+
+
+@pytest.mark.asyncio
+async def test_legacy_test_cleanup_refuses_non_allowlisted_bucket_without_rewrite(
+    bucket_mgr,
+):
+    marker = "CODEX_SMOKE_20260718020107_4fg3hi_GROW"
+    bucket_id = await bucket_mgr.create(
+        content=f"legacy synthetic payload {marker}",
+        domain=["test"],
+        source_tool="grow",
+    )
+    bucket = await bucket_mgr.get(bucket_id)
+    bucket_path = Path(bucket["path"])
+    before = bucket_path.read_bytes()
+
+    refused = await bucket_mgr.hard_delete_verified_legacy_test_bucket(
+        bucket_id,
+        reason="historical cleanup",
+    )
+
+    assert refused == {"ok": False, "error": "not_verified_legacy_test_data"}
+    assert bucket_path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_legacy_test_cleanup_rejects_allowlisted_id_with_borrowed_marker(
+    bucket_mgr,
+):
+    bucket_id = "9eded7951adf"
+    marker = "CODEX_SMOKE_20260718020107_4fg3hi_GROW"
+    bucket_path = Path(bucket_mgr.dynamic_dir) / f"borrowed_{bucket_id}.md"
+    post = frontmatter.Post(
+        f"A normal bucket merely quoting {marker}",
+        id=bucket_id,
+        name="borrowed marker",
+        type="dynamic",
+        domain=["test"],
+        tags=["codex_smoke", "grow_test"],
+        source_tool="grow",
+    )
+    bucket_path.write_text(frontmatter.dumps(post), encoding="utf-8")
+    before = bucket_path.read_bytes()
+
+    refused = await bucket_mgr.hard_delete_verified_legacy_test_bucket(
+        bucket_id,
+        reason="historical cleanup",
+    )
+
+    assert refused == {"ok": False, "error": "legacy_test_content_mismatch"}
+    assert bucket_path.read_bytes() == before
 
 
 @pytest.mark.asyncio

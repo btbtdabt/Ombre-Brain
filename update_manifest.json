@@ -147,8 +147,8 @@
     },
     {
       "path": "src/bucket_manager.py",
-      "sha256": "4fad25c2e52624699257ed9dc975a8810441487c357bf710fcf432fc36c1a061",
-      "size": 245287
+      "sha256": "02f1a7829c98804cf9af5c4f43eb62836f813b64826cc8d09523cb9a7def7788",
+      "size": 246310
     },
     {
       "path": "src/config_diagnostics.py",
@@ -259,6 +259,11 @@
       "path": "src/import_memory.py",
       "sha256": "c150ca6ef441b145ceca4cd776a8e392362e88f2702c890cb3263f59612515c4",
       "size": 138480
+    },
+    {
+      "path": "src/known_test_data.py",
+      "sha256": "7a60b117a914bdd51f3955231809b89404c22a599a31f54c5ba90e46e2b48ea7",
+      "size": 2494
     },
     {
       "path": "src/letter_service.py",

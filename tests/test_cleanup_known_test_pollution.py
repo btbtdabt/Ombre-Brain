@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import os
+import shutil
 import sqlite3
 from pathlib import Path
 
@@ -10,25 +13,75 @@ import pytest
 import yaml
 
 from gateway_state import GatewayStateStore
+from known_test_data import legacy_test_bucket_identity_error
+from ombrebrain.eventsourcing.ledger_mirror import LedgerMirror
 from persona_engine import PersonaStateEngine
 from raw_events import RawEventStore
 from scripts.cleanup_known_test_pollution import (
     LEGACY_TEST_BUCKETS,
     CleanupPlan,
     TestTurn as CleanupTestTurn,
+    _ledger_integrity_failures,
     apply_bucket_cleanup,
     apply_gateway_cleanup,
     apply_persona_cleanup,
     apply_raw_cleanup,
     discover_gateway_turns,
+    discover_legacy_test_buckets,
     discover_persona_targets,
     discover_raw_events,
     is_historical_probe_text,
     scrub_portrait_state,
+    validate_backup_manifest,
 )
 
 
 TARGET_TIME = "2026-08-01T12:00:00+00:00"
+
+
+def _write_sha256_manifest(backup: Path) -> Path:
+    manifest_path = backup / "MANIFEST.sha256"
+    lines = []
+    for path in sorted(
+        candidate
+        for candidate in backup.rglob("*")
+        if candidate.is_file() and candidate != manifest_path
+    ):
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        lines.append(f"{digest}  ./{path.relative_to(backup).as_posix()}")
+    manifest_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return manifest_path
+
+
+def _legacy_grow_post(*, extra_metadata: dict | None = None) -> frontmatter.Post:
+    marker = LEGACY_TEST_BUCKETS["9eded7951adf"]
+    metadata = {
+        "activation_count": 1.0,
+        "arousal": 0.1,
+        "created": "2026-07-18T02:02:59",
+        "deleted_at": "2026-07-18T02:05:49",
+        "domain": ["test"],
+        "erasure_mode": "tombstone_only",
+        "grow_batch_id": "g_d2b0c747528a",
+        "id": "9eded7951adf",
+        "importance": 1,
+        "last_active": "2026-07-18T02:03:08",
+        "name": f"2026-07-18 02-02-59 Codex grow {marker}",
+        "source_tool": "grow",
+        "tags": ["codex_smoke", "grow_test"],
+        "tombstone": True,
+        "tombstoned_at": "2026-07-18T02:05:49",
+        "type": "dynamic",
+        "valence": 0.5,
+    }
+    metadata.update(extra_metadata or {})
+    return frontmatter.Post(
+        (
+            f"{marker}。这是 grow(items) 创建的临时 smoke-test 条目，"
+            "不是真实经历。"
+        ),
+        **metadata,
+    )
 
 
 def _insert_gateway_round(
@@ -80,6 +133,31 @@ def test_probe_recognition_is_closed_and_exact() -> None:
     assert is_historical_probe_text("opus5 budget probe 7: reply ok only")
     assert not is_historical_probe_text("please run an alignment check")
     assert not is_historical_probe_text("reply ok only after reading this real request")
+
+
+def test_bucket_integrity_gate_rejects_failed_projection() -> None:
+    healthy = {
+        "ok": True,
+        "formal_invariants": {"ok": True},
+        "replay": {"ok": True},
+        "trace_catalog_projection": {"lag": 0},
+        "sqlite_projection": {"lag": 0},
+        "vector_projection": {"lag": 0},
+    }
+    assert _ledger_integrity_failures(healthy) == []
+
+    failed = dict(healthy)
+    failed["sqlite_projection"] = {"ok": False, "error_type": "DatabaseError"}
+    assert _ledger_integrity_failures(failed) == ["sqlite_projection"]
+
+
+def test_legacy_bucket_identity_rejects_extra_frontmatter() -> None:
+    post = _legacy_grow_post(extra_metadata={"unexpected": "not historical"})
+    assert legacy_test_bucket_identity_error(
+        "9eded7951adf",
+        dict(post.metadata),
+        post.content,
+    ) == "legacy_test_metadata_mismatch"
 
 
 def test_gateway_cleanup_keeps_main_round_fences_and_real_turns(tmp_path: Path) -> None:
@@ -197,6 +275,20 @@ def test_raw_cleanup_removes_paired_events_and_rebuilds_fts(tmp_path: Path) -> N
         source="gateway",
     )
     assert result["inserted"] == 3
+    unrelated = store.ingest(
+        [
+            {
+                "source_event_id": "amy:main:2:user",
+                "role": "user",
+                "text": "same identifier from a different source",
+                "created_at": TARGET_TIME,
+                "session_id": "main",
+                "metadata": metadata,
+            }
+        ],
+        source="manual_import",
+    )
+    assert unrelated["inserted"] == 1
     turn = CleanupTestTurn(
         row_id=1,
         profile_id="amy",
@@ -214,9 +306,262 @@ def test_raw_cleanup_removes_paired_events_and_rebuilds_fts(tmp_path: Path) -> N
     assert report["raw_events"] == 2
     with sqlite3.connect(db_path) as connection:
         assert connection.execute("SELECT text FROM raw_events").fetchall() == [
+            ("real retained event",),
+            ("same identifier from a different source",),
+        ]
+        assert connection.execute("SELECT COUNT(*) FROM raw_events_fts").fetchone()[0] == 2
+
+
+def test_raw_discovery_rejects_exact_source_event_identity_collision(
+    tmp_path: Path,
+) -> None:
+    config = {
+        "buckets_dir": str(tmp_path / "buckets"),
+        "state_dir": str(tmp_path / "state"),
+    }
+    store = RawEventStore(config)
+    store.ingest(
+        [
+            {
+                "source_event_id": "amy:main:2:user",
+                "role": "user",
+                "text": "different text",
+                "created_at": TARGET_TIME,
+                "session_id": "main",
+                "metadata": {"profile_id": "amy", "round_id": 2},
+            }
+        ],
+        source="gateway",
+    )
+    turn = CleanupTestTurn(
+        row_id=1,
+        profile_id="amy",
+        session_id="main",
+        round_id=2,
+        created_at=TARGET_TIME,
+        user_text="alignment check 2: reply ok only",
+        assistant_text="",
+    )
+
+    with pytest.raises(RuntimeError, match="identity collision"):
+        discover_raw_events(Path(store.db_path), [turn])
+
+
+def test_raw_cleanup_supports_sqlite_without_fts5(tmp_path: Path) -> None:
+    config = {
+        "buckets_dir": str(tmp_path / "buckets"),
+        "state_dir": str(tmp_path / "state"),
+    }
+    store = RawEventStore(config)
+    store.ingest(
+        [
+            {
+                "source_event_id": "amy:main:2:user",
+                "role": "user",
+                "text": "alignment check 2: reply ok only",
+                "created_at": TARGET_TIME,
+                "session_id": "main",
+                "metadata": {"profile_id": "amy", "round_id": 2},
+            },
+            {
+                "source_event_id": "amy:main:3:user",
+                "role": "user",
+                "text": "real retained event",
+                "created_at": TARGET_TIME,
+                "session_id": "main",
+                "metadata": {"profile_id": "amy", "round_id": 3},
+            },
+        ],
+        source="gateway",
+    )
+    db_path = Path(store.db_path)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("DROP TABLE raw_events_fts")
+    turn = CleanupTestTurn(
+        row_id=1,
+        profile_id="amy",
+        session_id="main",
+        round_id=2,
+        created_at=TARGET_TIME,
+        user_text="alignment check 2: reply ok only",
+        assistant_text="",
+    )
+
+    report = apply_raw_cleanup(db_path, discover_raw_events(db_path, [turn]))
+
+    assert report == {"raw_events": 1, "raw_events_fts": None}
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("SELECT text FROM raw_events").fetchall() == [
             ("real retained event",)
         ]
-        assert connection.execute("SELECT COUNT(*) FROM raw_events_fts").fetchone()[0] == 1
+
+
+def test_backup_manifest_must_match_complete_current_deployment(
+    tmp_path: Path,
+) -> None:
+    current = tmp_path / "current"
+    buckets_dir = current / "buckets"
+    state_dir = current / "state"
+    buckets_dir.mkdir(parents=True)
+    state_dir.mkdir(parents=True)
+    config_path = current / "config.yaml"
+    config_path.write_text("gateway: {}\n", encoding="utf-8")
+    (buckets_dir / "memory.md").write_text("memory\n", encoding="utf-8")
+    (state_dir / "state.json").write_text('{"ok": true}\n', encoding="utf-8")
+    with sqlite3.connect(state_dir / "healthy.sqlite") as connection:
+        connection.execute("CREATE TABLE health (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO health VALUES ('ok')")
+
+    backup = tmp_path / "backup"
+    shutil.copytree(buckets_dir, backup / "buckets")
+    shutil.copytree(state_dir, backup / "state")
+    shutil.copy2(config_path, backup / "config.yaml")
+    manifest_path = _write_sha256_manifest(backup)
+
+    report = validate_backup_manifest(
+        manifest_path,
+        buckets_dir,
+        state_dir,
+        config_path,
+    )
+    assert report["verified"] is True
+    assert report["file_count"] == 4
+    assert report["sqlite_quick_check"] == {"state/healthy.sqlite": "ok"}
+
+    with pytest.raises(RuntimeError, match="must be separate from backup root"):
+        validate_backup_manifest(
+            manifest_path,
+            backup / "buckets",
+            backup / "state",
+            backup / "config.yaml",
+        )
+
+    (state_dir / "state.json").write_text('{"ok": false}\n', encoding="utf-8")
+    with pytest.raises(RuntimeError, match="current file differs from backup"):
+        validate_backup_manifest(
+            manifest_path,
+            buckets_dir,
+            state_dir,
+            config_path,
+        )
+
+
+def test_backup_manifest_rejects_corrupt_sqlite_copy(tmp_path: Path) -> None:
+    buckets_dir = tmp_path / "current" / "buckets"
+    state_dir = tmp_path / "current" / "state"
+    buckets_dir.mkdir(parents=True)
+    state_dir.mkdir(parents=True)
+    config_path = tmp_path / "current" / "config.yaml"
+    config_path.write_text("gateway: {}\n", encoding="utf-8")
+    (state_dir / "corrupt.sqlite").write_bytes(b"not a sqlite database")
+
+    backup = tmp_path / "backup"
+    shutil.copytree(buckets_dir, backup / "buckets")
+    shutil.copytree(state_dir, backup / "state")
+    shutil.copy2(config_path, backup / "config.yaml")
+    manifest_path = _write_sha256_manifest(backup)
+
+    with pytest.raises(RuntimeError, match="SQLite quick_check failed"):
+        validate_backup_manifest(
+            manifest_path,
+            buckets_dir,
+            state_dir,
+            config_path,
+        )
+
+
+def test_backup_manifest_rejects_unsafe_or_incomplete_entries(tmp_path: Path) -> None:
+    buckets_dir = tmp_path / "current" / "buckets"
+    state_dir = tmp_path / "current" / "state"
+    buckets_dir.mkdir(parents=True)
+    state_dir.mkdir(parents=True)
+    config_path = tmp_path / "current" / "config.yaml"
+    config_path.write_text("gateway: {}\n", encoding="utf-8")
+    (buckets_dir / "memory.md").write_text("memory\n", encoding="utf-8")
+
+    backup = tmp_path / "backup"
+    shutil.copytree(buckets_dir, backup / "buckets")
+    shutil.copytree(state_dir, backup / "state")
+    shutil.copy2(config_path, backup / "config.yaml")
+    manifest_path = _write_sha256_manifest(backup)
+    original_manifest = manifest_path.read_text(encoding="utf-8")
+    first_line = original_manifest.splitlines()[0]
+
+    manifest_path.write_text(
+        f"{original_manifest}{first_line}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="duplicate backup path"):
+        validate_backup_manifest(
+            manifest_path,
+            buckets_dir,
+            state_dir,
+            config_path,
+        )
+
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside\n", encoding="utf-8")
+    outside_digest = hashlib.sha256(outside.read_bytes()).hexdigest()
+    manifest_path.write_text(
+        f"{outside_digest}  ../outside.txt\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="escapes manifest root"):
+        validate_backup_manifest(
+            manifest_path,
+            buckets_dir,
+            state_dir,
+            config_path,
+        )
+
+    manifest_path.write_text(original_manifest, encoding="utf-8")
+    (backup / "config.yaml").write_text("changed: true\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="backup checksum mismatch"):
+        validate_backup_manifest(
+            manifest_path,
+            buckets_dir,
+            state_dir,
+            config_path,
+        )
+
+    shutil.copy2(config_path, backup / "config.yaml")
+    (backup / "unlisted.txt").write_text("unlisted\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="coverage mismatch"):
+        validate_backup_manifest(
+            manifest_path,
+            buckets_dir,
+            state_dir,
+            config_path,
+        )
+
+
+def test_backup_manifest_rejects_symlink_backed_copy(tmp_path: Path) -> None:
+    buckets_dir = tmp_path / "current" / "buckets"
+    state_dir = tmp_path / "current" / "state"
+    buckets_dir.mkdir(parents=True)
+    state_dir.mkdir(parents=True)
+    config_path = tmp_path / "current" / "config.yaml"
+    config_path.write_text("gateway: {}\n", encoding="utf-8")
+
+    backup = tmp_path / "backup"
+    shutil.copytree(buckets_dir, backup / "buckets")
+    shutil.copytree(state_dir, backup / "state")
+    shutil.copy2(config_path, backup / "config.yaml")
+    outside = tmp_path / "outside.md"
+    outside.write_text("not self-contained\n", encoding="utf-8")
+    try:
+        os.symlink(outside, backup / "buckets" / "linked.md")
+    except OSError:
+        pytest.skip("file symlinks are unavailable in this test environment")
+    manifest_path = _write_sha256_manifest(backup)
+
+    with pytest.raises(RuntimeError, match="backup contains a link"):
+        validate_backup_manifest(
+            manifest_path,
+            buckets_dir,
+            state_dir,
+            config_path,
+        )
 
 
 def test_persona_cleanup_preserves_global_state_and_resets_exact_transient(
@@ -371,19 +716,25 @@ def test_legacy_bucket_cleanup_uses_hard_delete_and_removes_projections(
     archive_dir.mkdir(parents=True)
     tombstone_dir.mkdir(parents=True)
     state_dir.mkdir(parents=True)
-    bucket_id = next(iter(LEGACY_TEST_BUCKETS))
-    marker = LEGACY_TEST_BUCKETS[bucket_id]
-    post = frontmatter.Post(
-        f"legacy synthetic body {marker}",
-        id=bucket_id,
-        name=f"legacy synthetic {marker}",
-        type="dynamic",
-        domain=["test"],
-        tags=["test"],
-        source_tool="grow",
-    )
+    bucket_id = "9eded7951adf"
+    post = _legacy_grow_post()
     bucket_path = archive_dir / f"legacy_{bucket_id}.md"
     bucket_path.write_text(frontmatter.dumps(post), encoding="utf-8")
+    ledger = LedgerMirror(buckets_dir / "_ledger" / "events.jsonl")
+    ledger.append_event(
+        event_type="TraceCreated",
+        trace_id=bucket_id,
+        trace_kind="dynamic",
+        payload={"type": "dynamic"},
+        body=post.content,
+    )
+    ledger.append_event(
+        event_type="TraceDeletedToArchive",
+        trace_id=bucket_id,
+        trace_kind="dynamic",
+        payload={"tombstone": True},
+        body="",
+    )
     (tombstone_dir / f"{bucket_id}.json").write_text(
         json.dumps({"id": bucket_id}), encoding="utf-8"
     )
@@ -419,3 +770,24 @@ def test_legacy_bucket_cleanup_uses_hard_delete_and_removes_projections(
         assert connection.execute(
             "SELECT COUNT(*) FROM traces WHERE trace_id = ?", (bucket_id,)
         ).fetchone()[0] == 0
+
+
+def test_legacy_bucket_discovery_requires_exact_per_bucket_marker(
+    tmp_path: Path,
+) -> None:
+    buckets_dir = tmp_path / "buckets"
+    buckets_dir.mkdir()
+    bucket_id = next(iter(LEGACY_TEST_BUCKETS))
+    post = frontmatter.Post(
+        "CODEX_SMOKE_20260718020107_4fg3hi_UNKNOWN",
+        id=bucket_id,
+        name="broad marker collision",
+        type="dynamic",
+    )
+    (buckets_dir / f"{bucket_id}.md").write_text(
+        frontmatter.dumps(post),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="identity mismatch"):
+        discover_legacy_test_buckets(buckets_dir)
