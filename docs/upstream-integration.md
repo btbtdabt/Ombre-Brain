@@ -172,8 +172,21 @@ Local candidate verification:
   and native Gemini 3.7 all returned 200. Embedding and SiliconFlow reranking
   returned 200. A non-diagnostic final reply added one Persona exchange, while
   diagnostic probes correctly skipped Persona persistence.
-- Production cutover and public production-alignment verification remain
-  pending; advancing the source baseline does not claim those deployment steps.
+- Production cutover retained the prior `f33b206` Brain and Gateway containers
+  as stopped rollback assets. The pre-cutover snapshot at
+  `/srv/ombre-brain/backups/pre-bc30dbd-20260827T043653Z` contains 12 online
+  SQLite backups; all passed `PRAGMA quick_check`, and its SHA-256 manifest
+  verified before replacement.
+- Production Brain and Gateway run the same verified 3.6.3 runtime layers with
+  zero restarts. The persisted Brain code fingerprint matches the image, all 12
+  live SQLite databases pass `PRAGMA quick_check`, and fresh startup logs contain
+  no error-level entry or traceback.
+- Public Brain health/version, Dashboard compatibility routes, the 40-tool main
+  MCP surface, the three-tool Letter mirror, and `pulse` pass. The production
+  alignment suite passes Claude Opus 5 OpenAI compatibility, native Opus 5,
+  explicit 1h prompt caching, native Gemini 3.7, relay delivery, and the relay's
+  native Claude MCP tool loop. Local and VPS `config.yaml`, `.env`, and
+  `cloudflare.env` hashes match without exposing their values.
 
 ### 2026-08-20 cross-upstream tool contract parity audit
 
