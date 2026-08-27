@@ -9,6 +9,7 @@ import frontmatter
 import github_sync as github_sync_mod
 from github_sync import GitHubSync
 from ombrebrain.storage.source_store import SourceStore
+from ombrebrain.you import YouStore, validate_you_snapshot_bytes
 
 
 def _json_response(method: str, url: str, status_code: int, payload: dict) -> httpx.Response:
@@ -53,16 +54,108 @@ def test_backup_manifest_refuses_dangling_source_reference():
 
 
 @pytest.mark.asyncio
+async def test_sync_includes_transactional_you_snapshot(monkeypatch, tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    YouStore(vault).set_enabled(True, expected_revision=0)
+    sync = GitHubSync(token="token", repo="owner/repo")
+    captured = {}
+
+    async def capture(files):
+        captured.update({path: files[path] for path in files})
+        return len(files)
+
+    monkeypatch.setattr(sync, "_batch_commit", capture)
+    result = await sync.sync(str(vault))
+
+    assert result == {"ok": True, "uploaded": 1}
+    assert set(captured) == {".you/you.sqlite3"}
+    validate_you_snapshot_bytes(captured[".you/you.sqlite3"])
+
+
+@pytest.mark.asyncio
+async def test_import_restores_verified_you_snapshot(monkeypatch, tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    source_state = YouStore(source).set_enabled(True, expected_revision=0)
+    snapshot_path = tmp_path / "you-snapshot.sqlite3"
+    YouStore(source).snapshot_to(snapshot_path)
+    snapshot_data = snapshot_path.read_bytes()
+    relative = ".you/you.sqlite3"
+    manifest = {
+        "schema_version": 1,
+        "generated_at": "2026-08-18T00:00:00+00:00",
+        "file_count": 1,
+        "total_bytes": len(snapshot_data),
+        "files": [{
+            "path": relative,
+            "bytes": len(snapshot_data),
+            "sha256": hashlib.sha256(snapshot_data).hexdigest(),
+        }],
+    }
+    manifest_data = json.dumps(manifest).encode()
+    sync = GitHubSync(token="token", repo="owner/repo", path_prefix="ombre")
+
+    async def fake_request(_client, method, url, **_kwargs):
+        if url.endswith("/git/ref/heads/main"):
+            return _json_response(method, url, 200, {"object": {"sha": "head-sha"}})
+        if url.endswith("/git/commits/head-sha"):
+            return _json_response(method, url, 200, {"tree": {"sha": "tree-sha"}})
+        if url.endswith("/git/trees/tree-sha?recursive=1"):
+            return _json_response(method, url, 200, {
+                "truncated": False,
+                "tree": [
+                    {
+                        "type": "blob",
+                        "path": "ombre/_ombre_backup_manifest.json",
+                        "sha": "manifest-sha",
+                        "size": len(manifest_data),
+                    },
+                    {
+                        "type": "blob",
+                        "path": f"ombre/{relative}",
+                        "sha": "you-sha",
+                        "size": len(snapshot_data),
+                    },
+                ],
+            })
+        if url.endswith("/git/blobs/manifest-sha"):
+            return _json_response(method, url, 200, {
+                "encoding": "base64",
+                "content": base64.b64encode(manifest_data).decode(),
+            })
+        if url.endswith("/git/blobs/you-sha"):
+            return _json_response(method, url, 200, {
+                "encoding": "base64",
+                "content": base64.b64encode(snapshot_data).decode(),
+            })
+        raise AssertionError(f"Unexpected GitHub API call: {method} {url}")
+
+    monkeypatch.setattr(sync, "_request", fake_request)
+    target = tmp_path / "target"
+    result = await sync.import_from_github(str(target))
+
+    assert result["ok"] is True
+    assert result["you_restored"] is True
+    restored = YouStore(target).get_state()
+    assert restored.enabled is True
+    assert restored.scope == source_state.scope
+
+
+@pytest.mark.asyncio
 async def test_batch_commit_includes_backup_manifest_without_counting_it(monkeypatch):
     sync = GitHubSync(token="token", repo="owner/repo", branch="main", path_prefix="ombre")
     tree_payloads = []
 
-    async def fake_request(_client, method: str, url: str, *, json=None, _max_retries=4):
+    async def fake_request(
+        _client, method: str, url: str, *, json: dict | None = None, _max_retries=4
+    ):
         if method == "GET" and url.endswith("/git/ref/heads/main"):
             return _json_response(method, url, 200, {"object": {"sha": "head-sha"}})
         if method == "GET" and url.endswith("/git/commits/head-sha"):
             return _json_response(method, url, 200, {"tree": {"sha": "base-tree"}})
         if method == "POST" and url.endswith("/git/trees"):
+            assert json is not None
             tree_payloads.append(json)
             paths = {entry["path"] for entry in json["tree"]}
             if len(tree_payloads) == 1:
@@ -78,6 +171,7 @@ async def test_batch_commit_includes_backup_manifest_without_counting_it(monkeyp
             assert manifest["files"][0]["sha256"] == hashlib.sha256(b"alpha").hexdigest()
             return _json_response(method, url, 201, {"sha": "manifest-tree"})
         if method == "POST" and url.endswith("/git/commits"):
+            assert json is not None
             assert json["tree"] == "manifest-tree"
             return _json_response(method, url, 201, {"sha": "commit-sha"})
         if method == "PATCH" and url.endswith("/git/refs/heads/main"):
@@ -398,9 +492,10 @@ async def test_manifest_reader_rejects_oversized_declared_blob_before_download(
         raise AssertionError("oversized manifest must be rejected before blob download")
 
     monkeypatch.setattr(sync, "_request", unexpected_request)
-    result = await sync._read_backup_manifest_summary(
-        object(), {"sha": "manifest-sha", "size": 5}
-    )
+    async with httpx.AsyncClient() as client:
+        result = await sync._read_backup_manifest_summary(
+            client, {"sha": "manifest-sha", "size": 5}
+        )
 
     assert result["present"] is False
     assert "decoded-byte limit" in result["error"]
@@ -420,9 +515,10 @@ async def test_manifest_reader_rejects_oversized_base64_text(monkeypatch):
         )
 
     monkeypatch.setattr(sync, "_request", fake_request)
-    result = await sync._read_backup_manifest_summary(
-        object(), {"sha": "manifest-sha", "size": 1}
-    )
+    async with httpx.AsyncClient() as client:
+        result = await sync._read_backup_manifest_summary(
+            client, {"sha": "manifest-sha", "size": 1}
+        )
 
     assert result["present"] is False
     assert "base64 payload is too large" in result["error"]
@@ -441,9 +537,10 @@ async def test_manifest_reader_rejects_invalid_base64(monkeypatch):
         )
 
     monkeypatch.setattr(sync, "_request", fake_request)
-    result = await sync._read_backup_manifest_summary(
-        object(), {"sha": "manifest-sha", "size": 3}
-    )
+    async with httpx.AsyncClient() as client:
+        result = await sync._read_backup_manifest_summary(
+            client, {"sha": "manifest-sha", "size": 3}
+        )
 
     assert result["present"] is False
     assert result["error"]
@@ -467,9 +564,10 @@ async def test_manifest_reader_rejects_decoded_payload_over_limit(monkeypatch):
         )
 
     monkeypatch.setattr(sync, "_request", fake_request)
-    result = await sync._read_backup_manifest_summary(
-        object(), {"sha": "manifest-sha", "size": 3}
-    )
+    async with httpx.AsyncClient() as client:
+        result = await sync._read_backup_manifest_summary(
+            client, {"sha": "manifest-sha", "size": 3}
+        )
 
     assert result["present"] is False
     assert "decoded-byte limit" in result["error"]
@@ -626,3 +724,40 @@ def test_restore_destination_rejects_symlink_parent(tmp_path):
 
     with pytest.raises(RuntimeError, match="symbolic link"):
         GitHubSync._assert_safe_restore_destination(str(base), "linked/escape.md")
+
+
+def test_每个恢复标记都必须有人消费():
+    """`github_sync` 每返回一个 `<模块>_restored`，web 层就必须把对应的工具门同步回去。
+
+    这条守的是一个真实漏过的形状：3.5.0 给 GitHub 同步接 them 时，
+    `github_sync` 里 `result["them_restored"] = True` 写了，
+    `web/github.py` 那一侧却只处理 `you_restored`——磁盘上的开关已经恢复，
+    当前进程的工具清单还停在旧状态，要重启才对得上。
+
+    生产端本来就有测试（见上面 `you_restored is True` 那条），
+    漏的是消费端，所以这里断言的是两侧的对称性：
+    以后再加第四个模块，忘了接消费端同样会红。
+    """
+    import re
+    from pathlib import Path
+
+    repo = Path(__file__).parents[1]
+    produced = set(
+        re.findall(
+            r'result\["(\w+)_restored"\]\s*=\s*True',
+            (repo / "src" / "github_sync.py").read_text(encoding="utf-8"),
+        )
+    )
+    assert produced, "没在 github_sync.py 里找到任何恢复标记，正则该更新了"
+
+    web = (repo / "src" / "web" / "github.py").read_text(encoding="utf-8")
+    漏掉的 = [
+        模块
+        for 模块 in sorted(produced)
+        if f'result.pop("{模块}_restored"' not in web
+        or f"tool_gate={模块}_tool_gate" not in web
+    ]
+    assert not 漏掉的, (
+        f"{漏掉的} 的恢复标记没人消费：github_sync 返回了它，"
+        "但 web/github.py 没有据此同步工具门，恢复后要重启才生效。"
+    )

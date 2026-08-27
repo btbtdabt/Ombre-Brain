@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
 
 import httpx
 import pytest
@@ -28,7 +27,7 @@ def test_collect_files_keeps_paths_not_all_file_bodies(tmp_path):
     sync = GitHubSync(token="t", repo="owner/repo")
     files = sync._collect_files(str(tmp_path))
 
-    assert isinstance(files, Mapping)
+    assert isinstance(files, _LazyMarkdownFiles)
     assert set(files) == {"dynamic/a.md", "dynamic/b.md"}
     # The production mapping indexes only filesystem paths.  Reading a value
     # reflects the current file, proving collection did not cache every body.
@@ -102,15 +101,19 @@ async def test_batch_commit_bounds_each_tree_request_by_decoded_bytes(monkeypatc
     monkeypatch.setattr(github_module, "_TREE_CHUNK_BYTES", 8)
     tree_payloads: list[dict] = []
 
-    async def fake_request(_client, method, url, *, json=None, _max_retries=4):
+    async def fake_request(
+        _client, method, url, *, json: dict | None = None, _max_retries=4
+    ):
         if method == "GET" and url.endswith("/git/ref/heads/main"):
             return _response(method, url, 200, {"object": {"sha": "head"}})
         if method == "GET" and url.endswith("/git/commits/head"):
             return _response(method, url, 200, {"tree": {"sha": "base"}})
         if method == "POST" and url.endswith("/git/trees"):
+            assert json is not None
             tree_payloads.append(json)
             return _response(method, url, 201, {"sha": f"tree-{len(tree_payloads)}"})
         if method == "POST" and url.endswith("/git/commits"):
+            assert json is not None
             assert json["tree"] == "tree-3"
             return _response(method, url, 201, {"sha": "commit"})
         if method == "PATCH" and url.endswith("/git/refs/heads/main"):
@@ -195,7 +198,7 @@ async def test_manifest_payload_limit_fails_before_any_tree_write(monkeypatch):
 @pytest.mark.asyncio
 async def test_manual_and_scheduled_syncs_cannot_overlap(monkeypatch):
     sync = GitHubSync(token="t", repo="owner/repo")
-    monkeypatch.setattr(sync, "_collect_files", lambda _root: {"a.md": b"x"})
+    monkeypatch.setattr(sync, "_collect_files", lambda _root, _extra=None: {"a.md": b"x"})
     active = 0
     peak = 0
 

@@ -135,13 +135,27 @@ def test_legacy_archive_compatibility_requires_284_release_lock():
     2026-08-14：双上游集成保留 P0luz 的同一安全升级快照，同时保留本分支显式声明的
     Dashboard/HTTP 运行时依赖与 Windows 时区数据。重新解析只改变这些直接依赖的
     ``via``/平台标记；锁定版本仍来自 P0luz 已审计的 2026-08-01 索引快照。
+
+    2026-08-25（3.6.1）：新增 `tzdata`。评估结论是这次远轻于 2026-08-09 那次——
+
+    - lock diff 是**纯增量的 4 行**，只多一个 `tzdata==2026.3`，既有包的版本
+      一个都没动，解析树没有重新收敛。上次是升 cryptography 连带把
+      mcp/openai/uvicorn 一起带上去，那是明确接受的破坏性变更。
+    - `tzdata` 是无依赖的纯数据包，不参与任何解析约束。
+    - 旧更新器仍会把「依赖变了」判为真并触发一次依赖安装，这条路径本身没变，
+      变的只是要多装一个叶子包。
+
+    为什么值得跨这条线：`zoneinfo` 只查宿主机的 IANA 库，`python:*-slim` 与
+    Windows 都没有。缺了它 `utils.get_tzinfo()` 会静默兜底成固定 +08:00——
+    配 America/New_York 的用户拿到东八区的解锁时间，且没有任何提示。
+    详见 3.6.1 的 CHANGELOG。
     """
     repo_root = Path(meta.__file__).resolve().parents[2]
     lock_bytes = (repo_root / "requirements.lock.txt").read_bytes()
     normalized = lock_bytes.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
 
     assert hashlib.sha256(normalized).hexdigest() == (
-        "46d6913f4f13be4a2ae57768c1a47c77b6ed4a37b7d43190eb8029e8e983b6ef"
+        "2ac1bd5cd793b803c3c5521f0c108e5a1643ae37b3c317f0b2c3c1a0f4ebd291"
     ), (
         "requirements.lock.txt 已变化：确认这次变化是否会影响还没升级过的旧版"
         "热更新器（尤其 v2.8.4 之前、缺少 lock 感知回退逻辑的实例），评估后再把"

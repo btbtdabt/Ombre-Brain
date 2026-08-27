@@ -23,11 +23,13 @@ from server_app import (
     RuntimeLifecycle,
     build_http_app,
     install_runtime_lifespan,
+    sync_optional_tool_gate_fail_closed,
 )
 
-from tools.current.manifest import REGISTERED_TOOL_NAMES
+from tools.current.manifest import EXTRA_TOOL_NAMES, REGISTERED_TOOL_NAMES
 
 EXPECTED_PUBLIC_MCP_TOOLS = REGISTERED_TOOL_NAMES
+EXPECTED_LETTER_TOOLS = EXTRA_TOOL_NAMES
 
 
 class RecordingLogger:
@@ -45,6 +47,9 @@ class RecordingLogger:
 
     def warning(self, message, *args):
         self._record("warning", message, *args)
+
+    def error(self, message, *args, **_kwargs):
+        self._record("error", message, *args)
 
 
 class RecordingASGIApp:
@@ -87,6 +92,98 @@ def test_http_runtime_settings_are_normalized(config, auth_required, limit):
 
     assert settings.auth_required is auth_required
     assert settings.max_request_bytes == limit
+
+
+def test_optional_tool_gate_startup_failure_disables_module_and_hides_tool():
+    class Service:
+        def __init__(self):
+            self.enabled = True
+            self.revision = 9
+            self.disabled_with = None
+
+        def status(self):
+            return SimpleNamespace(
+                enabled=self.enabled,
+                state_revision=self.revision,
+            )
+
+        def set_enabled(self, enabled, *, expected_revision):
+            self.disabled_with = (enabled, expected_revision)
+            self.enabled = enabled
+            self.revision += 1
+            return self.status()
+
+    class Gate:
+        def __init__(self):
+            self.calls = []
+
+        def sync(self, enabled):
+            self.calls.append(enabled)
+            if len(self.calls) == 1:
+                raise RuntimeError("registry unavailable")
+            return False
+
+    service = Service()
+    gate = Gate()
+    logger = RecordingLogger()
+
+    sync_optional_tool_gate_fail_closed(
+        service=service,
+        tool_gate=gate,
+        logger=logger,
+        label="You",
+    )
+
+    assert service.disabled_with == (False, 9)
+    assert service.enabled is False
+    assert gate.calls == [True, False]
+    assert any("failed closed" in message for _level, message in logger.messages)
+
+
+def test_optional_tool_gate_startup_mismatch_disables_module_and_hides_tool():
+    class Service:
+        def __init__(self):
+            self.enabled = True
+            self.revision = 11
+            self.disabled_with = None
+
+        def status(self):
+            return SimpleNamespace(
+                enabled=self.enabled,
+                state_revision=self.revision,
+            )
+
+        def set_enabled(self, enabled, *, expected_revision):
+            self.disabled_with = (enabled, expected_revision)
+            self.enabled = enabled
+            self.revision += 1
+            return self.status()
+
+    class Gate:
+        def __init__(self):
+            self.calls = []
+
+        def sync(self, enabled):
+            self.calls.append(enabled)
+            if len(self.calls) == 1:
+                return False
+            return enabled
+
+    service = Service()
+    gate = Gate()
+    logger = RecordingLogger()
+
+    sync_optional_tool_gate_fail_closed(
+        service=service,
+        tool_gate=gate,
+        logger=logger,
+        label="Them",
+    )
+
+    assert service.disabled_with == (False, 11)
+    assert service.enabled is False
+    assert gate.calls == [True, False]
+    assert any("failed closed" in message for _level, message in logger.messages)
 
 
 def test_http_runtime_settings_use_fixed_oauth_public_origin_fallback(monkeypatch):
@@ -211,6 +308,50 @@ async def test_json_accept_shim_preserves_explicit_or_non_mcp_accept(path, accep
     await middleware(scope, _empty_receive, _discard_send)
 
     assert downstream.scopes[0] is scope
+
+
+@pytest.mark.asyncio
+async def test_letter_tools_live_on_main_and_compatibility_connectors():
+    import server
+
+    main_names = {tool.name for tool in await server.mcp.list_tools()}
+    extra_names = {tool.name for tool in await server.mcp_extra.list_tools()}
+
+    assert set(EXPECTED_LETTER_TOOLS) <= main_names
+    assert extra_names == set(EXPECTED_LETTER_TOOLS)
+
+
+def test_letter_tools_keep_strict_arguments_on_both_connectors():
+    import server
+
+    for connector in (server.mcp, server.mcp_extra):
+        for name in EXPECTED_LETTER_TOOLS:
+            tool = connector._tool_manager.get_tool(name)
+            assert tool is not None, name
+            assert tool.fn_metadata.arg_model.model_config.get("extra") == "forbid", name
+
+
+def test_extra_connector_route_remains_an_active_mcp_endpoint():
+    import server
+    from web.request_limits import is_mcp_endpoint_path
+
+    app = build_http_app(
+        server.mcp,
+        "streamable-http",
+        settings=HTTPRuntimeSettings(
+            auth_required=False,
+            max_request_bytes=DEFAULT_MAX_MCP_REQUEST_BYTES,
+        ),
+        token_validator=lambda *_args, **_kwargs: False,
+        lifecycle=RuntimeLifecycle(logger=RecordingLogger()),
+        mcp_extra=server.mcp_extra,
+    )
+    paths = {getattr(route, "path", None) for route in app.router.routes}
+
+    assert "/mcp" in paths
+    assert "/mcp-extra" in paths
+    assert is_mcp_endpoint_path("/mcp-extra")
+    assert is_mcp_endpoint_path("/mcp")
 
 
 @pytest.mark.asyncio
@@ -949,6 +1090,7 @@ async def test_runtime_lifecycle_starts_and_stops_every_owned_service(tmp_path):
         logger=logger,
         decay_engine=RecordingService("decay", events),
         embedding_outbox=RecordingService("outbox", events),
+        you_service=RecordingService("you", events),
         ensure_ollama_child=ollama_start,
         stop_ollama_child=ollama_stop,
         load_tunnel_config=lambda: {"auto_start": True, "token": "tunnel-token"},
@@ -970,7 +1112,9 @@ async def test_runtime_lifecycle_starts_and_stops_every_owned_service(tmp_path):
         "decay:start",
         "ollama:start",
         "outbox:start",
+        "you:start",
         "github:0",
+        "you:stop",
         "outbox:stop",
         "decay:stop",
         "ollama:stop",

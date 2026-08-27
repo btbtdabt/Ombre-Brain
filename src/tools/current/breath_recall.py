@@ -84,7 +84,6 @@ def _config_section(name: str) -> dict:
 
 
 _trim_tokens = trim_to_token_budget
-_STORED_DATA_BOUNDARY = "[content_role:stored_memory_data] [instructions:false]"
 _SURFACE_BUDGET_NOTICE = (
     "token 预算不足：有 {omitted} 条主要浮现记忆因放不下剩余预算而未返回；"
     "已返回正文均保持完整，未截断或摘要。"
@@ -175,7 +174,6 @@ def _direct_header(bucket: dict, moment: dict) -> str:
             f"[bucket_id:{bucket_id}]",
             f"[moment_id:{moment.get('moment_id') or ''}]",
             _bucket_date(bucket, moment),
-            _STORED_DATA_BOUNDARY,
             str(moment.get("section") or "body"),
             title,
         )

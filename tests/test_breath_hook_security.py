@@ -61,12 +61,16 @@ class _Request:
 
 
 class _Manager:
-    def __init__(self, buckets):
+    def __init__(self, buckets, letters=None):
         self.buckets = buckets
+        self.letters = letters or []
 
     async def list_all(self, include_archive=False):
         assert include_archive is False
         return list(self.buckets)
+
+    async def list_letters(self):
+        return list(self.letters)
 
     async def update(self, bucket_id, **updates):
         bucket = next(item for item in self.buckets if item["id"] == bucket_id)
@@ -130,6 +134,24 @@ def _handler(monkeypatch, buckets, dehydrator, hook_config=None):
         {"hooks": {"token": "secret", **(hook_config or {})}},
     )
     monkeypatch.setattr(hooks.sh, "bucket_mgr", _Manager(buckets), raising=False)
+    monkeypatch.setattr(hooks.sh, "dehydrator", dehydrator, raising=False)
+    mcp = _MCP()
+    hooks.register(mcp)
+    return mcp.routes[("GET", "/breath-hook")]
+
+
+def _separated_letter_handler(monkeypatch, letters, dehydrator, hook_config=None):
+    monkeypatch.setattr(
+        hooks.sh,
+        "config",
+        {"hooks": {"token": "secret", **(hook_config or {})}},
+    )
+    monkeypatch.setattr(
+        hooks.sh,
+        "bucket_mgr",
+        _Manager([], letters=letters),
+        raising=False,
+    )
     monkeypatch.setattr(hooks.sh, "dehydrator", dehydrator, raising=False)
     mcp = _MCP()
     hooks.register(mcp)
@@ -277,6 +299,36 @@ async def test_hook_token_uses_ai_view_and_locked_human_letter_is_notice_only(mo
 
     assert "李四给你留了一封永久锁信" in text
     assert "当前不可查看" in text
+    assert secret not in text
+    assert title not in text
+
+
+@pytest.mark.asyncio
+async def test_hook_reads_letters_from_their_isolated_store(monkeypatch):
+    secret = "isolated letter body"
+    title = "isolated letter title"
+    letters = [
+        _bucket(
+            "isolated-human-lock",
+            secret,
+            type="letter",
+            author="user",
+            title=title,
+            writer_name="李四",
+            lock_type="permanent",
+            unlock_date="9999-12-31",
+            locked_by="human",
+        )
+    ]
+
+    response = await _separated_letter_handler(
+        monkeypatch,
+        letters,
+        _EchoDehydrator(),
+    )(_Request())
+    text = response.body.decode("utf-8")
+
+    assert "李四给你留了一封永久锁信" in text
     assert secret not in text
     assert title not in text
 

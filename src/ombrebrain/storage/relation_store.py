@@ -166,6 +166,77 @@ def merge_auto_links(
     return manual + detached_auto + active_auto[: min(active_budget, total_budget)]
 
 
+# ============================================================
+# 修正连错的关系（3.3.0）
+# ------------------------------------------------------------
+# 自动建立是「发现」，修正是「我看过之后不同意」——后者只能是显式动作，
+# 所以走 trace，而不是再加一条后端规则去猜自己刚才是不是判错了。
+#
+# 改过的关系一律**降级为手动关系**（去掉 auto / score）：它已经被明确看过
+# 一次，不该再被后来的自动推断按相似度挤掉。`merge_auto_links` 保护 manual。
+#
+# trace(unlink=...) 是确认关系本身错误后的物理移除；整合版同时保留了
+# relation_detach/relation_restore，供“暂时停用但保留历史”的可逆管理流程。
+# 两者语义不同：unlink 不生成可恢复记录，detach 才会把 status 改为 detached。
+# 物理移除也不会被自动重建——`link_new_bucket` 只在新建桶时触发一次推断。
+# ============================================================
+
+
+def unlink_relation(
+    links: list[dict[str, Any]],
+    target_bucket_id: str,
+) -> tuple[list[dict[str, Any]], bool]:
+    """移除指向 target 的那条关系，返回 (新列表, 是否有变化)。
+
+    找不到不是错误，交给调用方决定怎么措辞——单向残留（一侧有、另一侧没有）
+    在存量数据里真实存在，两边都得能各自删干净。
+    """
+    target_bucket_id = str(target_bucket_id or "").strip()
+    if not target_bucket_id:
+        return list(links or []), False
+    kept = [
+        link
+        for link in (links or [])
+        if str(link.get("target_bucket_id") or "").strip() != target_bucket_id
+    ]
+    return kept, len(kept) != len(links or [])
+
+
+def retype_relation(
+    links: list[dict[str, Any]],
+    target_bucket_id: str,
+    relation_type: str,
+) -> tuple[list[dict[str, Any]], bool]:
+    """把指向 target 的那条关系改成新类型，并降级为手动关系。
+
+    **不会凭空建立**：target 不在 links 里就原样返回 False。「建立」仍然只归
+    后端，这里能做的只有「你连的这条，类型不对」。
+
+    原 label 保留：自动关系本来就没有 label，而存量 custom 关系的 label 是
+    当初写下的原话，改类型不该顺手把它抹掉。
+    """
+    target_bucket_id = str(target_bucket_id or "").strip()
+    relation_type = normalize_relation_type(relation_type)
+    if not target_bucket_id:
+        return list(links or []), False
+
+    updated: list[dict[str, Any]] = []
+    changed = False
+    for link in links or []:
+        if str(link.get("target_bucket_id") or "").strip() != target_bucket_id:
+            updated.append(link)
+            continue
+        if link.get("type") == relation_type and not link.get("auto"):
+            # 类型没变、也已经是手动关系，不必改写文件
+            updated.append(link)
+            continue
+        revised = {k: v for k, v in link.items() if k not in {"auto", "score"}}
+        revised["type"] = relation_type
+        updated.append(revised)
+        changed = True
+    return updated, changed
+
+
 def normalize_relation_type(value: Any) -> str:
     if not isinstance(value, str):
         raise ValueError("relation_type 必须是字符串安全键")

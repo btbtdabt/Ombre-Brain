@@ -658,6 +658,9 @@ class BucketManager:
             str(config.get("media_dir") or os.path.join(self.base_dir, "_media")),
             max_bytes=int(config.get("media_max_bytes") or 25 * 1024 * 1024),
             allowed_source_dirs=config.get("media_allowed_source_dirs"),
+            # 同一个上限传下去，让 MediaStore 在动手持久化之前就拒绝超量，
+            # 而不是逐项写完再由下面的 _normalize_media 截断。
+            max_items=_MEDIA_MAX_ITEMS,
         )
         self.permanent_dir = os.path.join(self.base_dir, "permanent")
         self.dynamic_dir = os.path.join(self.base_dir, "dynamic")
@@ -2004,7 +2007,6 @@ class BucketManager:
             metadata,
             {"event_actor": str(event_actor or "system").strip().lower()},
         )
-
         return bucket_id
 
     # ---------------------------------------------------------
@@ -2666,6 +2668,9 @@ class BucketManager:
             )
         if "quotes_append" in kwargs:
             kwargs["quotes_append"] = self._sanitize_quotes(kwargs["quotes_append"])
+        if "quotes" in kwargs and kwargs["quotes"]:
+            # 整体替换（trace quotes_replace）。空列表是「清空」，不必过校验。
+            kwargs["quotes"] = self._sanitize_quotes(kwargs["quotes"])
 
         try:
             post = frontmatter.load(file_path)
@@ -2903,6 +2908,14 @@ class BucketManager:
                     new_media.append(media_item)
             appended = existing_media + new_media
             post["media"] = appended[:_MEDIA_MAX_ITEMS]
+        if "quotes" in kwargs:
+            # 整体覆盖写入（trace quotes_replace，用于订正与删除）；空列表清空该字段。
+            # 与 quotes_append 的区别是「谁说了算」：append 是合并两段记忆时两边
+            # 的引语都该留下，replace 是我回头看这几句，说其中某句不对或不该留。
+            if kwargs["quotes"]:
+                post["quotes"] = kwargs["quotes"]
+            else:
+                post.metadata.pop("quotes", None)
         if "meaning" in kwargs:
             # Miss: 整体覆盖写入（trace meaning_replace，用于纠错/清理）；空列表清空该字段。
             if kwargs["meaning"]:
@@ -3115,7 +3128,6 @@ class BucketManager:
                 "event_actor": str(event_actor or "system").strip().lower(),
             },
         )
-
         return True
 
     async def add_comment(

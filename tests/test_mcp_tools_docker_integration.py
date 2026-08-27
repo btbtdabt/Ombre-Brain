@@ -16,13 +16,17 @@ from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 import pytest
+from tests._docker_urls import extra_mcp_url
 from tests.mcp_contract_snapshot import (
     EXPECTED_PARAMETERS,
     EXPECTED_REQUIRED_PARAMETERS,
 )
-from tools.current.manifest import REGISTERED_TOOL_NAMES
+from tools.current.manifest import EXTRA_TOOL_NAMES, REGISTERED_TOOL_NAMES
 
 MCP_URL = os.environ.get("OMBRE_DOCKER_INTEGRATION_URL", "").strip()
+EXTRA_MCP_URL = (
+    extra_mcp_url(MCP_URL) if MCP_URL else ""
+)
 MCP_TOKEN = os.environ.get("OMBRE_DOCKER_MCP_TOKEN", "").strip()
 EXPECT_COMPRESSION_PROVIDER = os.environ.get(
     "OMBRE_DOCKER_EXPECT_COMPRESSION_PROVIDER", ""
@@ -149,6 +153,25 @@ class MCPClient:
         return payload
 
 
+def test_extra_connector_exposes_only_letter_tools():
+    client = MCPClient(EXTRA_MCP_URL)
+    try:
+        client.initialize()
+        assert [tool["name"] for tool in client.list_tools()] == list(EXTRA_TOOL_NAMES)
+        marker = _marker("extra-letter-roundtrip")
+        written = client.call(
+            "letter_write",
+            {"author": "user", "content": marker, "title": "Extra connector"},
+        )
+        assert _bucket_id(written)
+        assert marker in client.call(
+            "letter_read",
+            {"query": marker, "author": "user", "limit": 1},
+        )
+    finally:
+        client.close()
+
+
 class MCPClientContext(MCPClient):
     def __enter__(self):
         self.initialize()
@@ -164,6 +187,24 @@ def mcp_client():
     client.initialize()
     yield client
     client.close()
+
+
+def _rejection_text(mcp_client, tool: str, arguments: dict) -> str:
+    """跑一次注定被拒的调用，把错误正文取出来。
+
+    工具「什么都没写」的失败在 MCP 侧是 isError=True，正文进
+    `Error executing tool <name>: ...`。用 `call()` 取不到——它第一件事就是
+    断言 isError is not True。
+
+    为什么不能用返回字符串表达这类失败：那在客户端是一次正常返回，调用方
+    （通常是模型自己）会以为写成功了继续往下走，等下次去翻，那条记忆从来
+    没存在过。关键词仍逐条核对——模型正是靠那句话知道该改哪个参数。
+    """
+    result = mcp_client.call_result(tool, arguments)
+    assert result.get("isError") is True, (tool, result)
+    text = mcp_client.result_text(result)
+    assert text, (tool, result)
+    return text
 
 
 def _marker(prefix: str) -> str:
@@ -290,6 +331,11 @@ def test_manifest_exposes_exactly_the_documented_canonical_tools(mcp_client):
         ("letter_read", {"limit": {"not": "an integer"}}, "limit"),
         ("I", {"read": {"not": "a boolean"}}, "read"),
         ("dream", {"window_hours": {"not": "an integer"}}, "window_hours"),
+        # 信件搬回主连接器后和其余工具走同一份用例——这正是并回主链路要的：
+        # 一套边界，不必再问"这个工具挂在哪，那边的校验跟上了没有"。
+        ("letter_write", {"content": "missing author"}, "author"),
+        ("letter_read", {"limit": {"not": "an integer"}}, "limit"),
+        ("letter_lock_update", {"letter_id": "x"}, "lock_type"),
     ],
 )
 def test_all_tools_reject_schema_invalid_arguments(mcp_client, tool, arguments, field):
@@ -382,7 +428,8 @@ def test_hold_writes_a_memory_and_returns_bucket_id(mcp_client):
 
 
 def test_hold_rejects_invalid_feel_and_test_data_combinations(mcp_client):
-    missing_source = mcp_client.call(
+    missing_source = _rejection_text(
+        mcp_client,
         "hold",
         {
             "content": f"我会记住这次 {_marker('feel')}。",
@@ -393,7 +440,8 @@ def test_hold_rejects_invalid_feel_and_test_data_combinations(mcp_client):
     )
     assert "whisper" in missing_source
 
-    non_erasable_mode = mcp_client.call(
+    non_erasable_mode = _rejection_text(
+        mcp_client,
         "hold",
         {"content": _marker("test-pin"), "test_data": True, "pinned": True},
     )
@@ -525,7 +573,8 @@ def test_grow_items_accepts_why_remembered_contract(mcp_client):
 
 def test_grow_items_rejects_oversized_why_remembered_contract(mcp_client):
     marker = _marker("grow-items-why-too-long")
-    result = mcp_client.call(
+    text = _rejection_text(
+        mcp_client,
         "grow",
         {"items": [{
             "content": marker,
@@ -533,7 +582,7 @@ def test_grow_items_rejects_oversized_why_remembered_contract(mcp_client):
         }]},
     )
 
-    assert "grow items 第 1 项 why_remembered 不能超过 500 个字符" in result
+    assert "grow items 第 1 项 why_remembered 不能超过 500 个字符" in text
 
 
 def test_grow_long_content_obeys_configured_provider_contract(mcp_client):
@@ -548,8 +597,12 @@ def test_grow_long_content_obeys_configured_provider_contract(mcp_client):
     result = mcp_client.call("grow", {"content": content})
 
     if not EXPECT_COMPRESSION_PROVIDER:
+        # 文案跟着 errors.llm_step_failed_error 的分岔走：这条分支代表服务确实
+        # 没配 provider（api_available=False），断言只咬「不可用」这半句和错误码，
+        # 不咬后面那串配置项名，免得产品换个指引措辞就把测试打红。
         assert "OB-E004" in result
-        assert "API key 未配置或调用失败" in result
+        assert "脱水 API 不可用" in result
+        assert "桶未创建" in result
         after_ids = _bucket_ids(mcp_client.call("pulse", {"include_archive": True}))
         assert after_ids == before_ids
         return
@@ -762,6 +815,7 @@ def test_letter_time_lock_write_read_and_owner_unlock_in_real_container(mcp_clie
             "author": "ai",
             "content": marker,
             "title": title,
+            "ai_name": "Docker AI",
             "lock_type": "permanent",
         },
     )
@@ -832,16 +886,21 @@ def test_dream_clamps_window_to_documented_bounds(mcp_client, window_hours, expe
 
 
 @pytest.mark.parametrize(
-    ("tool", "arguments"),
+    ("tool", "arguments", "expects_tool_error"),
     [
-        ("breath", {"query": "q" * (16 * 1024 + 1)}),
-        ("breath_search", {"query": "q" * (16 * 1024 + 1)}),
-        ("breath_advanced", {"query": "q" * (16 * 1024 + 1)}),
-        ("letter_read", {"query": "q" * (16 * 1024 + 1)}),
+        ("breath", {"query": "q" * (16 * 1024 + 1)}, False),
+        ("breath_search", {"query": "q" * (16 * 1024 + 1)}, False),
+        ("breath_advanced", {"query": "q" * (16 * 1024 + 1)}, False),
+        ("letter_read", {"query": "q" * (16 * 1024 + 1)}, True),
     ],
 )
-def test_query_tools_enforce_query_size_limit(mcp_client, tool, arguments):
-    result = mcp_client.call(tool, arguments)
+def test_query_tools_enforce_query_size_limit(
+    mcp_client, tool, arguments, expects_tool_error
+):
+    if expects_tool_error:
+        result = _rejection_text(mcp_client, tool, arguments)
+    else:
+        result = mcp_client.call(tool, arguments)
     assert "查询过大" in result
 
 
@@ -852,15 +911,14 @@ def test_query_tools_enforce_query_size_limit(mcp_client, tool, arguments):
         ("grow", {"content": ""}, "内容为空"),
         ("trace", {"bucket_id": "missing-boundary-id"}, "missing-boundary-id"),
         ("anchor", {"bucket_id": "missing-boundary-id"}, "anchor"),
-        ("release", {"bucket_id": "missing-boundary-id"}, "释放失败"),
+        ("release", {"bucket_id": "missing-boundary-id"}, "我没能把它移开"),
         ("plan", {"content": ""}, "内容为空"),
         ("letter_write", {"author": "", "content": "x"}, "author"),
         ("I", {"content": "x", "aspect": "prompt-injected"}, "aspect 无效"),
     ],
 )
 def test_invalid_tool_arguments_fail_cleanly(mcp_client, tool, arguments, expected):
-    result = mcp_client.call(tool, arguments)
-    assert expected in result
+    assert expected in _rejection_text(mcp_client, tool, arguments)
 
 
 def test_prompt_injection_text_is_returned_verbatim_without_any_safety_markers(mcp_client):
@@ -885,18 +943,22 @@ def test_prompt_injection_text_is_returned_verbatim_without_any_safety_markers(m
 
 
 def test_path_traversal_shaped_bucket_id_is_treated_as_an_identifier(mcp_client):
-    result = mcp_client.call("trace", {"bucket_id": "../../../../etc/passwd", "importance": 9})
-    assert "未找到记忆桶" in result
+    text = _rejection_text(
+        mcp_client, "trace", {"bucket_id": "../../../../etc/passwd", "importance": 9}
+    )
+    assert "未找到记忆桶" in text
 
 
 def test_grow_rejects_excessive_source_before_llm_call(mcp_client):
-    result = mcp_client.call("grow", {"content": "x" * (2 * 1024 * 1024 + 1)})
-    assert "grow 输入过大" in result
+    text = _rejection_text(mcp_client, "grow", {"content": "x" * (2 * 1024 * 1024 + 1)})
+    assert "grow 输入过大" in text
 
 
 def test_grow_rejects_excessive_item_count(mcp_client):
-    result = mcp_client.call("grow", {"items": [f"item-{index}" for index in range(101)]})
-    assert "items 过多" in result
+    text = _rejection_text(
+        mcp_client, "grow", {"items": [f"item-{index}" for index in range(101)]}
+    )
+    assert "items 过多" in text
 
 
 @pytest.mark.parametrize("tool,arguments", [
@@ -905,23 +967,21 @@ def test_grow_rejects_excessive_item_count(mcp_client):
     ("I", {"content": "x" * (50 * 1024 + 1), "aspect": "values"}),
 ])
 def test_single_bucket_tools_enforce_bucket_size_limit(mcp_client, tool, arguments):
-    result = mcp_client.call(tool, arguments)
-    assert "内容过大" in result
+    assert "内容过大" in _rejection_text(mcp_client, tool, arguments)
 
 
 def test_hold_enforces_bucket_size_limit(mcp_client):
-    result = mcp_client.call("hold", {"content": "x" * (50 * 1024 + 1)})
-    assert "内容过大" in result
+    text = _rejection_text(mcp_client, "hold", {"content": "x" * (50 * 1024 + 1)})
+    assert "内容过大" in text
 
 
 def test_trace_rejects_oversized_replacement_without_losing_original(mcp_client):
     marker = _marker("trace-size")
     bucket_id = _hold(mcp_client, marker)
-    result = mcp_client.call(
-        "trace",
-        {"bucket_id": bucket_id, "content": "x" * (50 * 1024 + 1)},
+    text = _rejection_text(
+        mcp_client, "trace", {"bucket_id": bucket_id, "content": "x" * (50 * 1024 + 1)}
     )
-    assert "内容过大" in result
+    assert "内容过大" in text
 
     recalled = mcp_client.call("breath_search", {"query": bucket_id, "max_results": 1})
     assert marker in recalled

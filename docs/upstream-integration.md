@@ -100,6 +100,70 @@ fixed access token remains a resource-bound compatibility credential.
 
 ## Integration Batch Ledger
 
+### 2026-08-26 P0luz 3.3.0 through 3.6.3 integration candidate
+
+This batch merges the complete P0luz range `6f7335d..d0d448f`. The recorded
+P0luz baseline remains at `6f7335d` until the exact candidate commit passes
+isolated staging; this entry will advance it after that verification. The
+Yinglianchun `main` tip is still `284c9c7`, so there are no newer secondary
+commits in this batch.
+
+| Source commit(s) | Disposition | Evidence |
+| --- | --- | --- |
+| `081d939` | Merged from P0luz | `trace` can correct a mistaken relation without opening a second relation-edit path. Public schema and bidirectional relation tests cover unlink/relink behavior. |
+| `10e8729`, `b7ab3ad`, `09d5bbe` | Merged from P0luz and wired through the combined runtime | The optional You projection, its tool gate, Dashboard settings, backup surface, and author acceptance tests are retained. |
+| `b3d8ffe` | Partly merged; connector removal superseded by the combined compatibility contract | Letter tools remain on the main connector as P0luz intended. The historical `/mcp-extra` three-tool Letter mirror is also retained because deployed clients still use it; both surfaces register the same handlers. |
+| `cf7d5f4`, `dc8db69`, `26b3187` | Merged from P0luz | Quote correction/deletion and the case-insensitive migration fix are active in the shared storage and trace paths. The 3.4.1 merge contributes no unclassified behavior. |
+| `9d980ca`, `9cc1fdf`, `591d344`, `59bedf1` | Merged from P0luz | You evidence grouping uses relations, the removed three-stage LLM path stays removed, and the 3.4.x specification matches the active model-written claim flow. |
+| `0d0d8cd`, `c228644`, `35214f8`, `47cf0c9`, `86815a7`, `ccf8b69`, `fdac439`, `5cf556b`, `d8ba4c4`, `cc46bc9`, `be4085d`, `ec8e486`, `dedd636`, `b30fcc5`, `991a306`, `4f13a1e` | Merged from P0luz and exposed behind optional gates | Attribution rendering and the complete Them model, safety rules, quotas, invalidation/restoration semantics, backup/migration integration, grouped roster, person view, known-via data, and unified You/Them Dashboard entry are retained with the author tests. |
+| `e625cd2`, `856046d`, `a079c21`, `d0bdb44` | Merged from P0luz | The unused bucket observer remains removed. Backup coverage includes source evidence and You/Them stores, repeated claims obey quota semantics, and failed imports roll back from the author backup boundary. |
+| `ef8cca4`, `5c5fc6f`, `e9ab3ac`, `686fb06`, `3bf62d1` | Merged from P0luz | Them identity/relation safety and Letter lock documentation/identity gates are retained without weakening current Letter compatibility. |
+| `ed1e845`, `4718c48`, `a621c3d` | Merged from P0luz | ADR completeness, author lint fixes, and bounded SQL construction remain intact. |
+| `948cab6`, `96a800e` | Merged from P0luz and used by the public grow adapter | Automatic grow splitting persists source text and source ranges through the author `grow_items` implementation. |
+| `0a764f2`, `0c4d5d1`, `f9ae918`, `dc5bde2`, `9bfe5bf` | Merged from P0luz and adapted at the canonical public wrappers | `ToolInputError` is the single no-write failure contract; hold, trace, Plan, Letter, Dream, I, media, and missing-bucket failures reach MCP callers as errors. The current hold/grow wrappers call the author storage and validation helpers instead of duplicating them. |
+| `600717d`, `cf8fcd6`, `74bf107` | Merged from P0luz | You claim writes and projection rebuilds share one lock, empty trace remains the established no-op, and I size failures use the same MCP error contract. |
+| `cc24d4c`, `f30e5e7`, `58b4440` | Merged from P0luz | Breath retrieval no longer mutates activation, created-date filtering reaches every branch, new buckets retain surfacing capacity, and footprint rendering uses one shared implementation. |
+| `c864d64`, `9984d51`, `8203539`, `d0d448f` | Merged from P0luz | `tzdata`, precise You rejection text, reachable You/Them claim IDs, separated `known_via`, and the final 3.6.3 documentation corrections are retained. |
+
+Combined-contract adaptations are narrow and covered explicitly:
+
+- Letters remain physically and behaviorally isolated from ordinary
+  `BucketManager.list_all()` and breath scans, as required by the existing
+  Ying/current compatibility contract. P0luz Letter tests obtain the ID from
+  `letter_write` and exercise the dedicated Letter/get paths instead.
+- The fixed public manifest remains 40 tools. You and Them are optional dynamic
+  tools on the same `/mcp` connector, so the active surface is 40 through 42
+  tools rather than two hard-coded manifests.
+- The unified Dashboard incorporates P0luz's You/Them panels and loaders rather
+  than replacing either author's HTTP/runtime implementation.
+
+Local candidate verification:
+
+- Complete pytest suite: **3783 passed / 128 skipped / 0 failed**, with three
+  expected fixture warnings.
+- The prior seven integration failures were resolved at their contract
+  boundaries: public trace schema, fixed/dynamic tool wording, You/Them loader
+  test harnesses, and Letter-isolated title tests.
+- Independent review caught and closed seven integration-edge regressions:
+  restored You/Them snapshots now invalidate state caches and synchronize MCP
+  gates under their author locks; diagnostics use the actual `You`/`Them` tool
+  names; combined title plus date/anchor edits preserve title/name separation;
+  `/mcp-extra` has real initialize plus Letter-only `tools/list` coverage and
+  preserves reverse-proxy path prefixes in the Docker harness; optional module
+  startup verifies the gate's returned visibility before accepting persisted
+  state; and oversized `letter_read` inputs now reach clients as MCP errors.
+- Real-container coverage caught one upstream storage-boundary mismatch:
+  `BucketManager.list_all()` intentionally excludes the isolated Letter store,
+  while `/breath-hook` still expected Letter buckets in that result. The hook
+  now composes the author's `list_all()` and `list_letters()` APIs, deduplicates
+  by bucket id, and retains the existing owner/locked/public visibility rules.
+- Whole-tree Ruff and changed-file Pyright pass with zero findings. The
+  whole-tree Pyright debt audit improved from 349 to 337 errors without widening
+  ignores. The Docker image builds and reports healthy; the authenticated
+  main/extra MCP integration suite passes **109 tests**, and the isolated
+  first-run Web/Dashboard/Letter flow passes end to end. Staging and production
+  evidence follow before this candidate advances the baseline.
+
 ### 2026-08-20 cross-upstream tool contract parity audit
 
 Both upstream tips were unchanged during this audit: P0luz remains at

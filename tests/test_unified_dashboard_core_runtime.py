@@ -820,7 +820,8 @@ const window = {{
 }};
 [
   'loadSettingsStatus', 'loadSystemDiagnostics', 'loadHumanName', 'loadConfig',
-  'refreshEnvConfig', 'loadGithubStatus', 'loadSamplingSettings', 'loadEnvVars',
+  'refreshEnvConfig', 'loadGithubStatus', 'loadSamplingSettings',
+  'loadYouSetting', 'loadThemSetting', 'loadEnvVars',
   'loadHostVault', 'loadLocalEmbStatus',
 ].forEach((name) => {{ window[name] = () => {{ settingsRequests += 1; }}; }});
 window.window = window;
@@ -865,9 +866,9 @@ process.stdout.write(JSON.stringify({{
 """
 
     assert _run_node(script) == {
-        "settingsAfterUserClick": 10,
+        "settingsAfterUserClick": 12,
         "networkAfterUserClick": 1,
-        "settingsAfterProgrammaticRoute": 10,
+        "settingsAfterProgrammaticRoute": 12,
         "routeCalls": 3,
     }
 
@@ -1191,7 +1192,8 @@ const window = {{
 let settingsRequests = 0;
 [
   'loadSettingsStatus', 'loadSystemDiagnostics', 'loadHumanName', 'loadConfig',
-  'refreshEnvConfig', 'loadGithubStatus', 'loadSamplingSettings', 'loadEnvVars',
+  'refreshEnvConfig', 'loadGithubStatus', 'loadSamplingSettings',
+  'loadYouSetting', 'loadThemSetting', 'loadEnvVars',
   'loadHostVault', 'loadLocalEmbStatus',
 ].forEach((name) => {{ window[name] = () => {{ settingsRequests += 1; }}; }});
 window.window = window;
@@ -1283,34 +1285,34 @@ process.stdout.write(JSON.stringify({{
 
     result = _run_node(script)
 
-    assert result["afterReload"] == {"section": "sec-backup", "requests": 10}
-    assert result["afterGithub"] == {"section": "sec-github", "requests": 20}
-    assert result["afterBack"] == {"section": "sec-backup", "requests": 30}
-    assert result["afterForward"] == {"section": "sec-github", "requests": 40}
+    assert result["afterReload"] == {"section": "sec-backup", "requests": 12}
+    assert result["afterGithub"] == {"section": "sec-github", "requests": 24}
+    assert result["afterBack"] == {"section": "sec-backup", "requests": 36}
+    assert result["afterForward"] == {"section": "sec-github", "requests": 48}
     assert result["afterRefreshedForward"] == {
         "section": "sec-github",
-        "requests": 50,
+        "requests": 60,
     }
     assert result["afterMeSection"] == {
         "section": "sec-me",
-        "requests": 60,
+        "requests": 72,
     }
     assert result["afterUnknownSection"] == {
         "section": "sec-me",
-        "requests": 70,
+        "requests": 84,
     }
     assert result["afterGithubAlias"] == {
         "workspace": "system",
         "panel": "system-status",
         "section": "sec-github",
         "search": "?section=sec-github&workspace=system&panel=system-status",
-        "requests": 80,
+        "requests": 96,
     }
     assert result["afterErrorsAlias"] == {
         "workspace": "system",
         "panel": "system-logs",
         "search": "?workspace=system&panel=system-logs",
-        "requests": 80,
+        "requests": 96,
     }
     assert result["githubUrl"].startswith("/ombre/memory-dashboard?")
     assert "section=sec-github" in result["githubUrl"]

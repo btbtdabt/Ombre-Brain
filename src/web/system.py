@@ -47,7 +47,7 @@ from ombrebrain.observability import ObservabilityMetricBoundary
 from ombrebrain.policy.red_lines import RedLineContract, RedLineFeatureSpec
 from ombrebrain.policy.surfacing import SurfaceDecision
 from ombrebrain.protocol import PublicToolDesignContract, PublicToolSpec
-from tools.current.manifest import REGISTERED_TOOL_NAMES
+from tools.current.manifest import DYNAMIC_TOOL_NAMES, REGISTERED_TOOL_NAMES
 from ombrebrain.resilience import CrashRecoveryContract, CrashRecoveryPlan, PathStep
 from ombrebrain.retrieval import SurfaceContextCompiler
 from ombrebrain.security.deployment_profile import effective_configuration_report
@@ -238,6 +238,7 @@ def _read_public_tool_specs(tool_names: Iterable[str] | None = None) -> dict[str
         )
     )
     expected = set(expected_names)
+    allowed_dynamic = set(DYNAMIC_TOOL_NAMES)
     actual = set(actual_names)
     specs = [PublicToolSpec(name=name) for name in actual_names]
     return {
@@ -246,9 +247,12 @@ def _read_public_tool_specs(tool_names: Iterable[str] | None = None) -> dict[str
         "source": source,
         "specs": specs,
         "tool_names": actual_names,
-        "matches_manifest": actual == expected,
+        "matches_manifest": expected <= actual and not (
+            actual - expected - allowed_dynamic
+        ),
         "missing_tool_names": sorted(expected - actual),
-        "unexpected_tool_names": sorted(actual - expected),
+        "dynamic_tool_names": sorted(actual & allowed_dynamic),
+        "unexpected_tool_names": sorted(actual - expected - allowed_dynamic),
     }
 
 
@@ -918,6 +922,7 @@ async def build_system_diagnostics(
                     "tool_names": tool_names,
                     "matches_manifest": matches_manifest,
                     "missing_tool_names": manifest.get("missing_tool_names", []),
+                    "dynamic_tool_names": manifest.get("dynamic_tool_names", []),
                     "unexpected_tool_names": manifest.get(
                         "unexpected_tool_names", []
                     ),

@@ -575,6 +575,7 @@ class RuntimeLifecycle:
     embedding_outbox: Any = None
     embedding_engine: Any = None
     current_schedulers: Any = None
+    you_service: Any = None
     ensure_ollama_child: AsyncCallback | None = None
     stop_ollama_child: AsyncCallback | None = None
     load_tunnel_config: Callable[[], Mapping[str, Any]] | None = None
@@ -658,6 +659,10 @@ class RuntimeLifecycle:
             "current schedulers start",
             getattr(self.current_schedulers, "start", None),
         )
+        await self._run_async_step(
+            "You service start",
+            getattr(self.you_service, "start", None),
+        )
         if self.keepalive_url:
             self._keepalive_task = asyncio.create_task(
                 self._keepalive_loop(),
@@ -686,6 +691,10 @@ class RuntimeLifecycle:
         await self._run_async_step(
             "current schedulers stop",
             getattr(self.current_schedulers, "stop", None),
+        )
+        await self._run_async_step(
+            "You service stop",
+            getattr(self.you_service, "stop", None),
         )
         await self._run_async_step(
             "embedding outbox stop",
@@ -725,19 +734,55 @@ def install_runtime_lifespan(app: Any, lifecycle: RuntimeLifecycle) -> Any:
     return app
 
 
+def sync_optional_tool_gate_fail_closed(
+    *,
+    service: Any,
+    tool_gate: Any,
+    logger: Any,
+    label: str,
+) -> None:
+    """Align one optional MCP gate with persisted state or disable it safely."""
+    try:
+        desired = service.status().enabled
+        visible = tool_gate.sync(desired)
+        if visible != desired:
+            raise RuntimeError("MCP tool state mismatch")
+    except Exception as exc:
+        logger.error("%s MCP gate failed closed: %s", label, type(exc).__name__)
+        state = service.status()
+        if state.enabled:
+            try:
+                service.set_enabled(
+                    False,
+                    expected_revision=state.state_revision,
+                )
+            except Exception:
+                logger.error(
+                    "%s persistent fail-closed update failed",
+                    label,
+                    exc_info=True,
+                )
+        try:
+            visible = tool_gate.sync(False)
+            if visible is not False:
+                logger.error(
+                    "%s MCP gate fail-closed verification failed",
+                    label,
+                )
+        except Exception:
+            logger.error(
+                "%s MCP gate fail-closed sync failed",
+                label,
+                exc_info=True,
+            )
+
+
 def install_extra_connector(app: Any, mcp_extra: Any) -> Any:
-    """把第二个 MCP 连接器（/mcp-extra）并进主 app。
+    """Mount the compatibility MCP connector and compose its lifespan.
 
-    两件事必须一起做，少一件就是坏的：
-
-    1. **路由并入**——`streamable_http_app()` 生成的 Starlette 里只有一条
-       `Route(streamable_http_path, ...)`，把它挪进主 app 就能对外服务。
-    2. **session manager 的生命周期并入**——FastMCP 的 lifespan 是
-       `session_manager.run()`。只搬路由不搬生命周期，`/mcp-extra` 会在第一次
-       请求时因为 session manager 没启动而炸，而且是运行时才炸，不是启动时。
-
-    包装顺序：extra 的 session manager 在**外层**，主 app 原有 lifespan 在内层。
-    这样两者的启动/关闭都成对，任何一侧异常都不会留下半启动的 manager。
+    FastMCP's generated route and session-manager lifespan are a pair. Moving
+    only the route makes ``/mcp-extra`` fail on its first request because the
+    connector's session manager was never started.
     """
     extra_app = mcp_extra.streamable_http_app()
     app.router.routes.extend(extra_app.router.routes)
@@ -773,8 +818,6 @@ def build_http_app(
 
     mcp_path_matcher = is_mcp_endpoint_path
 
-    # 先并入 /mcp-extra，再装 runtime lifespan：runtime 落在最内层，
-    # 保证它启动时两个连接器的 session manager 都已就绪。
     if mcp_extra is not None:
         install_extra_connector(app, mcp_extra)
 

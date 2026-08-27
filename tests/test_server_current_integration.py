@@ -58,9 +58,10 @@ async def test_server_exposes_the_exact_current_and_p0_tool_union() -> None:
 
 def test_dashboard_mcp_setup_matches_the_canonical_tool_count() -> None:
     dashboard = (ROOT / "frontend" / "dashboard.html").read_text(encoding="utf-8")
-    expected_label = f"{len(REGISTERED_TOOL_NAMES)} 个工具"
+    expected_label = f"{len(REGISTERED_TOOL_NAMES)} 个固定工具"
 
     assert dashboard.count(expected_label) >= 2
+    assert "You / Them" in dashboard
     assert "15 个工具" not in dashboard
 
 

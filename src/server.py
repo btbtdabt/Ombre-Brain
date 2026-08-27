@@ -8,12 +8,13 @@ DecayEngine / EmbeddingEngine / ImportEngine，把它们注入 tools._runtime �
 web._shared，再从 tools.current.manifest 注册唯一的公共工具清单。
 
 关键行为：
-- 启动后暴露 tools.current.manifest 定义的 current + P0 工具并集。breath
-  保留分级 schema，让简单检索与高级兼容模式都能被客户端稳定发现。
+- 启动后暴露 tools.current.manifest 定义的 current + P0 工具并集；You / Them
+  各按持久开关动态挂载。breath 保留分级 schema，让简单检索与高级兼容模式
+  都能被客户端稳定发现。
 - Dashboard / HTTP 路由全部已拆分到 src/web/<域>.py（每个模块 register(mcp)），
   本文件仅在启动时调用 web.register_all(mcp) 装配；共享依赖见 web/_shared.py
 - 仍保留在本文件：进程启动、引擎初始化、GitHub 后台同步循环、Webhook 推送、
-  MCP Bearer 鉴权中间件、主 `/mcp` 与可选 Letter 镜像 `/mcp-extra` 装配、
+  MCP Bearer 鉴权中间件、主 `/mcp` 与 Letter 镜像 `/mcp-extra` 装配、
   uvicorn 拉起
 
 不做什么（边界）：
@@ -21,8 +22,8 @@ web._shared，再从 tools.current.manifest 注册唯一的公共工具清单。
 - 不写 HTTP 路由处理（全在 web/* 下）；不写 LLM prompt（dehydrator 负责）
 - 不直接读写桶文件（bucket_manager 负责）
 
-对外暴露：主 mcp 实例及 manifest 注册的全部公共工具；mcp_extra 仅镜像同一
-manifest 中的 Letter 工具；HTTP 路由在 src/web/*
+对外暴露：主 mcp 实例及 manifest 注册的全部公共工具，并按开关增加 You / Them；
+          mcp_extra 仅镜像同一 manifest 中的 Letter 工具；HTTP 路由在 src/web/*
 ========================================
 """
 
@@ -49,15 +50,22 @@ from decay_engine import DecayEngine
 from embedding_engine import EmbeddingEngine
 from ombrebrain.storage.embedding_outbox import EmbeddingOutbox
 from ombrebrain.storage.source_store import SourceStore
+from ombrebrain.them import ThemService, ThemStore, ThemToolGate
+from ombrebrain.you import YouService, YouStore, YouToolGate
 from ombrebrain.security.deployment_profile import enforce_mcp_network_guard
 from import_memory import ImportEngine
 from migrate_engine import MigrateEngine
 from current_runtime import RuntimeCollaborators
 from utils import get_version, load_config, setup_logging
-from server_app import build_remote_transport_app as _build_remote_transport_app  # noqa: F401
+from server_app import (
+    build_remote_transport_app as _build_remote_transport_app,  # noqa: F401
+    sync_optional_tool_gate_fail_closed,
+)
 
 # MCP 工具由 declarative manifest 统一注册；本文件只负责进程装配与调用 envelope。
 from tools import _runtime as _tools_runtime
+from tools import them as _t_them
+from tools import you as _t_you
 from tools.current.manifest import (
     EXTRA_TOOL_NAMES,
     P0_TOOL_NAMES,
@@ -190,6 +198,7 @@ try:
         pop_warnings,
         format_warnings_suffix,
         PublicToolError,
+        ToolInputError,
     )
 except ImportError:
     from .errors import (  # type: ignore
@@ -202,6 +211,7 @@ except ImportError:
         pop_warnings,
         format_warnings_suffix,
         PublicToolError,
+        ToolInputError,
     )
 configure_errors_path(config.get("buckets_dir", "buckets"))
 
@@ -241,6 +251,24 @@ current_runtime = RuntimeCollaborators(
     source_store=source_store,
     logger=logger,
 )
+you_service = YouService(
+    store=YouStore(config.get("buckets_dir", "buckets")),
+    bucket_mgr=bucket_mgr,
+    dehydrator=dehydrator,
+    source_store=source_store,
+    logger=logger,
+)
+them_service = ThemService(
+    store=ThemStore(config.get("buckets_dir", "buckets")),
+    bucket_mgr=bucket_mgr,
+    decay_engine=decay_engine,
+    source_store=source_store,
+    config=config,
+    logger=logger,
+)
+# 认识由模型显式写入，没有后台抽取，也就没有可观察的桶变动事件。
+# bucket_mgr 那套 observer 机制已在 3.5.0 删除：3.4.x 拆掉自动派生流水线时
+# 只删了订阅方，发射端空转了一整个大版本，而读代码的人会以为它还能挂钩子。
 
 # --- GitHub Sync / GitHub 同步 ---
 from github_sync import GitHubSync  # type: ignore
@@ -325,7 +353,8 @@ _gh_auto_interval: int = int(_gh_cfg.get("auto_interval_minutes") or 0)
 # host="0.0.0.0" so Docker container's HTTP transport is externally reachable
 # stdio mode ignores host (no network)
 #
-# 主 /mcp 保留全部工具；/mcp-extra 从同一 manifest 镜像 Letter 工具。
+# 主 /mcp 保留 manifest 工具并按开关挂载 You / Them；/mcp-extra 从同一
+# manifest 镜像 Letter 工具。
 # HTTP custom_route 仍只注册在主实例，避免维护第二份 Web 路由。
 # Streamable HTTP 固定返回单个 JSON-RPC 对象并采用无状态请求，兼容不会
 # 保存 Mcp-Session-Id 的客户端，同时不影响 stdio。
@@ -427,6 +456,8 @@ _web_runtime_kwargs.update(
     import_engine=import_engine,
     migrate_engine=migrate_engine,
     github_sync_instance=github_sync_instance,
+    you_service=you_service,
+    them_service=them_service,
     restart_github_auto_task=_restart_github_auto_task,
 )
 _wsh.init_runtime(**_web_runtime_kwargs)
@@ -562,12 +593,30 @@ async def _with_notice(
     3. 异常：捕获后 record OB-E004，响应、持久错误与日志只保留异常类型和
        泛化说明，不能复制异常正文或 traceback。
     4. 任务A：op 非空时，在 entry/ok/err 三处打结构化日志。
+    5. 例外：ToolInputError 原样上抛，见下方注释。
     """
     if op:
         _log_op_entry(op, args or {})
     begin_warnings()
     try:
         result = await coro
+    except ToolInputError as e:
+        # 唯一放行的异常：入参不合法、且工具在任何写入之前就停了。
+        #
+        # 这里必须抛出去而不是转成字符串——MCP 只认异常，把它兜住就等于
+        # 告诉客户端 isError=False，调用方会以为写成功了继续往下走。
+        # 真机复现过：hold(feel=True, domain=...) 返回「domain 固定为 feel」
+        # 却报成功，一个桶都没落库。
+        #
+        # 不记 OB-E004：调用方参数写错不是系统故障，记进去只会淹没真正的错误。
+        # 本次累计的 W/I 提示随失败作废；删除通知不 pop，留给下一次成功调用。
+        if op:
+            _log_op_err(op, e)
+        try:
+            pop_warnings()
+        except Exception:
+            pass
+        raise
     except Exception as e:
         if op:
             _log_op_err(op, e)
@@ -688,6 +737,8 @@ async def _invoke_current_tool(
 # =============================================================
 _tool_runtime_kwargs = current_runtime.tool_runtime_kwargs()
 _tool_runtime_kwargs.update(
+    you_service=you_service,
+    them_service=them_service,
     fire_webhook=_fire_webhook,
     mark_op=_mark_op,
 )
@@ -738,6 +789,30 @@ def _install_extra_tool_surface() -> dict[str, Any]:
 
 
 _extra_registered_tools = _install_extra_tool_surface()
+
+
+# You 与 Them 是仅有的两个动态工具：各自按持久开关在主连接器 /mcp 上
+# 挂载或摘除。manifest 工具固定注册，启用模块后分别增加 you / them。
+#
+# 关掉时必须**完全消失**而不是留一个返回「已关闭」的壳——留着的话，
+# 模块开没开就变成了模型能看见的信息。
+you_tool_gate = YouToolGate(mcp, _t_you.dispatch)
+sync_optional_tool_gate_fail_closed(
+    service=you_service,
+    tool_gate=you_tool_gate,
+    logger=logger,
+    label="You",
+)
+them_tool_gate = ThemToolGate(mcp, _t_them.dispatch)
+sync_optional_tool_gate_fail_closed(
+    service=them_service,
+    tool_gate=them_tool_gate,
+    logger=logger,
+    label="them",
+)
+_wsh.init_runtime(you_tool_gate=you_tool_gate, them_tool_gate=them_tool_gate)
+migrate_engine.attach_you_runtime(you_service, you_tool_gate)
+migrate_engine.attach_them_runtime(them_service, them_tool_gate)
 
 
 # =============================================================
@@ -807,6 +882,7 @@ if __name__ == "__main__":
             embedding_outbox=embedding_outbox,
             embedding_engine=embedding_engine,
             current_schedulers=_current_schedulers,
+            you_service=you_service,
             ensure_ollama_child=_ollama_local.ensure_child_on_boot,
             stop_ollama_child=_ollama_local.stop_child,
             load_tunnel_config=_load_tunnel_config,
@@ -842,7 +918,8 @@ if __name__ == "__main__":
         )
         if transport == "streamable-http":
             logger.info(
-                "MCP /mcp：%s 个工具；/mcp-extra：%s 个信件工具镜像",
+                "MCP /mcp：%s 个固定工具，You / Them 按开关动态显隐；"
+                "/mcp-extra：%s 个信件工具镜像",
                 len(REGISTERED_TOOL_NAMES),
                 len(EXTRA_TOOL_NAMES),
             )
@@ -879,12 +956,12 @@ if __name__ == "__main__":
         elif _mcp_auth_required:
             logger.info("MCP OAuth middleware enabled / MCP OAuth 中间件已启用")
         else:
-            # 安全加固 #7：关掉鉴权 = /mcp 全裸奔，任何能连到端口的人都能读写全部记忆。
+            # 安全加固 #7：关掉鉴权 = 两个 MCP 端点全裸奔，任何能连到端口的人都能读写全部记忆。
             # 从 info 升级为显著 WARNING，避免用户无意识地把大脑暴露到公网。
             logger.warning(
                 "=" * 60 + "\n"
                 "⚠️  MCP 认证已关闭 (mcp_require_auth: false)：/mcp 无需任何令牌即可直连，\n"
-                "    所有记忆工具全部对外开放——任何能访问本端口的人都能读写你的全部记忆。\n"
+                "    全部固定工具及当前已启用的可选工具均对外开放——任何能访问本端口的人都能读写你的全部记忆。\n"
                 f"    本服务进程监听 {_BIND_HOST}，若端口暴露到局域网/公网，请务必用反代鉴权、防火墙\n"
                 "    或仅绑定 127.0.0.1 保护；免鉴权只建议用于已确认的本机回环连接。\n"
                 + "=" * 60
@@ -928,11 +1005,12 @@ if __name__ == "__main__":
             proxy_headers=False,
         )
     elif transport == "stdio":
-        # stdio uses the same embedding outbox lifecycle as HTTP so durable
-        # writes never fall back to blocking provider calls.
+        # stdio 与 HTTP 共用 embedding outbox 和 You 生命周期；工具面仍由 manifest
+        # 固定注册，并按开关动态增加 You / Them。
         _stdio_runtime_lifecycle = RuntimeLifecycle(
             logger=logger,
             embedding_outbox=embedding_outbox,
+            you_service=you_service,
             boot_marker_path=os.path.join(
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                 ".boot_fails",

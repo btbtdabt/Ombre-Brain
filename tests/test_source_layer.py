@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import tools._runtime as rt
+from errors import ToolInputError
 from ombrebrain.storage.source_store import (
     MAX_SOURCE_LINKS,
     MAX_SOURCE_REFS,
@@ -426,12 +427,12 @@ async def test_hold_source_ranges_require_source_content(bucket_mgr, monkeypatch
     monkeypatch.setattr(rt, "decay_engine", Decay())
     monkeypatch.setattr(rt, "mark_op", None)
 
-    result = await hold(
-        content="这条不应该写进去。",
-        title="无原文",
-        source_ranges=[[1, 1]],
-    )
-    assert "source_ranges 需要同时提供 source_content" in result
+    with pytest.raises(ToolInputError, match="source_ranges 需要同时提供 source_content"):
+        await hold(
+            content="这条不应该写进去。",
+            title="无原文",
+            source_ranges=[[1, 1]],
+        )
     assert await bucket_mgr.list_all() == []
 
 
@@ -758,8 +759,8 @@ async def test_title_over_limit_is_rejected_before_hold_writes(bucket_mgr, monke
     monkeypatch.setattr(rt, "decay_engine", Decay())
     monkeypatch.setattr(rt, "mark_op", None)
 
-    result = await hold(content="不能半截标题", title="长" * 121)
-    assert "120" in result
+    with pytest.raises(ToolInputError, match="120"):
+        await hold(content="不能半截标题", title="长" * 121)
     assert await bucket_mgr.list_all() == []
 
 

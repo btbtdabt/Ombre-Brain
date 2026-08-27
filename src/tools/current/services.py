@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from .._common import check_content_size, check_metadata_size, check_query_size
 from ..plan.core import (
     letter_lock_update as p0_letter_lock_update,
     letter_read as p0_letter_read,
@@ -153,19 +152,7 @@ async def letter_write(
     unlock_date: str = "",
 ) -> str:
     """永久保存一封独立信件；可选 none、timed 或 permanent 可见时间锁。"""
-    if error := check_content_size(content):
-        return error
-    if error := check_metadata_size(
-        author=author,
-        user_name=user_name,
-        title=title,
-        date=date,
-        ai_name=ai_name,
-        lock_type=lock_type,
-        unlock_date=unlock_date,
-    ):
-        return error
-    result = await p0_letter_write(
+    return await p0_letter_write(
         author=author,
         content=content,
         user_name=user_name,
@@ -175,7 +162,6 @@ async def letter_write(
         lock_type=lock_type,
         unlock_date=unlock_date,
     )
-    return result
 
 
 async def letter_lock_update(
@@ -201,14 +187,6 @@ async def letter_read(
     date_to: str = "",
 ) -> str:
     """读取独立信件；可按关键词、署名和日期范围过滤，不混入普通 breath。"""
-    if error := check_query_size(query):
-        return error
-    if error := check_metadata_size(
-        author=author,
-        date_from=date_from,
-        date_to=date_to,
-    ):
-        return error
     return await p0_letter_read(
         query=query,
         limit=limit,

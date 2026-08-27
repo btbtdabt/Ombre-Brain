@@ -57,6 +57,10 @@ if TYPE_CHECKING:
     from dehydrator import Dehydrator
     from github_sync import GitHubSync
     from letter_service import LetterService
+    from ombrebrain.them.service import ThemService
+    from ombrebrain.them.tool_gate import ThemToolGate
+    from ombrebrain.you.service import YouService
+    from ombrebrain.you.tool_gate import YouToolGate
 
 logger = logging.getLogger("ombre_brain")
 deletion_requests = None
@@ -188,6 +192,10 @@ migrate_engine = None
 github_sync_instance: "GitHubSync | None" = None
 letter_service = cast("LetterService", None)
 v3_runtime = None
+you_service: "YouService | None" = None
+you_tool_gate: "YouToolGate | None" = None
+them_service: "ThemService | None" = None
+them_tool_gate: "ThemToolGate | None" = None
 
 
 def init(cfg: dict) -> None:

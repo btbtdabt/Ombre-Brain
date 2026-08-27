@@ -69,6 +69,32 @@ async def _emit_breath_hook_webhook(payload: dict[str, Any]) -> None:
     await callback("breath_hook", payload)
 
 
+async def _list_hook_buckets() -> list[dict]:
+    """List ordinary memories and the isolated Letter store once each."""
+
+    buckets = list(await sh.bucket_mgr.list_all(include_archive=False))
+    list_letters = cast(
+        Callable[[], Awaitable[list[dict]]] | None,
+        getattr(sh.bucket_mgr, "list_letters", None),
+    )
+    if not callable(list_letters):
+        return buckets
+
+    seen_ids = {
+        str(bucket.get("id") or "").strip()
+        for bucket in buckets
+        if str(bucket.get("id") or "").strip()
+    }
+    for letter in await list_letters():
+        bucket_id = str(letter.get("id") or "").strip()
+        if bucket_id and bucket_id in seen_ids:
+            continue
+        buckets.append(letter)
+        if bucket_id:
+            seen_ids.add(bucket_id)
+    return buckets
+
+
 def _hook_setting(name: str, default=None):
     hooks_cfg = (getattr(sh, "config", {}) or {}).get("hooks") or {}
     return hooks_cfg.get(name, default)
@@ -258,7 +284,7 @@ def register(mcp) -> None:
 
         try:
             async with _timeout_after(timeout_seconds):
-                all_buckets = await sh.bucket_mgr.list_all(include_archive=False)
+                all_buckets = await _list_hook_buckets()
                 pinned = [
                     bucket for bucket in all_buckets
                     if _truthy(bucket["metadata"].get("pinned"))

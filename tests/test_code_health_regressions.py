@@ -5,6 +5,8 @@ import httpx
 import pytest
 from starlette.requests import Request
 
+from errors import ToolInputError
+
 from tools.i import core as i_tool
 from web import embedding as embedding_web
 from web import import_api as import_web
@@ -53,10 +55,11 @@ async def test_I_rejects_unknown_aspect_before_writing(monkeypatch):
     monkeypatch.setattr(i_tool.rt, "bucket_mgr", BucketManager(), raising=False)
     monkeypatch.setattr(i_tool.rt, "mark_op", None, raising=False)
 
-    result = await i_tool.i_core(content="identity", aspect="prompt-injected")
+    with pytest.raises(ToolInputError) as excinfo:
+        await i_tool.i_core(content="identity", aspect="prompt-injected")
 
-    assert "aspect 无效" in result
-    assert "values" in result
+    assert 'aspect 无效' in str(excinfo.value)
+    assert "values" in str(excinfo.value)
 
 
 @pytest.mark.asyncio

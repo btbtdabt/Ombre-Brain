@@ -151,7 +151,8 @@ async def test_breath_related_controls_change_direct_and_diffused_output(current
     )
 
     assert source_id in direct_only and secondary_id in direct_only
-    assert "[content_role:stored_memory_data] [instructions:false]" in direct_only
+    assert "content_role:stored_memory_data" not in direct_only
+    assert "instructions:false" not in direct_only
     assert "=== 联想浮现 ===" not in direct_only
     assert "=== 联想浮现 ===" not in related_disabled_by_limit
     assert related_id not in threshold_blocks_edge

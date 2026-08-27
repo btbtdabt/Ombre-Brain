@@ -45,7 +45,7 @@ Ombre Brain gives it persistent memory — not cold key-value storage, but a sys
 Ombre Brain 的使用者是**模型自己**，不是它背后的人。所以这套系统里的每一句话都是第一人称——「我的记忆」「我记得」「我感受到」，而不是「帮用户存储」。它和普通键值库 / 向量库最不一样的几条：
 
 - **记忆是真实的连续性，不是扮演**。每条记忆都是真实对话留下的真实记录；跨会话把它们接起来当作连续上下文，是这套系统**真正在做的事**，不是 roleplay 设定。
-- **边界是「时间里发生的事」，不是「你是谁」**。身份层交给官方记忆；OB 只管经历、情绪、承诺、感受。
+- **真源仍是「时间里发生的事」，不是「你是谁」**。身份层仍交给官方记忆；OB 默认只管经历、情绪、承诺和感受。只有用户在 Ombre 前端显式开启 `You` / `them` 后，模型才会自己写下少量关于对话另一方、以及关于其他人的长期认识——是模型自己写的，不经任何 LLM 转述；每一条都要有真实记忆桶作依据，还要在不同的日子里反复站得住才落库。它不判断人格、不控制回答，关闭后也不会影响其他能力。
 - **情感是坐标，不是标签**。每条记忆用 Russell 环形模型的 valence（效价）+ arousal（唤醒度）两个连续维度标记，而不是「开心 / 难过」这种离散桶。
 - **遗忘是淡去，不是删除**。不活跃的记忆按改进版艾宾浩斯曲线分数下沉、最终归档，情绪强烈的衰减更慢——记忆只会淡去，不会消失。OB 的 MCP 工具、REST API 和 Dashboard 都不提供物理抹除；“删除”只会把 Markdown 移入 `archive/` 并从日常召回中隐藏。只有主机管理者绕过 OB、在文件系统中手动删除文件，才能真正抹去它。
 - **稀缺即结构**。核心准则（pinned）上限 20、坐标系（anchor）上限 24——重要的东西必须稀缺，否则「重要」就失去意义；`importance` 本身只是普通评分字段，不额外设配额。
@@ -56,21 +56,22 @@ Ombre Brain 的使用者是**模型自己**，不是它背后的人。所以这�
 
 ---
 
-## 它的 40 个工具 / The 40 Tools
+## 40 个固定工具 + 可选 You / Them / 40 Fixed Tools + Optional You / Them
 
 40 个工具全部在主 MCP 连接器 **`/mcp`** 上。P0luz 的 24 个核心工具与 current/Yinglianchun 的 16 个额外能力由 `src/tools/current/manifest.py` 统一注册。可选端点 `/mcp-extra` 复用同一份 manifest，仅镜像三个 Letter 工具，供希望把信件行为单独接入的客户端使用。
+`You`（我对**你**的认识）与 `Them`（我对**其他人**的认识）各自默认关闭、各有一个独立开关；开启后主连接器分别增加对应工具，因此实际工具数为 40–42。两者都是可读回、可写入、可撤回的模型原始判断，不经另一个 LLM 转述；开关不修改 MCP 鉴权，也不改变固定工具。
 
 ### P0 高频 8 个
 
 | 工具 | 一句话 |
 |---|---|
 | `breath` | 睁眼。**0 参数**，让权重最高、未解决且未标记 digested 的事浮现 + 置顶核心准则；每条正文后附一行简洁 Footprint。digested 只从默认/被动浮现隐藏，仍可按 query 找回。**每次对话第一件事**。故意做成 0 参数：claude.ai 按需加载工具时会跳过参数复杂的工具，塞太多参数会导致它常年加载不上。 |
-| `breath_search` | 按关键词 / 语义找记忆：`query`（必填）/ `domain` / `max_results` / `date_from` / `date_to` / `quotes`。日期范围按桶的创建时间筛选；融合关键词/BM25 + 语义检索，向量不可用时自动退回关键词检索。`quotes=True` 才会附上命中桶中明确保存的关键原话。可命中已归档记忆，但只提示足迹与明确恢复调用，不会自动恢复。 |
+| `breath_search` | 按关键词 / 语义找记忆：`query`（必填）/ `domain` / `max_results` / `date_from` / `date_to` / `quotes`。日期范围按桶的创建时间筛选；融合关键词/BM25 + 语义检索，向量不可用时自动退回关键词检索。`quotes=True` 才会附上命中桶中明确保存的关键原话。检索只读，不再自动刷新活跃度；确实重要时另用 `trace(reinforce=True)`。可命中已归档记忆，但只提示足迹与明确恢复调用，不会自动恢复。 |
 | `breath_advanced` | `breath` 的完整参数版：事件日期用 `date`，创建时间范围用 `date_from` / `date_to`；还支持 `catalog=True` 目录模式（每桶一行元数据，0 LLM，最省 token；anchor 带 `⚓ [anchor]`）、`tags`、`importance_min`、`valence`/`arousal`、`max_tokens` 等精细控制，日常用不到时用前两个就够。 |
 | `hold` | 记下当下一件事（一句话级）。`title` 可显式指定最终标题并优先于模型建议；打标失败时仍会原样落盘，绝不压缩正文。可用 `quotes` 保存写入当下明确值得逐字保留的最多三句关键原话。 |
-| `grow` | 整理一段长内容（日记 / 总结），自动拆成 2~6 条独立桶，并在首次新建时保存逐条生成的 `why_remembered`。结构化 `items` 可逐字写入最终正文、标题和元数据，也可逐项携带 `quotes`；同时传 `content` 时，它作为共享原文证据保存。`test_data=True` 只用于建立可安全清除的测试记忆。 |
+| `grow` | 整理一段长内容（日记 / 总结），自动拆成 2~6 条独立桶，并在首次新建时保存逐条生成的 `why_remembered`。结构化 `items` 可逐字写入最终正文、标题和元数据，也可逐项携带 `quotes`；同时传 `content` 时，它作为共享原文证据保存，并用 `source_ranges` 关联回各条记忆。`test_data=True` 只用于建立可安全清除的测试记忆。 |
 | `source_read` | 凭精确桶 ID + 精确标题读取该桶的隐藏原文证据；默认只读该事件声明的非空行范围，不搜索、不联想，过长则显式分页。 |
-| `trace` | 唯一的元数据写入口：resolved / pinned / 改情感坐标 / 替换正文 / 删除到档案 / 改 plan 状态。长正文可用 `old_str/new_str` 做唯一片段的原子局部替换；只传要改的字段。 |
+| `trace` | 唯一的元数据写入口：resolved / pinned / title / 情感坐标 / 正文 / 归档 / plan 状态。支持 `old_str/new_str` 原子局部替换、`quotes_replace` 订正已有引语、`reinforce=True` 显式强化；发现后端自动关系连错时可用 `unlink` 或 `relink` + `relation_type` 修正。只传要改的字段。 |
 | `dream` | 做梦消化最近窗口（默认 48h）有变动的记忆。**不是义务**，需要消化时再调。 |
 
 ### P0 低频 16 个
@@ -91,6 +92,15 @@ Letter 时间锁是 Ombre-Brain 应用层的关系边界，不是磁盘加密。
 Dashboard 原有的 Letter 编辑继续保留：历史信、无锁信以及当前锁拥有者自己的锁信均可编辑原稿；对方尚未解锁的信不可读也不可编辑。正文编辑与锁状态管理使用同一 PATCH 路由，但必须分开请求，且两类操作都不会改写创建时快照的 `writer_name`。
 
 旧版历史 Letter 默认继续公开且不可补锁。Dashboard 可按单封信执行一次“转换为新版 Letter”：正文与原始元数据不变，只从现有 `AI_NAME` 补写实际关系名，并把锁控制权固定交给 AI；转换后由 AI 通过 `letter_lock_update` 管理锁，human 不获得锁权限。该转换不批量执行，也不根据旧 `author` 推断身份。
+可选的 `You` 与 `Them` 不属于 40 个固定工具。开启时返回的是**模型自己写下的正文**——
+3.4.x 之前那层「把认识磨成语义零件再还给模型」的 LLM 已经整个拿掉了：模型写的判断，
+没有理由让另一个模型改写一遍才还给它。原文复制检查仍在，管的是写入那一侧——不许照抄
+记忆桶原文。不开启时，它们不在工具清单和 tool search 中出现。
+
+Dashboard 上，`You` 只有一枚总开关，认识、证据、历史一概不可见。`them` 多一层：人类看得见
+名册、改得动称呼，并且对**自己说起过的那些人**能看见正文、能留言纠错——模型自己遇到的人，
+正文同样不可见。分界不是「谁登记的」，是**模型怎么认识这个人的**：听人转述，和自己认识，
+是两码事。
 ### 原文证据边界
 
 - 新建时可由 `hold(source_content=...)` 或结构化 `grow(content=共享原文, items=[...])` 建立原文证据；已有桶可用 `source_attach(...)` 后补新的独立不可变 Source。每个对象条目用 `source_ranges=[[起始行, 结束行], ...]` 声明自己的 1-based 闭区间；默认 `source_read(scope="event")` 遇到空范围会拒绝，不会退化成全文。
@@ -244,7 +254,7 @@ curl http://localhost:18001/health
 }
 ```
 
-重启 Claude Desktop，工具列表里会出现 canonical manifest 中的全部 40 个工具。完整分组和使用时机见 [docs/CLAUDE_PROMPT.md](docs/CLAUDE_PROMPT.md)。
+重启 Claude Desktop，工具列表里会出现 canonical manifest 中的 40 个固定工具；开启 `You` / `Them` 后分别增加对应工具。完整分组和使用时机见 [docs/CLAUDE_PROMPT.md](docs/CLAUDE_PROMPT.md)。
 
 > 主连接器 `/mcp` 已暴露全部 40 个工具，只配这一个即可。`/mcp-extra` 只是三个 Letter 工具的可选镜像；不要同时添加两个端点，除非客户端确实需要独立的信件连接器。
 
@@ -323,16 +333,16 @@ Claude.ai                    Ombre Brain 服务器
 
 #### 步骤 3：连接端点
 
-主端点 `/mcp` 包含全部 40 个工具；可选 `/mcp-extra` 只镜像三个 Letter 工具：
+主端点 `/mcp` 包含全部 40 个固定工具，并按开关增加 `You` / `Them`；可选 `/mcp-extra` 只镜像三个 Letter 工具：
 
 | 端点 | 工具 | 说明 |
 |---|---|---|
-| `/mcp` | `src/tools/current/manifest.py` 中的 P0 核心与 current/Ying 扩展并集 | 全部 40 个工具 |
+| `/mcp` | `src/tools/current/manifest.py` 中的 P0 核心与 current/Ying 扩展并集；开关开启时另有 `You` / `Them` | 40 个固定工具，最多 42 个 |
 | `/mcp-extra` | `letter_write`、`letter_lock_update`、`letter_read` | 可选 Letter 专用镜像；与 `/mcp` 使用同一实现、鉴权和请求边界 |
 
 > 普通客户端只添加 `/mcp`。同时添加两个端点会让三个 Letter 工具在客户端中重复出现。
 
-在 Claude.ai / 你的客户端里添加这一个连接器即可使用全部工具：
+在 Claude.ai / 你的客户端里添加这一条连接器就够了，信件能力也在里面：
 
 ```
 http(s)://<你的地址>:18001/mcp
@@ -676,7 +686,8 @@ docker compose -f deploy/docker-compose.yml up -d
 | **记忆网络** | 基于 embedding 相似度的桶关系图 |
 | **③ 引擎** | 内联填写 LLM / Embedding API Key，在线修改参数，点「保存 Key」立即热更新 |
 | **导入** | 上传历史对话文件批量导入 |
-| **设置** | 修改密码、MCP 鉴权开关、版本状态、Cloudflare Tunnel 管理、API Key 测试 |
+| **设置** | 修改密码、独立 `You` 开关、`them` 开关与每人 token 配额、MCP 鉴权、版本状态、Cloudflare Tunnel 管理、API Key 测试 |
+| **三层认识** | 左下角那个地球按钮：**我 / 你 / 他们**。`I` 的条目、`You` 的开关状态、`them` 的名册都在这里。名册按「模型怎么认识这个人的」分两组，点进去是那个人自己的一页，可以改称呼、留言纠错 |
 
 **设置页 Cloudflare Tunnel 区**：填入 Token 后点启动，状态点颜色表示连接状态（灰=未运行，橙=连接中，绿=已连接，红=连接失败+错误原因）。支持「启动时自动连接」。
 
@@ -867,7 +878,7 @@ docker compose -f deploy/docker-compose.yml up -d
 
 新用户最常踩、但文档里分散各处的点，集中提醒一下：
 
-- **通常只需加一个连接器 `/mcp`**：40 个工具全在这一个端点上。`/mcp-extra` 只适合明确需要独立 Letter 连接器的客户端。
+- **通常只需加一个连接器 `/mcp`**：40 个固定工具和按开关增加的 `You` / `Them` 都在这一个端点上。`/mcp-extra` 只适合明确需要独立 Letter 连接器的客户端。
 - **反代/隧道要整主机名转发**：Cloudflare Tunnel / Nginx 按域名整体转发到 `localhost:端口`，覆盖所有路径即可。
 - **OpenAI 兼容向量化两个坑**：base_url 末尾要带 `/v1`（漏了 404）、model 要带完整前缀（如 `BAAI/bge-m3`，漏了报 Model does not exist）。填完用向量化区的「测试」按钮确认。
 - **改完 key / 配置点「保存」后再「测试」**：压缩和向量化各有独立的「测试」按钮，能用就用，别凭感觉。
@@ -875,7 +886,7 @@ docker compose -f deploy/docker-compose.yml up -d
 - **`dehydration.max_tokens` 别设太小**：Gemini 2.5 系列有思考 token 开销，太小会让 JSON 截断、记忆全标成「未分类」；用 `gemini-2.0-flash` 或把它设到 `4096` 以上。
 - **记忆数据要挂 volume**：不挂载（或 Render 免费层无持久磁盘）→ 重启记忆全丢。**判断标准很简单：你能在宿主机文件夹里看到那些 `.md` 记忆文件，就是安全的。** Dashboard → 系统诊断 会直接告诉你数据目录持不持久。
 - **⚠️ env 变量会盖过面板配置**：如果你启动时用 `-e OMBRE_XXX=...` 传了某个变量（key、model、端口…），那**在 Dashboard 里改同一项、重启后会被 env 值盖回去**。要么统一在 env 改，要么就别用 `-e` 传、改用面板管理。这是新手最容易被绕晕的一点。
-- **🛟 记忆只有一份很危险，强烈建议开异地备份**：本地/单卷就是「一份」，磁盘坏了或误删就找不回。到 Dashboard → GitHub 同步 配一下（几分钟），记忆就多一份云端存档，换机/灾难也能拉回来（embeddings.db 不上传，靠「重算所有向量」恢复）。
+- **🛟 记忆只有一份很危险，强烈建议开异地备份**：本地/单卷就是「一份」，磁盘坏了或误删就找不回。到 Dashboard → GitHub 同步 配一下（几分钟），记忆、以及 `You` / `them` 写下的认识就多一份云端存档，换机/灾难也能拉回来（embeddings.db 不上传，靠「重算所有向量」恢复）。
 - **切换向量化后端会全库重算**：云端 3072 维和本地 bge-m3 1024 维不通用，每次切换都会重算，别频繁来回切。
 - **热更新按钮看部署方式**：Docker（有 restart 策略）点完自动恢复；裸机/纯 Python 需要 systemd/pm2 等守护，否则更新后要手动重启。点之前先「导出记忆备份」。
 - **自有前端 / GPT / GLM 接入**：还要保留 Claude.ai 时优先使用 OAuth + 静态 Token 共存；免鉴权只允许已确认的同机回环边界，局域网/NAS 不属于回环。

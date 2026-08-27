@@ -132,7 +132,6 @@ async def test_system_diagnostics_reports_missing_ai_configuration(monkeypatch, 
                 "            return fn",
                 "        return deco",
                 "mcp = FakeMCP()",
-                "mcp_extra = FakeMCP()",
                 "@mcp.tool()",
                 "async def breath():",
                 "    pass",
@@ -148,10 +147,10 @@ async def test_system_diagnostics_reports_missing_ai_configuration(monkeypatch, 
                 "@mcp.tool()",
                 "async def dream():",
                 "    pass",
-                "@mcp_extra.tool()",
+                "@mcp.tool()",
                 "async def pulse():",
                 "    pass",
-                "@mcp_extra.tool()",
+                "@mcp.tool()",
                 "async def release():",
                 "    pass",
             ]
@@ -383,6 +382,17 @@ def test_public_tool_diagnostics_detect_live_registry_drift():
     assert snapshot["matches_manifest"] is False
     assert "hold" in snapshot["missing_tool_names"]
     assert snapshot["unexpected_tool_names"] == ["unexpected_tool"]
+
+
+def test_public_tool_diagnostics_accept_enabled_dynamic_tools():
+    snapshot = system._read_public_tool_specs(
+        [*REGISTERED_TOOL_NAMES, "You", "Them"]
+    )
+
+    assert snapshot["matches_manifest"] is True
+    assert snapshot["missing_tool_names"] == []
+    assert snapshot["dynamic_tool_names"] == ["Them", "You"]
+    assert snapshot["unexpected_tool_names"] == []
 
 
 def test_writable_probe_uses_unique_files_and_always_cleans_up(monkeypatch, tmp_path):

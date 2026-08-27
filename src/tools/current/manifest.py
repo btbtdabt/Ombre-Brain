@@ -153,6 +153,7 @@ P0_TOOL_NAMES = (
 
 COMPATIBILITY_TOOL_NAMES = ("darkroom_status", "darkroom_release", "dream")
 EXTRA_TOOL_NAMES = ("letter_write", "letter_lock_update", "letter_read")
+DYNAMIC_TOOL_NAMES = ("You", "Them")
 
 
 TOOL_MANIFEST = (
@@ -292,6 +293,7 @@ register_tools = register_current_tools
 __all__ = [
     "COMPATIBILITY_TOOL_NAMES",
     "CURRENT_TOOL_NAMES",
+    "DYNAMIC_TOOL_NAMES",
     "EXTRA_TOOL_NAMES",
     "P0_TOOL_NAMES",
     "REGISTERED_TOOL_NAMES",

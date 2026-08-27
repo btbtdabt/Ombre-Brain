@@ -7,12 +7,18 @@ import re
 import uuid
 from typing import Any
 
+from errors import ToolInputError, llm_step_failed_error
 from entity_edges import extract_entity_edges_from_bucket
-from ombrebrain.storage.quote_store import normalize_quotes
+from ombrebrain.storage.media_store import MediaPersistenceError
 from profile_facts import profile_key
 from runtime_values import age_hours_since
 from self_anchor import is_self_anchor_bucket
-from utils import parse_human_date_reference, strip_human_date_references, strip_wikilinks
+from utils import (
+    normalize_memory_title,
+    parse_human_date_reference,
+    strip_human_date_references,
+    strip_wikilinks,
+)
 
 from .. import _runtime as rt
 from .._common import (
@@ -34,7 +40,7 @@ from ..breath.feel import surface_feels
 from ..dream import dispatch as p0_dream_dispatch
 from ..grow.core import grow_items as p0_grow_items
 from ..grow.retry_guard import request_fingerprint, run_once
-from ..hold import _prepare_source_refs
+from ..hold import _prepare_quotes, _prepare_source_refs
 from .._relation_link import link_new_bucket
 from ..trace import dispatch as p0_trace_dispatch
 from ._helpers import (
@@ -449,7 +455,7 @@ async def breath_search(
     date_to: str = "",
     quotes: bool = False,
 ) -> str:
-    """按关键词或语义检索记忆，逐字返回当前正文。domain 可限定主题域，date_from/date_to 按创建时间限定范围，max_results 控制条数。quotes=True 时，直接命中的桶若保存过关键原话，会把引语附在正文后；默认不返回引语。"""
+    """按关键词或语义检索记忆，逐字返回当前正文。domain 可限定主题域，date_from/date_to 按创建时间限定范围，max_results 控制条数。quotes=True 只附加写入时明确选中的关键引语，不是原文或全文入口；默认不返回引语。"""
     return await breath(
         query=query,
         domain=domain,
@@ -629,29 +635,32 @@ async def _create_current_bucket(
     quotes: list[dict] | None = None,
 ) -> str:
     manager = require_runtime("bucket_mgr")
-    bucket_id = await manager.create(
-        content=content,
-        tags=tags,
-        importance=importance,
-        domain=domains,
-        valence=valence,
-        arousal=arousal,
-        name=name or None,
-        bucket_type=bucket_type,
-        pinned=pinned,
-        date=date or None,
-        media=media,
-        why_remembered=why_remembered,
-        meaning=meaning,
-        test_data=test_data,
-        triggered_by=triggered_by,
-        source_tool=source_tool,
-        grow_batch_id=grow_batch_id,
-        source_refs=source_refs,
-        quotes=quotes,
-        allow_embedding_fallback=True,
-        extra_metadata=extra_metadata,
-    )
+    try:
+        bucket_id = await manager.create(
+            content=content,
+            tags=tags,
+            importance=importance,
+            domain=domains,
+            valence=valence,
+            arousal=arousal,
+            name=name or None,
+            bucket_type=bucket_type,
+            pinned=pinned,
+            date=date or None,
+            media=media,
+            why_remembered=why_remembered,
+            meaning=meaning,
+            test_data=test_data,
+            triggered_by=triggered_by,
+            source_tool=source_tool,
+            grow_batch_id=grow_batch_id,
+            source_refs=source_refs,
+            quotes=quotes,
+            allow_embedding_fallback=True,
+            extra_metadata=extra_metadata,
+        )
+    except MediaPersistenceError as exc:
+        raise ToolInputError(str(exc)) from exc
     bucket = await manager.get(bucket_id)
     if bucket:
         refresh_bucket_indexes(bucket)
@@ -681,37 +690,63 @@ async def hold(
     source_ranges: list | None = None,
     quotes: list | None = None,
 ) -> str:
-    """写一条长期记忆。单个事实/承诺/偏好用 hold；旧记忆的新感受用 comment_bucket；悄悄话用 whisper=True。date 可传事件日期；title 可选，传了就用给定标题，不传则自动生成。media 可传服务器上传临时目录内的路径，或 data_base64+filename 项。普通记忆的 domain 由系统自动判断；维护特殊桶时可显式传入。显式 valence/arousal 会覆盖自动情绪。普通记忆 content 的最小写入就是正文；需要结构化时按需使用 ### moment、### original、### reflection，reflection 使用“我……”第一人称。长期回应变化写进 reflection，到时提醒用 reminder_create。feel=True/whisper=True 时 content 使用第一人称正文。quotes 保存当下明确值得逐字保留的关键原话，可传字符串列表，或带 text/speaker/at 的对象列表；最多 3 句、每句 100 字，超限整次写入会被拒绝。引语仅在显式 breath_search(quotes=True) 时返回。"""
+    """写一条长期记忆。单个事实/承诺/偏好用 hold；旧记忆的新感受用 comment_bucket；悄悄话用 whisper=True。date 可传事件日期；title 可选，传了就用给定标题，不传则自动生成。media 可传服务器上传临时目录内的路径，或 data_base64+filename 项。普通记忆的 domain 由系统自动判断；维护特殊桶时可显式传入。显式 valence/arousal 会覆盖自动情绪。普通记忆 content 的最小写入就是正文；需要结构化时按需使用 ### moment、### original、### reflection，reflection 使用“我……”第一人称。长期回应变化写进 reflection，到时提醒用 reminder_create。feel=True/whisper=True 时 content 使用第一人称正文。quotes 只保存当下明确值得逐字保留的关键原话，可传字符串列表，或带 text/speaker/at 的对象列表；最多 3 句、每句 100 字，上限不是配额，拿不准就别放，超限整次写入会被拒绝。引语仅在显式 breath_search(quotes=True) 时返回。"""
     await ensure_decay_started()
+    try:
+        title = normalize_memory_title(title)
+    except ValueError as exc:
+        raise ToolInputError(str(exc)) from exc
     content = str(content or "").strip()
     if not content:
-        return "内容为空，无法存储。"
+        raise ToolInputError("内容为空，无法存储。")
     if error := check_content_size(content):
-        return error
-    if contract_error := memory_write_contract_error(
-        content, feel_only=bool_value(feel) or bool_value(whisper)
-    ):
-        return f"写入被拒绝：{contract_error}"
-
+        raise ToolInputError(error)
     extra_tags = split_csv(tags)
     requested_domains = split_csv(domain)
     why_remembered = str(why_remembered or "").strip()[:500]
     meaning = str(meaning or "").strip()
+    if metadata_error := check_metadata_size(
+        tags=tags,
+        title=title,
+        source_bucket=source_bucket,
+        why_remembered=why_remembered,
+        meaning=meaning,
+        domain=domain,
+    ):
+        raise ToolInputError(metadata_error)
     test_data = bool_value(test_data, False)
     if test_data and (
         bool_value(pinned) or bool_value(feel) or bool_value(whisper)
     ):
-        return "测试数据不能创建为 pinned、feel 或 whisper；请使用普通测试桶。"
+        raise ToolInputError(
+            "测试数据不能创建为 pinned、feel 或 whisper；请使用普通测试桶。"
+        )
+    if bool_value(feel) and requested_domains:
+        raise ToolInputError("feel 的 domain 固定为 feel，不能显式覆盖。")
     requested_valence = float(valence) if isinstance(valence, (int, float)) and 0 <= valence <= 1 else None
     requested_arousal = float(arousal) if isinstance(arousal, (int, float)) and 0 <= arousal <= 1 else None
     source_id = coerce_id(source_bucket)
-    source_refs, source_error = _prepare_source_refs(source_content, source_ranges)
-    if source_error:
-        return source_error
-    try:
-        quote_items = normalize_quotes(quotes) if quotes not in (None, "", []) else []
-    except ValueError as exc:
-        return f"引语无效，未创建任何桶：{exc}"
+    if bool_value(whisper) and source_id:
+        raise ToolInputError(
+            "whisper 不需要 source_bucket；有源记忆的感受请用 comment_bucket。"
+        )
+    if bool_value(feel) and not source_id:
+        raise ToolInputError(
+            "feel 必须指向一条原始记忆（source_bucket 不能为空）。请先用 "
+            "breath_search(query=...) 找到那条桶的 bucket_id；无源感受请改用 "
+            "whisper=True。"
+        )
+    if contract_error := memory_write_contract_error(
+        content, feel_only=bool_value(feel) or bool_value(whisper)
+    ):
+        raise ToolInputError(f"写入被拒绝：{contract_error}")
+    if media and str(source_content or "").strip():
+        try:
+            await require_runtime("bucket_mgr").media_store.precheck(media)
+        except MediaPersistenceError as exc:
+            raise ToolInputError(str(exc)) from exc
+    source_refs = _prepare_source_refs(source_content, source_ranges)
+    quote_items = _prepare_quotes(quotes) or []
 
     async def create_whisper() -> str:
         bucket_id = await _create_current_bucket(
@@ -733,17 +768,15 @@ async def hold(
         return f"🫧whisper→{bucket_id}"
 
     if bool_value(whisper):
-        if source_id:
-            return "whisper 不需要 source_bucket；有源记忆的感受请用 comment_bucket。"
         return await create_whisper()
 
     if bool_value(feel):
         if source_id:
             if not valid_id(source_id):
-                return "source_bucket 无效。"
+                raise ToolInputError("source_bucket 无效。")
             manager = require_runtime("bucket_mgr")
             if not await manager.get(source_id):
-                return f"源记忆不存在: {source_id}"
+                raise ToolInputError(f"源记忆不存在: {source_id}")
             if why_remembered or meaning or quote_items:
                 feel_valence = (
                     requested_valence if requested_valence is not None else 0.5
@@ -784,7 +817,7 @@ async def hold(
                 touch=True,
             )
             if not entry:
-                return "年轮写入失败。"
+                raise ToolInputError("年轮写入失败。")
             source_updates: dict[str, Any] = {}
             if media:
                 source_updates["media_append"] = media
@@ -797,7 +830,7 @@ async def hold(
             if source:
                 refresh_bucket_indexes(source)
             return f"年轮→{source_id}#{entry['id']}"
-        return await create_whisper()
+        raise ToolInputError("feel 写入缺少有效的 source_bucket。")
 
     analysis = await analyze_content(content)
     domains = requested_domains or analysis["domain"]
@@ -938,18 +971,20 @@ async def _grow_once(
     content = str(content or "").strip()
     if items is not None:
         if bool_value(auto) or str(source or "").strip() or str(title or "").strip():
-            return "items 预拆分模式不能同时传 auto、source 或 title。"
+            raise ToolInputError(
+                "items 预拆分模式不能同时传 auto、source 或 title。"
+            )
         if error := check_grow_items_payload(items):
-            return error
+            raise ToolInputError(error)
         return await p0_grow_items(
             items,
             source_content=content,
             test_data=bool_value(test_data),
         )
     if not content:
-        return "内容为空，无法整理。"
+        raise ToolInputError("内容为空，无法整理。")
     if error := check_grow_input_size(content):
-        return error
+        raise ToolInputError(error)
 
     source = str(source or "").strip()
     if not source and re.match(r"^【\d{4}-\d{2}-\d{2} \d{2}:\d{2}】\s*\n", content):
@@ -973,7 +1008,7 @@ async def _grow_once(
         gate_prefix = formatted + "\n"
 
     if contract_error := memory_write_contract_error(content):
-        return f"{gate_prefix}写入被拒绝：{contract_error}"
+        raise ToolInputError(f"{gate_prefix}写入被拒绝：{contract_error}")
 
     batch_id = f"g_{uuid.uuid4().hex[:12]}"
     structured = bool(re.search(r"(?m)^\s{0,3}#{2,6}\s+(?:moment|original|reflection)\s*$", content, re.I))
@@ -993,43 +1028,22 @@ async def _grow_once(
     try:
         items = await dehydrator.digest(content)
     except Exception as exc:
-        return f"{gate_prefix}长内容摘记失败: {exc}"
+        rt.logger.error(
+            "Diary digest failed / 日记整理失败: err_type=%s detail=hidden",
+            type(exc).__name__,
+        )
+        raise llm_step_failed_error(
+            "日记拆分",
+            api_available=getattr(dehydrator, "api_available", True),
+        ) from exc
     if not isinstance(items, list) or not items:
-        return f"{gate_prefix}内容为空或整理失败。"
-
-    results: list[str] = []
-    created = 0
-    for item in items:
-        if not isinstance(item, dict):
-            results.append("⚠️未命名")
-            continue
-        item_content = str(item.get("content") or "").strip()
-        if not item_content:
-            results.append(f"⚠️{item.get('name', '未命名')}")
-            continue
-        if error := check_content_size(item_content):
-            results.append(f"⚠️{item.get('name', '未命名')}: {error}")
-            continue
-        if contract_error := memory_write_contract_error(item_content):
-            results.append(f"⚠️{item.get('name', '未命名')}: {contract_error}")
-            continue
-        try:
-            bucket_id, display_name = await _grow_create_item(
-                item,
-                batch_id=batch_id,
-                test_data=bool_value(test_data),
-            )
-        except Exception:
-            results.append(f"⚠️{item.get('name', '未命名')}")
-        else:
-            results.append(f"📝{display_name}")
-            created += 1
-            asyncio.create_task(check_duplicate_for(bucket_id, item_content))
-    asyncio.create_task(check_plan_resolution(content))
-    return (
-        f"{gate_prefix}{len(items)}条|新{created}合0 batch:{batch_id}\n"
-        + "\n".join(results)
+        raise ToolInputError("内容为空或整理失败。")
+    result = await p0_grow_items(
+        items,
+        source_content=content,
+        test_data=bool_value(test_data),
     )
+    return gate_prefix + result
 
 
 async def grow(
@@ -1242,6 +1256,7 @@ async def _can_mark_anchor(
 async def trace(
     bucket_id: str,
     name: str = "",
+    title: str = "",
     domain: str = "",
     valence: float = -1,
     arousal: float = -1,
@@ -1271,11 +1286,16 @@ async def trace(
     deletion_request_id: str = "",
     deletion_decision: str = "",
     deletion_ai_reason: str = "",
+    unlink: str = "",
+    relink: str = "",
+    relation_type: str = "",
+    quotes_replace: list | None = None,
+    reinforce: bool = False,
 ) -> str:
-    """修改已有记忆，不创建新桶。tags/domain/content 是替换；old_str/new_str 精确修改正文片段；protected=1 保护但不作为核心准则强制浮现；deletion_request_id/deletion_decision 处理人工删除审批；restore 恢复归档桶；date 可改事件日期；meaning/media 的 append 是追加、replace 是整体替换；hard_delete 只清理明确标记的测试桶。改前先 read_bucket。"""
+    """修改已有记忆，不创建新桶。tags/domain/content 是替换；old_str/new_str 精确修改正文片段；unlink/relink 修正已有关系；quotes_replace 只能订正或删除已有引语，不能补录；reinforce=True 显式强化一次。protected=1 保护但不作为核心准则强制浮现；deletion_request_id/deletion_decision 处理人工删除审批；restore 恢复归档桶；date 可改事件日期；meaning/media 的 append 是追加、replace 是整体替换；hard_delete 只清理明确标记的测试桶。改前先 read_bucket。"""
     bucket_id = coerce_id(bucket_id)
     if not bucket_id:
-        return "请提供有效的 bucket_id。"
+        raise ToolInputError("请提供有效的 bucket_id。")
 
     if deletion_request_id or deletion_decision:
         result = await require_runtime("deletion_requests").decide(
@@ -1297,14 +1317,27 @@ async def trace(
     hard_delete = bool_value(hard_delete, False)
     restore = bool_value(restore, False)
     date = str(date or "").strip()
+    has_p0_only_edit = bool(
+        str(unlink or "").strip()
+        or str(relink or "").strip()
+        or str(relation_type or "").strip()
+        or quotes_replace is not None
+        or bool_value(reinforce, False)
+    )
+    if (anchor in (0, 1) or date) and has_p0_only_edit:
+        raise ToolInputError(
+            "anchor/date 与关系修正、引语修正或 reinforce 必须分开调用。"
+        )
     if hard_delete and (anchor in (0, 1) or date):
-        return "hard_delete 不能与 anchor 或 date 修改同时执行。"
+        raise ToolInputError("hard_delete 不能与 anchor 或 date 修改同时执行。")
     if delete and (anchor in (0, 1) or date):
-        return "delete 归档不能与 anchor 或 date 修改同时执行。"
+        raise ToolInputError("delete 归档不能与 anchor 或 date 修改同时执行。")
     if (restore or old_str or new_str is not None) and (anchor in (0, 1) or date):
-        return "restore 或正文片段修改不能与 anchor 或 date 修改同时执行。"
+        raise ToolInputError(
+            "restore 或正文片段修改不能与 anchor 或 date 修改同时执行。"
+        )
     if protected in (0, 1) and (anchor in (0, 1) or date):
-        return "protected 修改不能与 anchor 或 date 修改同时执行。"
+        raise ToolInputError("protected 修改不能与 anchor 或 date 修改同时执行。")
 
     # P0 owns the common trace path: it carries quota locking, plan history,
     # plan-resolution cascade, meaning/media updates, and guarded test erasure.
@@ -1313,6 +1346,7 @@ async def trace(
         result = await p0_trace_dispatch(
             bucket_id=bucket_id,
             name=name,
+            title=title,
             domain=domain,
             valence=valence,
             arousal=arousal,
@@ -1337,6 +1371,11 @@ async def trace(
             restore=restore,
             old_str=old_str,
             new_str=new_str,
+            unlink=unlink,
+            relink=relink,
+            relation_type=relation_type,
+            quotes_replace=quotes_replace,
+            reinforce=reinforce,
         )
         if (delete and result.startswith("已将记忆桶存入档案")) or (
             hard_delete and result.startswith("已永久删除测试桶")
@@ -1365,6 +1404,11 @@ async def trace(
     updates: dict[str, Any] = {}
     if name:
         updates["name"] = name
+    if title:
+        try:
+            updates["title"] = normalize_memory_title(title)
+        except ValueError as exc:
+            raise ToolInputError(str(exc)) from exc
     if domain:
         updates["domain"] = split_csv(domain)
     if isinstance(valence, (int, float)) and 0 <= valence <= 1:
@@ -1393,7 +1437,7 @@ async def trace(
         updates["digested"] = bool(digested)
     if content:
         if error := check_content_size(content):
-            return error
+            raise ToolInputError(error)
         updates["content"] = content
     if str(date or "").strip():
         updates["date"] = str(date).strip()

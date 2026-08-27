@@ -154,7 +154,9 @@ class PublicToolDesignContract:
                     "source_detach",
                     "source_read",
                     "source_restore",
+                    "them",
                     "trace",
+                    "you",
                 }
             ),
             compatibility_public_names={
@@ -318,6 +320,6 @@ def _normalize_tool_key(name: str) -> str:
 
 
 def _display_tool_name(key: str) -> str:
-    if key == "i":
-        return "I"
+    if key in {"i", "you"}:
+        return key.title()
     return key

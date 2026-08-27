@@ -72,6 +72,45 @@ async def test_trace_mcp_schema_dispatch_and_log_include_protected(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_trace_mcp_exposes_and_forwards_p0_correction_fields(monkeypatch):
+    import server
+    from tools.current import memory as current_memory
+
+    seen = {}
+
+    async def fake_dispatch(**kwargs):
+        seen.update(kwargs)
+        return "corrected"
+
+    monkeypatch.setattr(current_memory, "p0_trace_dispatch", fake_dispatch)
+    tool = server.mcp._tool_manager.get_tool("trace")
+    listed = next(item for item in await server.mcp.list_tools() if item.name == "trace")
+    fields = {
+        "title",
+        "unlink",
+        "relink",
+        "relation_type",
+        "quotes_replace",
+        "reinforce",
+    }
+
+    assert tool is not None
+    assert fields <= set(listed.inputSchema["properties"])
+    assert fields <= set(tool.fn_metadata.arg_model.model_fields)
+
+    output = await tool.run(
+        {
+            "bucket_id": "bucket-1",
+            "reinforce": True,
+        }
+    )
+
+    assert output == "corrected"
+    assert seen["title"] == ""
+    assert seen["reinforce"] is True
+
+
+@pytest.mark.asyncio
 async def test_trace_mcp_rejects_unknown_patch_argument_instead_of_ignoring_it():
     import server
 
