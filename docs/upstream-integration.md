@@ -8,7 +8,7 @@ verification evidence.
 
 ## Recorded Baselines
 
-- P0luz primary baseline: `v3.2.0` / `6f7335d`
+- P0luz primary baseline: `v3.6.3` / `d0d448f`
 - Yinglianchun secondary baseline: `284c9c7`
 - Historical deployed root runtime: `8e68a7d`
 - P0luz-base production cutover: `c806f78`
@@ -100,13 +100,12 @@ fixed access token remains a resource-bound compatibility credential.
 
 ## Integration Batch Ledger
 
-### 2026-08-26 P0luz 3.3.0 through 3.6.3 integration candidate
+### 2026-08-26 P0luz 3.3.0 through 3.6.3 integration
 
-This batch merges the complete P0luz range `6f7335d..d0d448f`. The recorded
-P0luz baseline remains at `6f7335d` until the exact candidate commit passes
-isolated staging; this entry will advance it after that verification. The
-Yinglianchun `main` tip is still `284c9c7`, so there are no newer secondary
-commits in this batch.
+This batch merges the complete P0luz range `6f7335d..d0d448f`. The exact merge
+commit `ae14351546a6e53dff467e383f6862c0a976e580` passed isolated VPS staging,
+so the recorded P0luz baseline advances to `d0d448f`. The Yinglianchun `main`
+tip is still `284c9c7`, so there are no newer secondary commits in this batch.
 
 | Source commit(s) | Disposition | Evidence |
 | --- | --- | --- |
@@ -161,8 +160,20 @@ Local candidate verification:
   whole-tree Pyright debt audit improved from 349 to 337 errors without widening
   ignores. The Docker image builds and reports healthy; the authenticated
   main/extra MCP integration suite passes **109 tests**, and the isolated
-  first-run Web/Dashboard/Letter flow passes end to end. Staging and production
-  evidence follow before this candidate advances the baseline.
+  first-run Web/Dashboard/Letter flow passes end to end.
+- VPS staging used image revision `ae14351546a6e53dff467e383f6862c0a976e580`
+  with copied, isolated data. All 12 copied SQLite databases passed
+  `PRAGMA quick_check`; the persisted runtime reseeded from 3.2.0 to 3.6.3 and
+  matched the image fingerprint. Brain and Gateway remained healthy with zero
+  restarts and no error-level log entries.
+- Staging exposed 40 fixed MCP tools plus the exact three-tool `/mcp-extra`
+  Letter mirror; `pulse` completed without an MCP error. Claude Opus 5 OpenAI
+  compatibility, native Opus 5 forced tool use with explicit 1h prompt cache,
+  and native Gemini 3.7 all returned 200. Embedding and SiliconFlow reranking
+  returned 200. A non-diagnostic final reply added one Persona exchange, while
+  diagnostic probes correctly skipped Persona persistence.
+- Production cutover and public production-alignment verification remain
+  pending; advancing the source baseline does not claim those deployment steps.
 
 ### 2026-08-20 cross-upstream tool contract parity audit
 
