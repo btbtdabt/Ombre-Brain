@@ -174,6 +174,49 @@ OMBRE_CHATGPT_OAUTH_PUBLIC_BASE_URL=https://brain.example.com
 
 ## 7. Updates And Backups
 
+### Tunnel security release (October 2026)
+
+The connector image and build-time binary download are pinned to cloudflared
+`2026.10.3`, including per-architecture binary checksums. This addresses the
+[eMudhra certificate incident](https://blog.cloudflare.com/emudhra-certificate-compromise/).
+Restarting an existing container with an older image does not apply this fix.
+The bundled binary pin applies to future application builds; do not restart or
+rebuild Brain/Gateway solely to replace the separate production connector.
+
+For a rolling connector-only upgrade:
+
+1. Verify the effective tunnel environment and all ingress origins without
+   printing credentials. Preserve the old image ID and existing secret files.
+2. Pull the pinned image and verify its version before connecting it. Start a
+   temporary replica with the same effective environment and Docker network.
+   A replica of the same tunnel immediately may receive production traffic; it
+   is a canary, not isolated staging. Publish any temporary metrics port only
+   on host loopback.
+3. Require `/ready` success and registered edge connections, then check every
+   configured origin from the replica's network. Readiness alone does not prove
+   origin reachability. Do not disable TLS verification to work around a newly
+   distrusted origin certificate.
+4. Replace only the connector with the tested, pushed Compose configuration:
+
+   ```bash
+   docker compose -f compose.cloudflare.yml up -d --no-deps --no-build --pull never --timeout 45 cloudflared
+   ```
+
+5. Verify the permanent connector and all public routes before gracefully
+   stopping the temporary replica (allow at least 45 seconds). Check public
+   routes again after it stops. Confirm Brain/Gateway container IDs and start
+   times are unchanged. Existing long-lived connections on a stopped replica
+   may need to reconnect even while new requests remain available.
+
+Do not use project-wide `down`, `up`, image pruning, or `--remove-orphans` for
+this operation. Docker Compose still recognizes a renamed old container by its
+labels, so renaming alone does not preserve a rollback container. The connector
+has no data mounts; retain its old image and unchanged configuration instead.
+Use a vulnerable old image only for a brief emergency rollback, not as a
+long-term replica.
+
+See the [official update guide](https://developers.cloudflare.com/tunnel/guides/update-cloudflared/).
+
 Use the repo update script with the Cloudflare compose file:
 
 ```bash

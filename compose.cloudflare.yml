@@ -53,9 +53,10 @@ services:
       - /srv/ombre-brain/config.yaml:/app/config.yaml:ro
 
   cloudflared:
-    image: cloudflare/cloudflared:latest
+    image: cloudflare/cloudflared:2026.10.3
     container_name: ombre-cloudflared
     restart: unless-stopped
+    stop_grace_period: 45s
     command: ["tunnel", "--no-autoupdate", "--loglevel", "info", "run"]
     env_file:
       - cloudflare.env

@@ -36,12 +36,12 @@ _ARCH_MAP = {
 # Pin both the release and the per-architecture artifact digest.  Using the
 # GitHub ``latest`` redirect made otherwise identical Docker builds fetch
 # different, unauthenticated bytes over time.
-_CLOUDFLARED_VERSION = "2026.7.1"
+_CLOUDFLARED_VERSION = "2026.10.3"
 _SHA256 = {
-    "386": "8452c2b93f2bfa89f1249bceaec128c90424e25a6ef600f57d92b1fbd0cb502f",
-    "amd64": "79a0ade7fc854f62c1aaef48424d9d979e8c2fcd039189d24db82b84cd146be1",
-    "arm": "17cedcb83d8239c5f81f6d57b7d50a384f0d57fd523af2763f47ac6cade77bf9",
-    "arm64": "18f2c9bfc7a67a971bd96f1a5a1935def3c1e52aa386626f1566f04e9b5478d6",
+    "386": "7c533230928eae6443d6d87dce16e0af67fa1f60fb56860dca4e09883a8ee394",
+    "amd64": "053b80b0a23031a038fdbf3c073f59f82b8f1f152aa67971d7383ffafc0dbab0",
+    "arm": "76f35faae119881ddf766b61baa9e27803aea6bea7111ed4170ed1b7a5c8637e",
+    "arm64": "89297ebfb9e8c99c0dc013a1140601453cf3798d8306c5591651f4a3f5210be8",
 }
 _MAX_DOWNLOAD_BYTES = 128 * 1024 * 1024
 
